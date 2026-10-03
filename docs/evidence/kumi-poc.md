@@ -1,5 +1,10 @@
 # Kumi POC verification
 
+> A dated record of how Kumi was verified while it was built, 27–30 September 2026: Kumi 0.x to 1.2
+> on bridges 1.0.1 to 1.0.63, Live 12.4.15b4 and b5 on macOS. It describes the code as it was then, not
+> as it is now; the raw logs it mentions were kept locally and are not in the repository. For how Kumi
+> works today, see the [guide](../en/KUMI_GUIDE.md).
+
 ## Status
 
 **Acceptance passed locally with Kumi's own agent core: authenticated inference,
@@ -314,7 +319,7 @@ back at 120 BPM with 3-Audio restored. Screens: `.pi/kumi-evidence/tui/7-9*.txt`
 Bridge 1.0.10 fixes the semantic Set snapshot on real Live: it failed for every
 real Set, because Live reports a scene's unset tempo and time signature as -1
 (the simulator never did). Kumi uses the snapshot and the bridge's offline diff
-to catch up ([design](../en/KUMI_POC.md#use)). On real Live (UTC
+to catch up ([design](../en/KUMI_GUIDE.md#conversations-and-catching-up)). On real Live (UTC
 `2026-09-28T05:38Z`, "Kumi Focus Demo", bridge 1.0.10 upgraded and activated
 through the lifecycle):
 
@@ -394,7 +399,7 @@ Set's last-seen state. Screens: `.pi/kumi-evidence/tui/19-*.txt`, `20-*.txt`.
 ## Long conversations
 
 The kernel keeps each conversation within a budget, clearing earlier Live reads
-first and then dropping the earliest exchanges (docs/en/KUMI_POC.md, Limits), so
+first and then dropping the earliest exchanges (docs/en/KUMI_GUIDE.md, Limits), so
 the 30-prompt session limit is gone. The eval's "long conversation" case runs six
 prompts (list the tracks, three changes, list again, then "What's the tempo now,
 and what's the third track called?") with a budget small enough to force both

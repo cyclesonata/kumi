@@ -2,198 +2,544 @@
 
 [English](../en/USER_GUIDE.md) · [简体中文](../zh-CN/USER_GUIDE.md) · 日本語
 
-MCP クライアントから Ableton MCP Beyond をインストール・設定・操作する方法。
+ブリッジは Kumi と Ableton Live をつなぐもので、どの MCP クライアントからも単独で使えます。ブリッジは二つの部分からなります。
 
-サーバーはフェイルクローズドです:`--config` なしでは
-`UnavailableLiveAdapter` を使用し、Live を一切読み取りも変更もしません。
-ループバック、シークレット、プロトコル、操作レジストリハッシュ、ステータスの
-ネゴシエーションがすべて成功して初めてブリッジが受け入れられます。
+- ローカルの MCP サーバー `@ableton-mcp/mcp-server`
+- Live 12 の中で動く Remote Script `AbletonMcpBridge`
 
-## インストールと起動
+サーバーは認証付きのループバック接続で Remote Script と通信します。これによりクライアントは開いている Set を読み、変更できます。変更はそれぞれプレビューしてから適用し、必要なときには取り消せます。クライアントはオーディオの再生、録音、解析もできます。
 
-サポートされるランタイム: Node.js 22 / 24（Node 24 LTS 推奨）。Node 21、23、25、26、27、
-未列挙/将来のメジャーはサポートされません。ソースチェックアウトから:
+このガイドでは、セットアップ、設定、デプロイメントポリシー、変更のしくみ、そしてすべてのツールを説明します。Kumi を使っている場合は、`kumi bridge` がセットアップをすべて行います。[Kumi ガイド](KUMI_GUIDE.md)を参照してください。
 
-```sh
-cd apps/mcp-server
-npm ci
-npm run build
-node dist/src/cli.js                              # フェイルクローズドのホスト
-node dist/src/cli.js --config /absolute/path/bridge-config.json
+## インストール
+
+ブリッジは Node.js 22 と 24 で動きます（Node 24 LTS を推奨）。それ以外のメジャーバージョンでは、ブリッジのコマンドは起動を拒否します。Live 12 は macOS または Windows で動きます。[対応プラットフォーム](SUPPORT_MATRIX.md)を参照してください。
+
+ブリッジは次のどちらかの方法で入手します。
+
+- **リリースの tarball** を `ableton-mcp-lifecycle` でインストールする。[ブリッジのインストール](DELIVERY.md)を参照してください。
+- **ソースのチェックアウト：**
+
+  ```sh
+  cd apps/mcp-server
+  npm ci
+  npm run build
+  node dist/src/cli.js        # サーバー（Live には接続しない）
+  ```
+
+`--config` なしで起動したサーバーは、Live に一切接続しません。その場合に使えるのはオフラインのツールだけです。
+
+## Live に接続する
+
+リリース版では、`ableton-mcp-lifecycle install` が以下の作業をすべて行います。シークレットと設定を作成し、Remote Script をインストールし、アップグレードとロールバックのためのレシートを残します。[ブリッジのインストール](DELIVERY.md)の手順に従ってください。Windows ではライフサイクルを使ってください。ブリッジが確認する所有者専用のアクセス権を、シークレットと設定に付けてくれます。
+
+ソースのチェックアウトからは、次のようにします。
+
+1. ビルドしたパッケージの隣に Remote Script を置きます。
+
+   ```sh
+   node scripts/stage-remote-script.mjs
+   ```
+
+2. シークレットを作ります。32 文字以上・空白なしの 1 行で、自分だけが読めるようにします。
+
+   ```sh
+   umask 077
+   node -e "process.stdout.write(require('node:crypto').randomBytes(32).toString('base64url'))" > /absolute/path/bridge.secret
+   ```
+
+3. 設定を書き出します。
+
+   ```sh
+   npm run setup -- --output /absolute/path/bridge-config.json \
+     --bridge-port 9765 --realtime-port 9766 \
+     --secret-file /absolute/path/bridge.secret
+   ```
+
+4. Live を終了します。User Library の `Remote Scripts` フォルダに、`AbletonMcpBridge` という名前のフォルダで Remote Script をインストールします。まず `--dry-run` で試してください。
+
+   ```sh
+   node dist/src/install-remote-script.js \
+     --destination "$HOME/Music/Ableton/User Library/Remote Scripts/AbletonMcpBridge" \
+     --config /absolute/path/bridge-config.json
+   ```
+
+   `--config` は必ず渡してください。Remote Script に設定の場所を伝えるもので、これがないとスクリプトは起動しません。`--force` は既存のフォルダを置き換え、古いフォルダを `AbletonMcpBridge.backup-<time>` として隣に残します。
+
+5. Live を開きます。**Settings → Link, Tempo & MIDI** で、**AbletonMcpBridge** を Control Surface として選びます。
+
+6. 接続を確認します。
+
+   ```sh
+   npm run diagnostics -- --config /absolute/path/bridge-config.json
+   ```
+
+   `"provenance": "real-live"` と `"readiness": { … "realLiveOperational": true }` を探してください。このコマンドはブリッジが接続されていなくても 0 で終了するので、レポートの中身を読んでください。各フィールドの意味は[ブリッジのインストール](DELIVERY.md)で説明しています。
+
+### 設定ファイル
+
+`ableton-mcp-setup` はバージョン 2 のファイルを書き出します。サーバー、Remote Script、ライフサイクルのすべてがこのファイルを読みます。
+
+```json
+{
+  "version": 2,
+  "server": {
+    "command": "/absolute/path/node",
+    "args": ["/absolute/path/dist/src/cli.js", "--config", "/absolute/path/bridge-config.json"]
+  },
+  "bridge": {
+    "host": "127.0.0.1",
+    "port": 9765,
+    "secretFile": "/absolute/path/bridge.secret",
+    "timeoutMs": 5000,
+    "realtimePort": 9766
+  }
+}
 ```
 
-受け付ける CLI オプションは `--config PATH` 1 つのみです。シークレット、
-エンドポイント、アダプター、ケイパビリティを MCP 引数やクライアント
-メタデータから選択することはできません。旧 `2025-11-25` は従来どおり
-`initialize` と `notifications/initialized` を使います。新 `2026-07-28` は初期化不要で、各要求の `params._meta` に
-`io.modelcontextprotocol/protocolVersion: "2026-07-28"` と
-`io.modelcontextprotocol/clientCapabilities: {}` が必須です。`server/discover` は任意です。
-結果は `resultType: "complete"` を含み、JSON ツール結果はテキストに加えて `structuredContent` を返します。
-探索 / リソースのキャッシュは private、`ttlMs: 0` です。状態・ポリシー変更後は再取得してください。
-探索後に旧初期化を選ぶことはできますが、それ以外はプロセス内で方式を混在させません。
-新方式は MCP push、MRTR、Tasks を広告しません。`live_subscribe` / `live_unsubscribe` は旧方式のみで、snapshot や `live_observe_poll` を使います。
-クライアントのメタデータは承認ではありません。トランザクション ID と正確な冪等キーを適用 / アンドゥ回復に保持してください。
-キャンセル / 再起動後に新プレビューで不確定な書込みを繰り返してはいけません。ハンドルはプロセス内限定で期限があり、再起動後は新たな探索と明示的回復が必要です。新しい実 Live 認証を意味しません。
+| フィールド | ルール |
+| --- | --- |
+| `server.args` | サーバーの `cli.js`、`--config`、そしてこのファイル自身の絶対パス |
+| `bridge.host` | `127.0.0.1` または `::1` |
+| `bridge.port` | 1–65535。Remote Script がここで待ち受けます |
+| `bridge.secretFile` | 絶対パス。所有者専用で、32 文字以上 |
+| `bridge.timeoutMs` | Live への 1 リクエストあたり 100–60,000 ms（デフォルト 5,000） |
+| `bridge.realtimePort` | 省略可。`port` とは異なる値にします。[リアルタイムコントロール](REALTIME_CONTROL.md)を参照 |
+| `bridge.diagnostics` | 省略可。`ableton-mcp-lifecycle install --enable-bridge-diagnostics` だけが書き込みます（[運用ガイド](OPERATIONS.md)を参照） |
 
-tarball によるインストールは、[DELIVERY.md](DELIVERY.md) のレシート駆動
-`ableton-mcp-lifecycle` フローで、インストール、アクティベーション、
-アップグレード、修復、ロールバック、アンインストールを行います。成果物は
-MIT ライセンスで、ローカル配布・未公開・未署名であり、正確なパスと SHA-256
-でインストールされます。`private: true` は誤公開を防ぐだけで MIT の権利を
-変更しません。詳細は [DISTRIBUTION_POLICY.md](DISTRIBUTION_POLICY.md) を参照してください。
+未知のフィールドは拒否されます。ファイルは自分だけが読めるようにしておく必要があります。ブリッジのオプションなしで `ableton-mcp-setup` を実行すると、バージョン 1 のファイルが書き出されます。このファイルはサーバーの起動方法しか記述しておらず、`--config` に渡すと拒否されます。古いファイルは `ableton-mcp-migrate` で変換できます（[ブリッジのインストール](DELIVERY.md)を参照）。
 
-## 読み取り専用ツール
+## MCP クライアントにブリッジを追加する
 
-- `server_status` と `capabilities` はホスト状態とネゴシエート済みカタログを報告します。
-- `live_status` はプロトコル、アダプター、エポック、レジストリハッシュ、操作、接続状態を報告します。
-- `live_snapshot` は `session.read` がネゴシエートされている場合に有界な Set スナップショットを返します。偽の不完全な Live 形状でのフォールバック値は、Live 状態の証拠ではなく利用不可の証拠として扱ってください。
-- `live_project_snapshot_export` は、バージョン付きセマンティック Set アーティファクトを決定論的にページ出力します。`strict`（名前/パスの型付きエイリアス）、`collaboration`（名前とベース名）、`local`（名前とプロジェクト相対パス。外部パスはベース名/ダイジェスト）を選び、`complete=true` まで全ページを保存してください。各ページは Live/ソース来歴、セクション完全性、依存関係、利用不可フィールド、セッション参照/変更権限を含まないことを記録します。
-- `live_project_snapshot_diff` は保存済みの完全な 2 つのページ束を比較し、Live 未接続でも利用できます。一意なコンテンツ/構造/名前の証拠で照合し、改名/並べ替えを分離し、重複の同率候補を曖昧なまま示し、切り詰めセクションの欠落断定を抑止します。`.als` 編集、リプレイ、Collect All and Save、自動マージは提案せず、プラグイン/Max blob と可搬性は不透明なままです。
-- `live_discover` はネゴシエート済みのすべての種別を検証し、子種別には親を要求します。アダプターがマッパーディスカバリを公開する場合、`set`、`track`、`return-track`、`main-track`、`scene`、`clip-slot`、`session-clip`、`arrangement-clip`、`note`、`locator`、`device`、`parameter`、`selection`、`routing-choice`、`session-playback` を受け付け、有界な親、最大 8 つのスカラーフィルター、要求フィールド、走査バジェット、ページング、エポック/リビジョン bound のカーソルをサポートします。要求フィールドは各種別の固定行シリアライザー上の投影であり、計算済みフィールドのどれを返すかを選ぶだけで、Live Object Model プロパティの任意の取得ではありません。互換フォールバックは `track`、`scene`、`clip`、`note` に限定されます。
-- `live_browser_search` は Browser 結果をホスト側でランク付けします: 複数語の順序非依存トークンマッチ(語境界/前方一致ボーナス付き)、項目ごとの文書化された整数スコアとマッチトークンの説明、決定的な同点処理(スコア、名前、id の順)。ルートごとの有界候補走査(最大 100 件)は 60 秒間、接続 epoch に束縛してキャッシュされ、永続化されません。`refresh: true` で再走査を強制できます。結果は `searchedRoots`(候補を提供したルート — 有界走査は要求された全ルートに到達しない場合があります)、`candidates`、`candidateBoundReached`、`truncated`、`fromCache`、`cacheAgeSeconds` を報告します。`matchMode: "substring"` は従来の完全一致パススルーを維持します。ロードには引き続き新鮮な `live_browser_inspect` 結果が必要です。
-- `live_browser_inspect` は正確なアイテム id で単一の権威ある Browser 結果を検査します: 安定したアイデンティティ(id、オブジェクトアイデンティティ、コンテンツリビジョン)、タイプと Browser 内部パスのメタデータ、アダプタ/epoch の来歴、理由付きの明示的なロード可否。生のファイルシステムパスは返しません。デバイスアイテムのみ `live_browser_load_preview/apply` でロードできます。
-- `live_library_search` は Live 自身のライブラリデータベースに対するオプトインの読み取り専用サーフェスで、Live 接続を必要としません。明示的なオーナー `allowlistRoot` 内の絶対 `database` パスが必須で、ファイルを読み取り専用で開き(書き込みやジャーナル作成は一切せず、未チェックポイントの WAL フレームを持つデータベースは拒否)、Live 12.4.5 で直接シェイププローブした列挙済みスキーマバージョンでゲートします(ファイルデータベース バージョン 12300、プラグインデータベース バージョン 1。それ以外は観測バージョン付きの構造化 `unavailable` を返し、推測はしません)。ファイル検索は名前/ワイルドカード、タグAND(リーフ名または `Devices|Synthesizer|FM` のようなフルパス)、コンテンツ種別、ソース、ソート(`useCount`、`modified`、`name`)でフィルタし、有界かつリビジョン束縛のページングと正直な切り捨て報告を返します。`mode: "plugins"` はベンダー/フォーマットフィルタ付きのプラグインインベントリ、`mode: "tags"` はタグ語彙を返します。データベースパスと生のファイルシステムパスは秘匿され、使用回数は不透明な数値、類似/重複クエリは明示的に unavailable を報告し、Browser アイデンティティ候補に解決できないアイテムは discovery-only とマークされます。ロード可否は引き続き `live_browser_inspect` が必要です。
-- `live_arrangement_automation_read` は正確な Arrangement クリップ上の 1 パラメータのオートメーションエンベロープをプローブします: 所有者アイデンティティ、正確な時間範囲、完全なページ化ポイント(512 ポイント上限、リビジョンバインドのカーソル、サイレント切り捨てなし)、およびカーブ形状が公開されない旨の明示。Arrangement オートメーションの変更は一切通知されません。
-- `live_take_lane_read` と `live_comp_read` はテイクレーン、レーンクリップ範囲/フィンガープリント、メインレーン要約、およびアダプタがネゴシエートしたコンプソースセグメントを、ページ化かつリビジョンバインドで棚卸します。試聴、レーン変更、テイク昇格、ベストテイクのランク付けは存在せず、アダプタが列挙できない関係は明示的に報告されます。
-- `live_warp_marker_read` は正確なオーディオクリップの完全な有界ワープマーカーセットを `(beatTime, sampleTime)` ペア、単調性チェック、アダプタ/コレクション/クリップ権威リビジョン、および読み取り専用の変更可能性証拠とともにプローブします。マーカーはビートタイムでアドレスされ、個別のマーカーアイデンティティは公開されません。
-- `live_key_estimate` は正確な MIDI クリップ(または明示的なノートセット)の調を推定します: ランク付き候補、相関スコア、明示的な信頼度分類、曖昧さフラグ —— 強制的な単一回答は出しません。決定的・読み取り専用・リビジョンフェンス付き。曖昧、半音階的、または証拠不足の素材は代替候補や証拠不足を正直に報告します。
-- `als_read`、`als_lint`、`als_diff` は保存済み `.als` ファイルをオフラインで検査します —— ブリッジも実行中の Live も不要: 有界 gunzip と堅牢化 XML パースでバージョン付きセマンティックスナップショットへ(ライブ専用フィールドは明示的に利用不可と記録)、重要度とオブジェクトアイデンティティ付きの発見専用 lint、`live_key_estimate` へ供給できるクリップごとの正規 MIDI 抽出、既存セマンティック diff エンジンによる 2 ファイル間またはファイル対エクスポート済みバンドルの差分。ファイル権限には操作者提供の `allowedRoot` が必要で、プロビナンスは `offline-file` とラベル付けされます。`.adg`/`.adv` デバイスファイルは文書化されたフォローアップです。
+設定の `server.command` と `server.args` を使います。よく使われる `mcpServers` 形式では次のようになります。
 
-オフライン XML は全体を検証し、不正な構文、未知の実体参照、重複属性、上限超過を拒否します。コメントや CDATA は要素として解釈しません。子要素の時間値と `MidiNoteEvent` を読み、Session スロット位置を保持します。欠落したミキサー・ワープ・長さは不明のままにし、長さ不明のクリップはセマンティック出力を拒否します。任意の MIDI 抽出は 256 クリップ / 4,096 ノートまでで、名前のプライバシー設定を適用し、表現属性を含む順序非依存リビジョンを生成します。ソース証拠は読取済みバイトから作成します。lint の相対メディアパスは Set のディレクトリを基準とし、シンボリックリンク / ジャンクションの祖先や `allowedRoot` 外を探索しません。
-
-生成計画は展開前に制限します（出力 2,048 ノート、Euclidean パターン 64 ステップ）。ベースのステップはコード境界で終了し、コードの音域表記は C4 = MIDI 60 で、最初のコードの指定音域を保ちます。調推定は最大 4,096 ノート、開始・長さは最大 1,000,000 拍で、順序に依存しません。信頼度はヒューリスティックであり、較正済み確率や編集許可ではありません。トラック色・曲設定の適用とアンドゥはプレビュー時のオブジェクト / Set 同一性を保持し、値が同じ別オブジェクトを拒否します。不確定なアンドゥから前向き適用を再開しません。
-- `audio_analyze` は呼び出し側提供の float32 PCM を解析し、有界な集約、波形、スペクトル、トランジェント、ダイナミクス、クリッピング、ITU-R BS.1770-5/EBU ラウドネス、LRA、検証済み 44.1/48 kHz トゥルーピークの要約を返します。分離されたキャンセル可能なワーカーで実行され、Live のオーディオをキャプチャせず、生サンプルを返しません。
-- `audio_compare_reference` は 2 つの有界 PCM ソースを、帯域制限リサンプリング、粗から精への(または明示的な手動/無効)アライメント、規格ベースのレベルマッチ助言、集約デルタで比較します。自動アライメントが弱い場合、個別のソース解析は保持されますが、オーバーラップと比較デルタは保留されます。アライン済み PCM は返しません。
-- `audio_diagnose_live_context` は呼び出し側 PCM の測定値を 1 つの新鮮な正確な Live トラックスナップショットに関連付けます。この関係は呼び出し側の宣言であり未検証です。観測されたデバイスはコンテキストであり、原因とは断言されません。
-- `live_audio_capture_status` は実ブリッジがキャプチャプロバイダーをネゴシエートした場合に読み取り専用です。マッパー権限と生ファイルパスは秘匿されます。
-- `plan_user_journey` は、ビート/ソング作成、高度なドラム、サウンドデザイン、リファレンス比較、ミックス/録音/パフォーマンス診断のための、非変更・ケイパビリティ対応のプランを返します。[USER_JOURNEYS.md](USER_JOURNEYS.md) を参照してください。
-
-## ツール検出とデプロイメントポリシー
-
-`tools/list` は、現在実行可能で、有効なデプロイメントポリシーにより許可された
-ツールのみを返します —— 利用不可のプレースホルダーや、ネゴシエートされた
-Live 形状で実行できないツールは返しません。サーバーは
-`notifications/tools/list_changed` をアドバタイズし、接続/切断、epoch または
-オペレーションセットの変更、および有効なランタイムポリシー変更時に発行します。
-アダプタの状態リフレッシュ、同じ epoch での再接続、セッション途中の切断でも、
-次のリクエストを待たずに発生時に変更が告知されます。常に可視の `live_status`
-読み取りは最初に有界なリフレッシュ/再接続を試みるため、同じ epoch のブリッジ
-断線が古い切断キャッシュの背後で検出をデッドロックさせることはありません。
-save/open などのネゴシエート済み制限は、呼び出し可能なツール検出ではなく
-`ableton://capabilities` リソースの `limitations` セクションで報告されます。
-
-デプロイメントポリシーは名前付きプロファイルと明示的オーバーライドの積集合で、
-deny が常に優先します:
-
-- `read-only` —— ローカルツールと読み取り専用 Live 検出。変更は一切なし。
-- `edit-no-audio` —— 読み取りに加えて構造、MIDI、デバイス、ミキサー、オートメーション、ルーティングの編集。可聴、オーディオファイル、録音、リアルタイム、キャプチャ、ファイルシステム変更ツールはなし。
-- `performance` —— 読み取りに加えてライブセットコントロール: トランスポート、テンポ、クリップ/シーン起動、ガード付き試聴、緊急停止、ミキサー、ビュー、選択、ロケータナビゲーション。ガード付きアンドゥとリカバリ確定は利用可能なままで、適用済みトランザクションが座礁することはありません。所有者ドメイン再チェックは許可されないドメインのアンドゥを拒否し続けます。
-- `full`(デフォルト)—— 現在実行可能なすべてのツール。
-
-`ABLETON_MCP_TOOL_POLICY`(プロファイル名)と、オプションのカンマ区切り
-`ABLETON_MCP_TOOL_ALLOW` / `ABLETON_MCP_TOOL_DENY`(名前または `prefix_*`
-パターン)で設定します。ポリシーはプレビュー作成、適用、アンドゥ、緊急停止
-パスを含むすべてのディスパッチで、サーバー側で名前により強制されます ——
-非表示ツールは決して呼び出せず、トランザクションのドメインが取り消された
-場合はそのアンドゥも拒否されます。診断はシークレットを含まずに有効な
-プロファイルとオーバーライドパターンを報告します。capability リソースは
-実行可能、可視、ポリシー拒否のツールセットと各ツールのポリシークラスを
-報告します。
-
-## 変更ワークフロー
-
-すべての Live 変更には、接続済みのネゴシエート済みアダプター、新鮮な
-ディスカバリ、読み取り専用プレビュー、正確な確認、有界な冪等キー、
-エポック/リビジョンチェック、権威ある事後検証が必要です。実装済みの
-ワークフロー:
-
-- `live_device_parameter_preview/apply` —— 権威あるデバイス上の、発見済みの有効な数値パラメータ。境界、有限値、量子化、親子関係、リビジョンがチェックされます。`live_undo` でガード付きアンドゥ。
-- `live_device_state_save` と `live_device_state_recall_preview/apply` —— 1 つのデバイスまたはラックサブツリーの名前付きパラメータ状態スナップショット。保存はスキーマ版管理・ダイジェスト検証済みの JSON ファイルを明示的なオーナーディレクトリに書き込みます(パラメータ名とデバイス名のみ。プロジェクトパス、セッション参照、オブジェクトアイデンティティは含みません。再保存には `overwrite: true` が必要)。呼び出しはファイルを検証し、デバイスクラスアイデンティティ(`className`、フォールバックは表示名、kind 付き)と記録されたパラメータレイアウトフィンガープリントをフェンスします。不一致はパラメータごとの非互換レポート付きで書き込み前に拒否され、`allowPartialLayout: true` でパラメータごとの処置(`applicable`、`skipped-read-only`、`skipped-missing`、`skipped-rebound`)付き部分呼び出しを選択できます。モーフ(`morphFromFile` または `morphFromLive: true` と明示的な 0..1 の `amount`)はホスト側で補間し、文書化された決定論的 float64 量子化丸めを使用します(同一入力と量なら常に同一値。最小値から半端を切り上げ、最大値内の最後の量子化ステップまでに制限)。ネストしたパスは兄弟インデックスで同名要素を区別し、出力シンボリックリンクは上書き時も書き込み前に拒否します。適用はガード付きデバイスパラメータ機構で書き込み、ステップごとのリビジョンフェンス、呼び出し途中の拒否では書き込み済みパラメータを正確にロールバックし、`live_undo` でガード付きの呼び出し前状態復元を行います。適用・補償・アンドゥは元のディスパッチ引数を保存し、応答消失時には実行台帳と照合して階層 identity も検証します。値の一致だけでは実行証明になりません。デバイス全体の原子的コミットではなく、検証・補償失敗は uncertain として保持します。
-- `live_session_structure_preview/apply` —— 有界な名前付き MIDI/オーディオトラックとシーンの作成。挿入インデックスは通常トラックのみを指し、変更前に現在のコレクションと照合されます。既存のオブジェクト、クリップ、デバイス、ルーティング、トランスポート、録音は変更されません。
-- `live_batch_preview/apply` —— 1 回の複合トランザクションで、有界(最大 32)かつ順序付きの合成可能な操作リスト(`mixer.set`、`device.parameter.set`、`clip.set`、`track.rename`、`scene.rename`、`track.create`(名前/種別/任意の有界挿入インデックス。トラックカラーはネゴシエート済みレジストリに公開されていません)、`routing.arm`)を実行します。読み取り専用プレビューは全ターゲットを解決し、重複する変更ターゲット(バッチ内の同一ターゲットは 1 操作のみ)と新規名の衝突を拒否し、操作ごとにデプロイメントポリシーを強制し(1 つでも拒否されるとバッチ全体が書き込み前に失敗します)、マージされた正確な事前状態を取得します。適用はチェックポイントフェンス付きで順次実行され、各ステップはディスパッチ直前に新鮮な状態でプレビュー前提条件を再検証し、実行後に正確な事後条件を検証します。途中でのクリーンな拒否は完了済みステップを正確な事前状態へロールバックして失敗した操作インデックスを報告し、失われた ack は同じトランザクションとキー、および保存した元の操作・引数でブリッジの実行台帳と照合し、新鮮な identity と状態を検証します。値の一致だけでは実行やアンドゥ所有権の証明になりません。適用・アンドゥ時と各ステップ直前にも操作ごとのポリシーを再確認します。バッチ全体で 1 つの undo レコードを共有し、`live_undo` は事前状態を逆順に復元します。作成されたトラックはトランザクションに identity+fingerprint 束縛されている場合のみ削除されます。バルクミキサープリセット(unmute-all、unsolo-all、unarm-all(`routing.arm`)、solo-exclusive)はトラックごとの操作を 1 バッチとして表現できます。これはガード付き補償を伴う逐次実行であり、Live 全体の原子的コミットではありません。ターゲットはプレビュー時点で存在する必要があります。検証・補償の失敗は uncertain のまま保持し、同じホストと bridge/Live epoch 内で元のトランザクション・キーのみで再試行するか、確認後に明示的にリカバリを確定します。
-- `live_midi_clip_preview/apply` —— 空の Session スロットへの有界な MIDI クリップ(正規化ノートを含む)。適用時にクリップを作成し、検証済みの全ノートセットを 1 回の正規 `note.add-batch` 変更で送信し、権威あるノート内容を検証します。
-- `live_arrangement_section_preview/apply` —— 衝突しない有界な範囲の 2 つの名前付きロケーター。
-- `live_tempo_preview/apply` —— 有界なテンポ変更。
-- `live_midi_transform_preview/apply` —— 正確なクリップへの決定論的シード付き MIDI 変換: transpose、scale-constrain、quantize、swing、velocity-curve、シード付き humanize、legato、staccato、rotate、repeat、ratchet、chord voicing、arpeggiate、seeded variation —— さらに生成プリミティブ: ユークリッドリズム、コード進行(ローマ数字または明示的シンボル、音階から実現される品質、close/drop-2/spread ボイシング、最小移動のボイスリーディング)、ドラムパターンとベースラインのテンプレート(キットマッピング/キーは明示的引数または Set からの発見でプレビューに開示、捏造はしない)、およびモチーフ変換(明示的軸の反転、レトログレード、正確な比率の増大/縮小)。プレビューは正確な add/update/delete ノート diff、ソースリビジョン、制約、前提、MPE プローブ、アンドゥ経路を返します。確率的変換は明示的シードが必須で、バイト単位で再現可能です。生成型/大規模変換はデフォルトで duplicate-first(正確な空スロットへ複製、ソースは保持)。削除・再作成では正規ノートスキーマが公開しないノート単位の表情を保持できないため、インプレース生成編集は拒否されます。更新専用変換は `note.update` で公開フィールドのみをパッチし、非公開のノート単位データを保持します。ノート変更はレジストリ上限のチャンクで実行され、各チャンクは期待される中間ノート集合に対してフェンスされるため、チャンク間の外部編集は上書きされずフェイルクローズします。正確なキーでの再試行はチャンク失敗後に記録済みプランを再開します。インプレースのアンドゥは検証済みの変換後状態(アイデンティティバインド、ノート間のコンテンツ交換でも拒否)を要求し、再開対応チャンクで以前のフィールドを復元します。duplicate スコープのアンドゥはトランザクションが作成したクリップのみを削除し、失敗した duplicate 適用はトランザクション所有の複製を正確キーでの再開のために保持し、盲目的には削除しません。
-- `live_undo` —— エポックと検証済み事後状態が一致する適用済みトランザクションのアンドゥ、または不変エポックでの応答喪失アンドゥの正確なキー照合。
-- `live_recovery_finalize` —— 明示的な権威ある手動回復の証拠があった後にのみ、回復保護されたレコードを退役させます。Live を変更せず、アクティブな可聴作業を拒否し、レコードを破棄する前に Remote Script のリプレイ権限を退役させます。
-- 個別の操作がネゴシエートされている場合の、用途別クリップ起動/停止、トランスポート、ノート更新/削除/読み取り/編集、クリップ複製/移動/リネーム/プロパティ/アクション、トラック/シーン/デバイス/ロケーターリネーム、Arrangement クリップ作成/移動とファイルオーディオインポート、明示的なファイル権限を持つ Session オーディオインポート、オーディオクリップ、ワープマーカー、ミキサー、Session オートメーション(全エンベロープクリアを含む)、Browser/デバイス挿入、ルーティング、録音、プロジェクトバックアップ、サブスクリプション、ロケータージャンプ、ビュー、リアルタイムの各ワークフロー。Capture MIDI はすべての Session スロットが空の場合のみネゴシエートされます。デバイスや Arrangement クリップの恣意削除は、以前の状態を再構成できないため拒否されます。`live_undo` による、ID とフィンガープリントに紐づくトランザクション所有のクリーンアップのみが利用可能です。
-- オーディオクリップのプレビューは、その正確なクリップが通知するフィールド(`availableAudioFields`)のみを受け付けます: ゲイン、ピッチ、ループ、ワープ有効/モード、フェード(サポートされる場合)。ワープマーカー編集には `live_warp_marker_preview/apply` を使用し、マーカーをビートタイムで指定して、コレクションフェンスとガード付きアンドゥを適用します。`live_warp_marker_read` が読み取り専用プローブを提供します。Session オーディオインポート(`live_audio_import_preview/apply`)は、オーナー許可リストのルート、宣言形式とコンテナのマジックバイトが一致する通常ファイル、サイズと SHA-256 のプレビュー、正確な空の宛先スロット、適用時の再検証(TOCTOU 防止)、および変更されていない作成クリップのみのトランザクション所有クリーンアップを要求します。ソースメディアは削除も書き換えもされず、MIDI ファイルは正規の Session MIDI ファイルオペレーションが存在するまで明示的に拒否されます。既存のテイクレーンはディスカバリと名前変更が可能で、`live_audio_import_preview/apply` によりファイルベースのオーディオクリップを作成できます。レーン作成と MIDI レーンクリップ作成はマッパー操作には存在しますが、現在の公開 MCP ツールスキーマでは通知されません。公開 LOM にはテイクレーンの削除/試聴やコンプ領域編集 API がないため、それらは利用できません。
-- デバイスディスカバリは正規の親参照で rack/chain を再帰的に走査します。Browser のロードは新鮮で正確な `browser.inspect` 結果を必要とし、デバイス以外の項目を拒否し、空のデバイスオーナーを対象とするため、ロード失敗時のクリーンアップが無関係な兄弟に影響しません。
-- `live_session_audition_preview/apply/stop` —— ガード付きの、可聴の可能性のある Session シーン 1 回の起動。プレビューは読み取り専用で、正確な Set 名、権威ある停止/非録音の再生状態、armed または入力モニターのトラックがないこと、安全な起動量子化、呼び出し可能な launch/stop 操作、明示的な出力安全性の証拠を必要とします。適用には正確なプレビュー確認と冪等キーが必要で、1 回起動して新鮮な fired/playing 状態を検証します。停止には返された停止確認が必要で、マッパー所有の再生のみを停止し、停止したベースラインを検証します。
-
-プレビューレコードは 10 分で期限切れになります。応答喪失、タイムアウト、
-切断、検証失敗、補償失敗は**不確定な状態**です。新しい権限や新しい冪等
-キーを決して送信しないでください。同じブリッジと Live エポック内で、
-実行中のホストは Remote Script の実行台帳に対して、元のトランザクション、
-確認、引数、冪等キーのみを照合し、その後で新鮮な事後状態を検証できます。
-どちらかのエポックが変わった場合は、変更を停止して新鮮な権威ある状態から
-回復してください —— [RECOVERY.md](RECOVERY.md) を参照。
-
-## 同意ベースの Live オーディオキャプチャ
-
-Live のオーディオは Remote Script のメタデータでは公開されません。キャプチャは
-`live_status` が `real-live`、`audio.capture.resampling`、および 6 つすべての
-`audio.capture.*` 操作を報告する場合にのみ利用可能です。
-
-1. 使い捨ての Set を保存して目視で確認します。すべてのトラックが unarmed で、録音と再生がオフで、モニタリング/出力レベルが安全であることを確認します。
-2. 1 つの正確なソース Session クリップと、別の空のオーディオスロットを選択します。デスティネーションの現在の入力ルートは、復元できるよう選択可能でなければなりません。Live の古い `Ext. In` 値が利用できない場合は、通常のルーティング preview/apply ワークフローで安全な `No Input` ベースラインを選択してください。
-3. 正確な Set/スロット参照、1〜9 秒の長さ、`consent=ephemeral-analysis-and-delete`、新鮮な出力安全性の証拠で `live_audio_capture_preview` を呼び出します。
-4. 開示された可聴/録音への影響、ウォッチドッグ/回復ツール、デスティネーションのベースライン、有効期限を確認します。正確な予測不可能な確認と新しい冪等キーで 1 回だけ適用します。
-5. 成功した結果には、規格解析と証拠にリンクされた診断が含まれますが、PCM、パス、トークン、確認、生ダイジェストは含まれません。停止したトランスポート、復元されたルート/arm/モニタリング、正確な Live クリップの削除、WAV/ASD のアンリンク、保持された生オーディオがないことが報告されなければなりません。
-6. キャンセル、ホスト障害、タイムアウト、応答喪失の場合は、新しいプロセスから `live_audio_capture_status` を呼び出します。その正確なキャプチャがクリーンでない場合は、`confirmation=emergency-stop-and-clean` と新鮮に観測した正確な ID で `live_audio_capture_emergency_stop` を呼び出します。残留状態がある間は、別のキャプチャを開始しないでください。
-
-DSP 規格、制限、プライバシー、リファレンス比較、診断セマンティクス、
-回復の詳細は [AUDIO_INTELLIGENCE.md](AUDIO_INTELLIGENCE.md) を参照してください。
-
-## 設定とインストール
-
-まずビルドし、ホストのみの設定を作成します:
-
-```sh
-npm run setup -- --output /absolute/path/client-config.json
+```json
+{
+  "mcpServers": {
+    "ableton": {
+      "command": "/absolute/path/node",
+      "args": ["/absolute/path/dist/src/cli.js", "--config", "/absolute/path/bridge-config.json"],
+      "env": { "ABLETON_MCP_TOOL_POLICY": "edit-no-audio" }
+    }
+  }
+}
 ```
 
-ブリッジ設定の場合は、別途オーナー専用のシークレットファイルを作成してから実行します:
+サーバーは stdin と stdout で、JSON lines として MCP をやり取りします。自分のログ行は、先頭に `mcp-host:` を付けて stderr に書き出します。
 
-```sh
-npm run setup -- --output /absolute/path/bridge-config.json \
-  --bridge-host 127.0.0.1 --bridge-port 9000 \
-  --realtime-port 9001 \
-  --secret-file /absolute/path/bridge.secret --bridge-timeout 5000
-```
+## Kumi の Live 拡張機能
 
-バージョン 2 は明示的な `--config PATH` 引数を書き込みます。シークレットは
-クライアント引数、パッケージ、Remote Script 参照、ログ、診断に決して含まれ
-ません。パスは明示的で安全な非シンボリックリンクである必要があります。
-ホストはループバックである必要があります。シークレットは強力でオーナーが
-管理するものである必要があります。`--realtime-port` はオプションで、認証済み
-TCP ポートと異なる必要があり、[REALTIME_CONTROL.md](REALTIME_CONTROL.md) で
-説明されている個別にアームされるチャンネルのみを有効にします。
+Live 12.4 以降では、Kumi の Live 拡張機能が動いていれば、ブリッジはそれにも接続します。これで次のことができるようになります。
 
-Remote Script のファイル診断はデフォルトで無効で、`setup` や一時センチネルの
-作成では有効になりません。サポートされる明示的なオプトインは
-`ableton-mcp-lifecycle install --enable-bridge-diagnostics` です。ペイロードや
-シークレットを書かず、有界なオーナー状態ファイル 1 つだけを用意します。
-このフラグなしのアンインストール/再インストールで無効になります。詳細は
-[OPERATIONS.md](OPERATIONS.md) と [DELIVERY.md](DELIVERY.md) を参照してください。
+- オフラインレンダリング
+- アレンジメントへ直接書き込む MIDI クリップ
+- アレンジメントの一区間の消去
+- デバイスの複製
+- プロジェクトへのファイルの取り込み
+- 「Ask Kumi about this」の右クリックイベント
 
-Remote Script は明示的に選択した宛先にのみインストールしてください:
+拡張機能は、次のどちらかの方法で動きます。
 
-```sh
-npm run build
-node dist/src/install-remote-script.js --destination /absolute/path/ControlSurface --dry-run
-```
+- **Live の Extensions フォルダにインストールする。** `kumi bridge` がそこに置き、Live が起動するときに拡張機能を開始します。
+- **ブリッジが起動する。** Live の Developer Mode がオンのとき（Settings → Extensions）、Live 自身の Extension Host を通じて起動します。
 
-インストーラーはデフォルトでシンボリックリンクツリーと上書きを拒否します。
-`--force` は既知の回復可能な宛先専用です。Live に接続する前に
-[LIVE_SAFETY.md](LIVE_SAFETY.md)、[OPERATIONS.md](OPERATIONS.md)、
-[RECOVERY.md](RECOVERY.md) を読んでください。
+Live が接続している間、ブリッジは 10 秒ごとに拡張機能を探します。拡張機能が応答すると、そのツールが `tools/list` に現れます。[ツールリファレンス](#live-拡張機能のツール)を参照してください。それ以外の機能は、拡張機能がなくてもすべて動きます。
+
+| 変数 | 効果 |
+| --- | --- |
+| `ABLETON_MCP_EXTENSION=off` | 拡張機能に接続しない |
+| `ABLETON_MCP_EXTENSION=external` | 動いている拡張機能に接続するが、自分では起動しない |
+| `ABLETON_MCP_EXTENSION_DIR` | ブリッジが起動した拡張機能が、エンドポイント、シークレット、レンダリングを置く場所（デフォルト：設定の隣の `live-extension`） |
+| `ABLETON_MCP_LIVE_EXTENSIONS_DIR` | Live の Extensions フォルダ。デフォルト（`~/Library/Application Support/Ableton/Extensions`、`%LOCALAPPDATA%\Ableton\Extensions`）以外の場合に指定します |
+
+## コマンド
+
+| コマンド | オプション |
+| --- | --- |
+| `ableton-mcp-server`（`npm start`） | なし、または `--config PATH` のみ |
+| `ableton-mcp-setup`（`npm run setup`） | `--output PATH`。バージョン 2 ではさらに `--bridge-port N`、`--secret-file PATH`、必要に応じて `--bridge-host`、`--bridge-timeout MS`、`--realtime-port N`。`--force` で上書きします。 |
+| `ableton-mcp-install-remote-script` | `--destination DIR`、`--config PATH`、`--dry-run`、`--force` |
+| `ableton-mcp-diagnostics`（`npm run diagnostics`） | なし、または `--config PATH` のみ。JSON のレポートを出力します |
+| `ableton-mcp-lifecycle`、`ableton-mcp-migrate` | [ブリッジのインストール](DELIVERY.md)を参照 |
+
+最初の四つのコマンドは、不正なオプションでは 2、失敗したときは 1 で終了します。
+
+## プロトコル
+
+サーバーは MCP プロトコルの二つのバージョンに対応しています。サーバープロセスごとに、どちらか一方を使ってください（`2025-11-25` の `initialize` の前に `server/discover` を送ることはできます）。
+
+- **`2025-11-25`：** `initialize` を送り、続けて `notifications/initialized` を送ります。サーバーは `notifications/tools/list_changed` と Live のイベントを送ります（[イベント](#イベント)を参照）。
+- **`2026-07-28`：** ハンドシェイクはありません。すべてのリクエストが、`params._meta` に `io.modelcontextprotocol/protocolVersion` と `io.modelcontextprotocol/clientCapabilities` を含めます。`server/discover` は省略できます。
+
+  ```json
+  {"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}
+  ```
+
+  結果には `resultType: "complete"` が付き、ツールの結果は JSON を `structuredContent` にも入れて返します。一覧とリソースには `ttlMs: 0` が付きます。キャッシュせずに読み直してください。このバージョンにはプッシュ通知がありません。`live_subscribe` の代わりに `live_observe_poll` を使ってください。
+
+`tools/list` は、接続している Live が対応していて、デプロイメントポリシーが許可しているツールだけを、その時点で表示します。一覧は、Live の接続、切断、再接続や、Live 拡張機能が現れたり消えたりするのに応じて変わります。`2025-11-25` では、サーバーは変化のたびに `notifications/tools/list_changed` で知らせます。`capabilities` と `ableton://capabilities` リソースは、隠れているツールとその理由も示します。
+
+## デプロイメントポリシー
+
+デプロイメントポリシーは、クライアントがどのツールを見て、呼び出せるかを決めます。サーバーの環境で設定します。
+
+| 変数 | 値 |
+| --- | --- |
+| `ABLETON_MCP_TOOL_POLICY` | プロファイル：`read-only`、`edit-no-audio`、`performance`、`full`（デフォルト） |
+| `ABLETON_MCP_TOOL_ALLOW` | カンマ区切りのツール名または `prefix*` パターン。プロファイルの範囲内で、これらだけを許可します |
+| `ABLETON_MCP_TOOL_DENY` | カンマ区切りの名前またはパターンで、決して許可しないもの。拒否が常に優先します |
+
+| プロファイル | 許可するもの |
+| --- | --- |
+| `read-only` | ローカルのツールと読み取り。変更はできません |
+| `edit-no-audio` | 読み取りと編集：構造、MIDI、デバイス、ミキサー、オートメーション、ルーティング。再生、録音、キャプチャ、ファイルの書き込み、Python の実行は含みません。 |
+| `performance` | 読み取りに加えて、再生、ビューと選択、ミキサー、テンポ、`live_undo` と `live_recovery_finalize` |
+| `full` | `python` を含むすべてのクラス |
+
+各ツールにはクラスが一つあり、[ツールリファレンス](#ツールリファレンス)に記載しています：`local`、`read`、`edit`、`performance`、`audio`、`filesystem`、`recording`、`realtime`、`capture`、`python`。クラスとツールの実際の動作が一致しないものは次のとおりです。
+
+- `live_render_offline` はレンダリングファイルを書き出しますが、`read` です。
+- `.als` のツールは読み取りしかしませんが、`filesystem` です。
+- `live_change` は `edit` なので、`performance` には含まれません。
+
+ポリシーは呼び出しのたびに確認し直されます。ポリシーがもう許可していないツールで行った変更に対しては、`live_undo` が拒否されます。値が不正だと、サーバーは起動時に停止します。`ableton-mcp-diagnostics` は、有効になっているポリシーを報告します。
+
+完全には信頼できないクライアントには、まず `read-only` か `edit-no-audio` を使ってください。`full` では、Live の中で任意の Python を実行する `live_run_python` を拒否してください。
+
+## 変更のしくみ
+
+### プレビュー、適用、取り消し
+
+変更は三つのステップで行います。
+
+1. 変更するものを**読み取り**（`live_discover`、`live_snapshot`）、その ref を取得します。
+2. `*_preview` ツールで**プレビュー**します。プレビューは何も変更しません。何が変わるか、`transactionId`、`confirmation`、`expiresAt` を返します。
+3. 対応する `*_apply` ツールで**適用**します。`transactionId`、`confirmation`、そして自分で決めた `idempotencyKey`（8–128 文字）を渡します。ブリッジは Live のスレッド上で、プレビュー以降に何も変わっていないことを確かめてから変更を適用し、結果を読み戻します。
+
+同じキーで同じ適用をもう一度送ると、もう一度同じ答えが返り（`"idempotent": true`）、二重に適用されることはありません。`transactionId` を保管しておけば、`live_undo`（`confirmation: "undo"`）で変更を取り消せます。
+
+`live_change` は、プレビューと適用を一度の呼び出しで行います：`{"tool": "live_mixer_preview", "args": {…}}`。答えは適用の結果で（プレビューの結果は `preview` の下にあります）、`live_undo` もいつもどおり使えます。人が事前に確認すべき変更は拒否します：オーディション、クリップの起動、起動ボタン、キャプチャ、録音、リアルタイムのアーム、Live のダイアログです。
+
+### 確認トークンと有効期限
+
+- ほとんどのプレビューは、確認トークンとして `"apply"` を返します。
+- シーンのオーディションとクリップの起動は、予測できないトークンと、停止用の別のトークンを返します。キャプチャは予測できないトークンを返します。
+- いくつかのツールは、独自の語を受け取ります：`"undo"`、`"backup"`、`"disarm"`、`"undo-in-live"`、`"redo-in-live"`、`"emergency-stop"`、`"emergency-stop-and-clean"`、`"finalize-recovery-record"`。
+
+プレビューは 10 分で期限切れになります。バッチ、MIDI クリップ、デバイス状態のプレビューは 30 秒、キャプチャのプレビューは 60 秒で期限切れになります。期限が切れたら、プレビューし直してください。
+
+再生や録音を行うツールのスキーマには、`outputSafety` オブジェクト（`{"safe": true, "provenance": "…"}`）があります。これが必須なのはシーンのオーディションだけです。ほかのツールでは、クライアントが渡さなければブリッジが独自のものを使います。ただし、スキーマを厳密に守るクライアントは、スキーマが必須としている箇所では送る必要があります。
+
+### ブリッジが調整すること
+
+- 範囲外のパラメータ値は、近いほうの端に合わせます。段階的なパラメータで段と段の間にある値は、最も近い段に合わせます。拒否されるのは、Live がグレーアウトしているパラメータだけです。
+- トラックやシーンの名前は重複してもかまいません。ただし、バッチが作成するトラックは別です。
+- `seed` のないランダムな MIDI 変換は、リクエストから seed を導き出すので、プレビューと適用の結果が一致します。
+
+### 変更が拒否されたとき
+
+拒否された呼び出しは、`isError: true` と `{"reason": "...", "remediation": "..."}` を返します。理由はブリッジまたは Live 自身のものです。
+
+- "Nothing changed in Live"：理由に書かれていることを直してから、プレビューし直してください。
+- "Live state changed since the preview"：読み直してから、プレビューし直してください。
+- タイムアウト、応答の消失、読み戻しの失敗があると、変更は不確定のままになります。同じキーで同じ適用だけを再試行してください。[回復手順](RECOVERY.md)を参照してください。
+
+### 取り消し
+
+`live_undo` は、その後オブジェクトがどう変わっていても変更を元に戻します。名前を変えたトラック、もう一度動かしたフェーダー、クリップが加わったデバイスなどです。ref が今は別のオブジェクトを指している場合は拒否します。
+
+`live_undo` で取り消せない変更もあります。
+
+- 削除、アレンジメントの一区間の消去、`live_run_python`、そしてプレビューで kept（残る）とされるその他の変更（クロップ、保存したラックのバリエーション、クリアしたパッド）。これらは Live 自身の取り消し（`live_song_undo`）で戻せます。
+- 再生：クリップの起動、シーンの起動、トランスポートの操作、起動ボタン。戻すには停止してください。
+
+`live_undo_step_begin` と `live_undo_step_end` は、変更をまとめて Live での Cmd-Z 一回分にします。このステップは、`timeoutMs`（デフォルトは 2 分）が過ぎたとき、接続が切れたとき、または別のステップが開かれたときに自動で閉じます。Live 拡張機能を通じた変更はまとめられません。
+
+サーバーは、適用した変更の取り消しを保持します。記録は全体で最大 1 GiB、バッチ、MIDI クリップ、デバイス状態の変更はそれぞれ 512 件までです。それを超えると、最も古い適用済みの変更から取り消しができなくなります。使わない取り消しは `live_transaction_release` で手放せます。取り消しの記録はサーバーのメモリ上にあり、再起動すると失われます。
+
+[Live の安全性](LIVE_SAFETY.md)では、ブリッジが何を保証するのか、そしてプレビューと適用の外で動くツールについて説明しています。
+
+## ツールリファレンス
+
+サーバーが提供しうるすべてのツールです。`tools/list` には、接続している Live が対応していて、ポリシーが許可しているものだけが表示されます。`name_preview/apply` は `name_preview` と `name_apply` の組を表し、`/stop` が付くと `name_stop` が加わります。クラスは[デプロイメントポリシー](#デプロイメントポリシー)のクラスです。
+
+### ステータスとオフラインのツール
+
+これらは Live なしで動きます。例外は `live_status` で、Live がいるかどうかを報告します。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `server_status` | local | サーバーのバージョンと、Live アダプターが接続されているかどうか。 |
+| `capabilities` | local | ネゴシエートされた機能と、どのツールが実行可能か、表示されているか、ポリシーで拒否されているか。 |
+| `live_status` | read | Live との接続：プロトコル、アダプター、来歴（`real-live`）、エポック、レジストリハッシュ、機能と操作。ブリッジが切れていれば、先に再接続します。常に一覧に表示されます。 |
+| `plan_user_journey` | local | 五つのガイド付きジャーニーのいずれかのプラン。何も変更しません。[作業例](USER_JOURNEYS.md)を参照。 |
+| `audio_analyze` | local | 送った float32 PCM のラウドネス（BS.1770-5 / EBU R128）、トゥルーピーク、スペクトル、ダイナミクス、クリッピング。 |
+| `audio_compare_reference` | local | 自分の PCM をリファレンスと比べます：アライメント、レベル合わせ、違い。 |
+| `als_read/lint/diff` | filesystem | 指定した `allowedRoot` の中にある保存済み `.als` ファイルを、Live なしで読み取り、lint、diff します。 |
+| `live_project_snapshot_diff` | read | エクスポートした二つの Set スナップショットを、Live なしで比べます。 |
+| `live_library_search` | read | 許可したフォルダの中で、Live 自身のライブラリデータベース（ファイル、タグ、プラグイン）を検索します。読み取り専用。 |
+
+### Set を読む
+
+これらの読み取りで得られる ref（`<epoch>:track:4` など）を、変更用のツールに渡します。ref は Live のエポックが変わるまで有効です。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_snapshot` | read | Set 全体のスナップショットを、上限付きで一つ。 |
+| `live_discover` | read | 一種類のオブジェクトをページ単位で返します：`set`、`track`、`return-track`、`main-track`、`scene`、`clip-slot`、`session-clip`、`arrangement-clip`、`note`、`locator`、`device`、`parameter`、`selection`、`routing-choice`、`session-playback`。クリップスロット、クリップ、ノート、パラメータ、ルーティングの選択肢には `parent` の ref が必要です。フィルターは最大 8 個、`fields` の指定、`limit`、`cursor`。 |
+| `live_song_state` | read | ソング全体の状態：拍子、スウィング、録音とオーバーダブのモード、アームとソロのモード、Link。 |
+| `live_performance_read` | read | CPU 負荷、トラックのメーター、デバイスのレイテンシーを一度だけ取得します。 |
+| `live_note_read` | read | MIDI クリップのノートを id で、または選択中のノートを読みます。 |
+| `live_key_estimate` | read | MIDI クリップまたはノートの一覧から、キーの候補を順位付けして返します。 |
+| `live_project_info` | read | 保存した Set のファイル、参照しているメディア、見つからないもの。 |
+| `live_project_snapshot_export` | read | プライバシーフィルターをかけた Set スナップショット（`strict`、`collaboration`、`local`）の 1 ページ。保存して、あとで diff できます。 |
+| `live_automation_read` | read | セッションクリップの一つのパラメータのエンベロープと、ある拍での値。 |
+| `live_arrangement_automation_read` | read | アレンジメントクリップの一つのパラメータのエンベロープのポイント。 |
+| `live_take_lane_read` | read | トラックのテイクレーンとそのクリップ。 |
+| `live_comp_read` | read | コンプしたクリップを構成するテイクレーンのセグメント。 |
+| `live_warp_marker_read` | read | オーディオクリップのワープマーカー。 |
+| `live_device_read` | read | プラグインのすべてのパラメータ名、または Max for Live デバイスのバンク。 |
+| `live_clip_time_convert` | read | オーディオクリップ内で、拍、サンプルフレーム、秒を相互に変換します。 |
+| `live_data_read` | read | Set やトラックにキーで保存したテキスト。 |
+| `live_browser_roots` | read | Live のブラウザのルート。 |
+| `live_browser_search` | read | カテゴリと語句による、Live のブラウザの順位付き検索。 |
+| `live_browser_inspect` | read | id で指定したブラウザ項目一つ：それが何か、読み込めるかどうか。 |
+
+### 変化を追う
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_subscribe` | read | Live が変わるたびに `notifications/live_event` を送ります（[イベント](#イベント)を参照）。旧プロトコルのみ。 |
+| `live_unsubscribe` | read | その通知を止めます。 |
+| `live_observe_subscribe/poll/unsubscribe` | read | 変化したトピック（トランスポート、選択、トラック、クリップ、デバイス、パラメータ、グルーヴ、チューニング、シーン、メーター、ラック）をポーリングで取得するオブザーバー。どちらのプロトコル世代でも動きます。 |
+
+### トラック、シーン、構造
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_session_structure_preview/apply` | edit | 指定した位置に MIDI トラック、オーディオトラック、シーンを作成します。名前は重複してもかまいません。 |
+| `live_track_structure_preview/apply` | edit | リターントラックの作成や削除。トラックやシーンの複製。 |
+| `live_scene_capture_preview/apply` | edit | 再生中のものを新しいシーンにキャプチャします。 |
+| `live_object_rename_preview/apply` | edit | トラック、シーン、クリップ、デバイス、ロケーター、テイクレーンの名前を変えます。 |
+| `live_track_properties_preview/apply` | edit | トラックの色（パレットのインデックス 0–69）。 |
+| `live_scene_preview/apply` | edit | シーンの色、テンポ、拍子。 |
+
+### 削除
+
+削除は kept です：`live_undo` では戻せませんが、Live 自身の取り消し（`live_song_undo`）なら戻せます。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_track_delete_preview/apply` | edit | オーディオ、MIDI、グループトラックを、クリップとデバイスごと削除します。グループは中のトラックも一緒に削除します。 |
+| `live_scene_delete_preview/apply` | edit | シーンとそのクリップを削除します。Set には少なくとも一つのシーンが残ります。 |
+| `live_clip_delete_preview/apply` | edit | セッションまたはアレンジメントのクリップを削除します。 |
+| `live_locator_delete_preview/apply` | edit | ロケーターを削除します。 |
+| `live_device_delete_preview/apply` | edit | デバイスを削除します。 |
+
+### セッションクリップ、ノート、クリップのオートメーション
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_midi_clip_preview/apply` | edit | 空のセッションスロットに、ノート付きの MIDI クリップを作成します。 |
+| `live_note_update_preview/apply` | edit | id で指定したノートを変更します：ピッチ、開始位置、長さ、ベロシティ、ミュート、確率、ベロシティのばらつき、リリースベロシティ。 |
+| `live_note_delete_preview/apply` | edit | id で指定したノートを削除します。 |
+| `live_note_edit_preview/apply` | edit | ノートのクオンタイズや複製、ノートの選択、ピッチと時間の範囲内にあるノートの削除。 |
+| `live_midi_transform_preview/apply` | edit | 変換とジェネレーター：トランスポーズ、スケール、クオンタイズ、スウィング、ヒューマナイズ、アルペジエート、ユークリッドリズム、コード進行、ドラムパターン、ベースライン、モチーフの反転など。ランダムなものは `seed` を受け取るか、リクエストから導き出します。ジェネレーターはデフォルトで、空のスロットにコピーとして書き込みます。 |
+| `live_capture_midi_preview/apply` | edit | Live の Capture MIDI。 |
+| `live_clip_properties_preview/apply` | edit | クリップのミュート、色、MIDI ループ、起動モードとクオンタイズ、レガート、RAM モード、ベロシティ量、グルーヴ。 |
+| `live_clip_action_preview/apply` | edit | クロップ、ループや範囲の複製、スクラブ、再生位置の移動。 |
+| `live_clip_duplicate_preview/apply` | edit | セッションクリップを、別のスロットやアレンジメントにコピーします。 |
+| `live_clip_move_preview/apply` | edit | アレンジメントクリップを移動します。またはセッションクリップを別のスロットへ移動します。 |
+| `live_automation_preview/apply` | edit | セッションクリップのエンベロープ：作成や削除、ポイントの挿入や削除、ステップの描画、すべてのエンベロープの消去。 |
+
+### アレンジメント
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_arrangement_section_preview/apply` | edit | セクションの前後に、名前付きのロケーターを二つ追加します。 |
+| `live_arrangement_clip_preview/apply` | edit | アレンジメントに、空の MIDI クリップ、または `filePath`（そのまま Live に渡します）からオーディオクリップを作成します。 |
+| `live_locator_jump_preview/apply` | performance | 再生ヘッドを、次の、前の、または指定したロケーターに移動します。 |
+
+### オーディオクリップとファイル
+
+オーディオの取り込み、Simpler やドラムパッドへの読み込みには、ファイルパスと、そのファイルを含む `allowedRoot` フォルダを渡します。ブリッジはファイルを確認し、管理フォルダに置いたコピーを Live に渡します（[Live の安全性](LIVE_SAFETY.md)を参照）。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_audio_clip_preview/apply` | audio | オーディオクリップのゲイン、ピッチ、ループ、ワープ、フェード（クリップが対応している範囲で）。 |
+| `live_warp_marker_preview/apply` | audio | ワープマーカーを拍の位置で追加、移動、削除します。 |
+| `live_audio_import_preview/apply` | filesystem | オーディオファイルを、空のセッションスロットまたはテイクレーンに置きます。MIDI ファイルは拒否されます。 |
+| `live_simpler_preview/apply` | filesystem | Simpler のサンプルを差し替えます。 |
+| `live_project_backup_preview/apply` | filesystem | 保存した Set の検証済みコピーを、その隣に作ります。プレビューには `confirmation: "backup"` と、Set を含む `allowedRoot` を渡します。 |
+
+### デバイス、ラック、ブラウザ
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_browser_load_preview/apply` | edit | ブラウザの項目を、トラックのデバイスの後ろ、またはラックのチェーン（`chainRef`）に読み込みます。トラックへの二つ目のインストゥルメントは拒否されます。 |
+| `live_device_preview/apply` | edit | ネイティブデバイスを名前で挿入する（Simpler はサンプルを同時に読み込めます）、デバイスをオン・オフする、デバイスを移動する。 |
+| `live_device_parameter_preview/apply` | edit | パラメータを一つ、または `values` で一つのデバイスのパラメータを最大 10,000 個まとめて設定します。範囲外の値は端に留め、段と段の間の値は最も近い段に合わせます。 |
+| `live_device_state_save` | filesystem | デバイスやラックのパラメータ値を、指定したフォルダの JSON ファイルに保存します。 |
+| `live_device_state_recall_preview/apply` | read, edit | 保存した状態をデバイスに呼び戻します。または二つの状態の間をモーフィングします。 |
+| `live_device_advanced_preview/apply` | edit | パラメータバンク、オートメーションの再有効化、A/B の保存、チェーンへの挿入、別のトラックやチェーンへの移動。 |
+| `live_device_specialized_preview/apply` | edit | Drift（モジュレーションマトリクスを含む）、Drum Cell、EQ Eight、Hybrid Reverb、Meld、プラグインのプリセット、Simpler のサンプル設定、Wavetable。 |
+| `live_device_edit_preview/apply` | edit | パラメータではない設定（Roar、Shifter、Spectral Resonator、Hybrid Reverb、CC Control、Simpler）、Simpler のスライスとワープ、Wavetable のモジュレーション量。 |
+| `live_device_io_preview/apply` | edit | デバイス自身の入力・出力ルーティング、またはコンプレッサーのサイドチェインのソース。 |
+| `live_chain_preview/apply` | edit | ラックのチェーンの色、ミュート、ソロ。 |
+| `live_chain_mixer_preview/apply` | edit | ラックのチェーンのボリューム、パン、センド、アクティベーター。 |
+| `live_rack_preview/apply` | edit | マクロの数とバリエーション。マクロの追加、削除、ランダム化。チェーンの挿入。パッドのコピー。 |
+| `live_rack_view_preview/apply` | edit | ラックが表示するチェーンやパッド。 |
+| `live_drum_pad_preview/apply` | edit | パッドのノートとソロ、パッドのクリア、パッドへのサンプルの読み込み（一つ、またはラック全体）を Simpler または Drum Sampler として。 |
+| `live_looper_preview/apply` | edit | Looper の操作と設定。 |
+
+### ミキシング、ルーティング、バッチ
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_mixer_preview/apply` | edit | ボリューム、パン、ミュート、ソロ、キュー、センド。 |
+| `live_mixer_extended_preview/apply` | edit | トラックのアクティベーター、クロスフェーダーとその割り当て、パンのモード、スプリットステレオ。 |
+| `live_routing_preview/apply` | edit | 入力と出力のルーティング、アーム、モニタリング。フィードバックを起こすルーティングは拒否されます。 |
+| `live_batch_preview/apply` | edit | ミキサー、パラメータ、クリップ、名前の変更、新規トラック、アームの操作を最大 32 個、一つの変更・一つの取り消しとしてまとめます。新規トラックの名前は、既存の名前と重複できません。 |
+
+### テンポ、ソング設定、チューニング、グルーヴ
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_tempo_preview/apply` | edit | テンポ、20–999 BPM。 |
+| `live_song_settings_preview/apply` | edit | 拍子、スウィング、起動と録音のクオンタイズ、起動時の選択（select on launch）。 |
+| `live_tuning_preview/apply` | edit | チューニングシステムとスケール。 |
+| `live_groove_preview/apply` | edit | グローバルのグルーヴ量と、プールにあるグルーヴ。 |
+
+### 再生
+
+これらは音が出ます。ほとんどは取り消せず、戻すには停止します。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_transport_preview/apply` | performance | ソングの位置、ループ、パンチ、メトロノーム（取り消し可能）。 |
+| `live_transport_action_preview/apply` | performance | 開始、続きから再生、停止、選択範囲の再生、すべてのクリップの停止、アレンジメントに戻る、スクラブ、タップテンポ、ナッジ、ジャンプ、セッション録音のトリガー。 |
+| `live_clip_launch_preview/apply/stop` | performance | Set が再生中でもそうでなくても、クリップを一つ起動し、そのクリップをまた止めます。 |
+| `live_scene_fire_preview/apply` | performance | シーンを起動します。 |
+| `live_fire_button_preview/apply` | performance | クリップ、スロット、シーンの起動ボタンを、コントローラーのように押したり離したりします。 |
+| `live_session_audition_preview/apply/stop` | performance | 保護付きのシーンのオーディション：Set の名前、出力の安全性の根拠、そして停止中で、アームもインプットのモニタリングもしていない Set が必要です。 |
+| `live_session_emergency_stop` | performance | 直前に確認したセッションクリップ、トランスポート、録音を止めます。トランザクションは不要で、再起動後にも使えます。 |
+| `live_browser_preview` | performance | Live でクリックしたときと同じように、ブラウザ項目のプレビューを再生します。 |
+| `live_browser_preview_stop` | performance | そのプレビューを止めます。 |
+
+### 録音とキャプチャ
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_recording_preview/apply` | recording | セッションまたはアレンジメントの録音を開始・停止します。録音先はアームされている必要があります。Live はほかのアームされたトラックにも録音します。 |
+| `live_audio_capture_preview/apply` | capture | クリップの 1–9 秒を Resampling で録音し、解析してから、録音を削除します。実際の Live でのみ動きます。[オーディオインテリジェンス](AUDIO_INTELLIGENCE.md)を参照。 |
+| `live_audio_capture_status` | read | キャプチャがライフサイクルのどの段階にあるか。 |
+| `live_audio_capture_emergency_stop` | capture | 失敗や再起動のあとで、キャプチャを止めて後片付けします。 |
+| `audio_diagnose_live_context` | read | 送った PCM の測定結果を、一つのトラックの現在のデバイスとミキサーに結び付けます。 |
+
+### ビューと Live のインターフェース
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_view_preview/apply` | performance | セッションまたはアレンジメントの表示。アレンジメントのズーム、スクロール、フォロー。 |
+| `live_track_view_preview/apply` | performance | トラックの折りたたみ、デバイスの挿入モード、表示するラックのチェーン、インストゥルメントの選択。 |
+| `live_selection_preview/apply` | performance | トラック、シーン、スロット、クリップ、デバイス、パラメータ、チェーンの選択。ドローモード。 |
+| `live_clip_view_preview/apply` | performance | クリップのグリッド、エンベロープ、ループの表示。 |
+| `live_device_view_preview/apply` | performance | デバイスを折りたたむ、または展開します。 |
+| `live_application_dialog_preview/apply` | edit | Live で開いているダイアログを読み、そのボタンの一つを押します。 |
+| `live_message` | performance | Live のステータスバーに、または `modal: true` でダイアログに、メッセージを表示します。 |
+
+### 取り消しと記録の管理
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_undo` | edit | 適用した変更を一つ取り消します（`confirmation: "undo"`）。 |
+| `live_change` | edit | プレビューとその適用を一度の呼び出しで行います：`tool`（`*_preview`）、`args`、省略可能な `idempotencyKey`。オーディション、クリップの起動、起動ボタン、キャプチャ、録音、リアルタイムのアーム、ダイアログは拒否します。 |
+| `live_undo_step_begin/end` | edit | その間の変更を、Live 自身の取り消しの一ステップにまとめます。 |
+| `live_song_undo/redo` | edit | Live 自身の取り消しとやり直しを一回（`undo-in-live`、`redo-in-live`）。削除や、Live で行った編集に使います。 |
+| `live_transaction_release` | edit | 取り消すつもりのない適用済みの変更について、最大 64 件の取り消しを手放します。 |
+| `live_recovery_finalize` | edit | Live を手で確認したあとで、不確定な変更の記録を閉じます。[回復手順](RECOVERY.md)を参照。 |
+
+### リアルタイムコントロール
+
+パラメータをすばやく動かすための、短時間だけ使う UDP チャネルです。[リアルタイムコントロール](REALTIME_CONTROL.md)を参照してください。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_realtime_arm_preview/apply` | realtime | 指定したパラメータ用にチャネルを開き、そのトークンを返します。 |
+| `live_realtime_disarm` | realtime | チャネルを閉じます。 |
+| `live_realtime_stats` | realtime | 受け付けた、適用した、破棄したパケットの数。 |
+
+### Python と保存テキスト
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_run_python` | python | Live のメインスレッドで Python を実行します（`code`、`mode` は `exec` または `eval`、省略可能な `ref`、`timeoutMs` は最大 30,000）。プレビューも `live_undo` もありません。Live の取り消しでは一ステップになります。[Live の安全性](LIVE_SAFETY.md)を参照。 |
+| `live_data_preview/apply` | edit | Set またはトラックに、`kumi.` で始まるキーでテキストを保存します。 |
+
+### Live 拡張機能のツール
+
+ブリッジが Kumi の Live 拡張機能に接続している間、一覧に表示されます（[Kumi の Live 拡張機能](#kumi-の-live-拡張機能)を参照）。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_render_offline` | read | オーディオトラックのクリップを、二つの拍の間でファイルにレンダリングします。デバイスを通る前の音で、再生はしません。 |
+| `live_project_import` | filesystem | オーディオファイルを Set のプロジェクトフォルダにコピーします。 |
+| `live_arrangement_midi_clip_preview/apply` | edit | ノート付きの MIDI クリップを一つ以上、アレンジメントに書き込みます。 |
+| `live_clip_clear_range_preview/apply` | edit | トラックのアレンジメントの一区間を消去し、その両端でクリップを切ります。削除と同じく kept です。 |
+| `live_device_duplicate_preview/apply` | edit | デバイスを設定ごと、そのすぐ後ろにコピーします。 |
+
+### Willington のツール
+
+別途インストールする Willington プロバイダーがあるときだけ表示されます。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
+
+| ツール | クラス | 内容 |
+| --- | --- | --- |
+| `live_willington_device_preview/apply` | edit | ラックのマクロ名とバリエーション名、マクロのマッピング、チェーンのゾーン。 |
+| `live_follow_actions_preview/apply` | edit | 再生を止めた状態での、セッションクリップの Follow Actions。 |
+
+## イベント
+
+`2025-11-25` では、`live_subscribe`（必要なら `types` の一覧を付けて）を呼ぶと、Live が変わるたびにサーバーが `notifications/live_event` を送ります。
+
+| 種類 | タイミング |
+| --- | --- |
+| `transport` | 再生または録音が開始・停止したとき |
+| `object` | トラックやシーンの一覧が変わったとき |
+| `selection` | 選択が変わったとき |
+| `name` | トラック、シーン、クリップの名前や色が変わったとき |
+| `mixer` | トラックのミュート、ソロ、アーム、ボリューム、パン、センドが変わったとき |
+| `parameter` | 選択中のデバイスのパラメータが変わったとき |
+| `structure` | トラック、シーン、ロケーター、またはトラックのデバイスやクリップが変わったとき |
+| `reset` | Live を読み直してください。手元の情報が古くなっているかもしれません |
+
+各イベントには `epoch`、`sequence`、`type`、`channel`（`remote-script` または `extension`。それぞれ独立して番号が振られます）、`payload` があります。`pointed` イベントは、拡張機能の「Ask Kumi about this」から、購読なしで届きます。たまったイベントが 65,536 を超えると、サーバーは残りを捨て、`resnapshot: true` 付きの `notifications/live_event_overflow` を送ります。そのあとや、`reset` を受け取ったとき、`sequence` に抜けがあったときは、Set を読み直してください。
+
+`2026-07-28` では、`live_observe_subscribe` と `live_observe_poll` を使ってください。
 
 ## リソースとプロンプト
 
-読み取り専用リソースには、`ableton://capabilities`、`ableton://safety`、
-`ableton://journeys`、`ableton://max-extension`、および安全なテンポワーク
-フローが含まれます。プロンプトはリクエストを準備するもので、変更権限を
-付与しません。どのリソースやプロンプトも、シーン起動、録音、ルーティング、
-オーディオキャプチャを許可しません。
+| リソース | 内容 |
+| --- | --- |
+| `ableton://capabilities` | ネゴシエートされた機能と、どのツールが利用可能か、表示されているか、ポリシーで拒否されているか、そのクラス（JSON） |
+| `ableton://safety` | 安全性についての短い要約（Markdown） |
+| `ableton://journeys` | 五つのガイド付きジャーニーと、この Live がそれぞれのどこまでに対応しているか（JSON） |
+| `ableton://live-workflow` | 安全なテンポ変更の手順（Markdown） |
+| `ableton://max-extension` | オペレーターが作る Max パッチがリアルタイムコントロールに使えるパケット形式。Max デバイスは同梱していません（JSON） |
+
+| プロンプト | 引数 |
+| --- | --- |
+| `analyze_audio` | `sampleRate`、省略可能な `channels` |
+| `change_tempo_safely` | なし |
+| `create_beat_or_song`、`sequence_advanced_drums`、`design_owned_sound`、`compare_reference_mix`、`diagnose_performance_setup` | `traits`、省略可能な `experienceLevel`（`beginner` または `advanced`）と `bars`（`"1"` から `"16"` までの文字列） |
+
+プロンプトとリソースは説明するだけで、何も許可しません。ジャーニーのプロンプトは[作業例](USER_JOURNEYS.md)で説明しています。
+
+## 環境変数
+
+| 変数 | 効果 |
+| --- | --- |
+| `ABLETON_MCP_TOOL_POLICY`、`ABLETON_MCP_TOOL_ALLOW`、`ABLETON_MCP_TOOL_DENY` | [デプロイメントポリシー](#デプロイメントポリシー) |
+| `ABLETON_MCP_EXTENSION`、`ABLETON_MCP_EXTENSION_DIR`、`ABLETON_MCP_LIVE_EXTENSIONS_DIR` | [Kumi の Live 拡張機能](#kumi-の-live-拡張機能) |
+| `ABLETON_MCP_IMPORT_STAGING_DIR` | 取り込むファイルを Live 用にコピーする場所（絶対パス。デフォルトは `~/.config/ableton-mcp/import-staging`、Windows では `%APPDATA%\ableton-mcp\import-staging`） |
+| `ABLETON_MCP_USER_LIBRARY` | Drum Sampler に読み込むサンプルに使う、Live の User Library（ブリッジはその `Kumi` フォルダにキャリアプリセットを書き込みます） |
+| `ABLETON_MCP_LIVE_RESOURCES` | デフォルトの Drum Sampler プリセットがある、Live の Resources フォルダ |

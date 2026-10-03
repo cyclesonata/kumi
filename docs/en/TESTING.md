@@ -1,194 +1,171 @@
-# Testing guide
+# Testing
 
 English · [简体中文](../zh-CN/TESTING.md) · [日本語](../ja/TESTING.md)
 
-## MCP compatibility evidence
+How to run the tests of each part of the repository, what they need, and what
+CI runs. None of the ordinary tests need Live or a sign-in.
 
-`mcp-protocol.test.ts` covers modern discovery/inline metadata, version refusal,
-legacy fallback, sequential ID reuse vs in-flight rejection, private zero-TTL
-results, structured/coalesced replay flags, unchanged confirmation/policy and
-lost-reply ledger recovery, absent push, and cancellation through ordered flush.
-Transport regressions exercise immediate ID reuse from the exported `serve()`
-response-data handler (numeric/string IDs and success/error replies), plus
-cancellation after a completed success/error reply enters the serialized output
-queue behind a backpressured busy response. ID retirement and the final abort
-check occur at emission, not queue admission or write-callback completion;
-old-response cleanup cannot remove a reused ID's new cancellation owner. Both
-callback-only delay and drain backpressure are covered in `stdio.test.ts`.
-`verify-package.mjs` independently starts installed legacy and modern processes.
-These are host/fake-Live checks, not third-party-client or fresh Live certification.
+## Quick start
 
-## Transform invariants
-
-Rotation property tests include exact id-less duplicates and repeated object
-references: pitch multiplicity, input ordering and every non-pitch field survive.
-This fixes the pure helper; the MCP mutation path still requires stable note IDs.
-Note digests use UTF-16 code-unit ordering, never ICU collation; subprocess tests
-vary English/Swedish locales with a collation-sensitive fixture and retain
-representative ASCII digest pins.
-
-## Hierarchy invariants
-
-Chain lookup tests retain the actual containing device through later track
-siblings, nested racks, pad-only chains and racks inside pads. The owner-field
-bug was latent in current callers; tests do not claim a demonstrated Live edit.
-
-## Semantic privacy invariants
-
-Ordinary `Verse / Chorus` names survive name-retaining profiles; root, quoted,
-assigned, embedded unspaced absolute, drive, network, device and URI path shapes
-remain screened. Media basenames/project-relative locators pass the same screen
-before the final audit. Portable authority-like names such as
-`REUSABLE-TOKEN.wav` reproduce the old abort; a literal slash cannot be a single
-basename on supported filesystems and is not claimed as reproduced evidence.
-
-## Deterministic gates
-
-Run serially from `apps/mcp-server`:
+From a checkout, with Node 22/24 (Node 24 LTS recommended):
 
 ```sh
-npm ci
-npm run typecheck
-npm test
-npm run property-test
-npm run coverage
-npm run benchmark
-npm run audio:oracle
-npm run compatibility
-npm run package:verify
-npm run journey:verify
-npm pack --dry-run --json
+npm run setup                                   # install and build everything
+npm test                                        # Kumi: the app, the runtime and the Live extension
+(cd apps/mcp-server && npm test)                # the bridge
+python3 -m unittest discover -s remote-script -p 'test_*.py'   # the Remote Script
 ```
 
-Then run from the repository root:
+Some checks need more than Node:
+
+| Needs | For |
+| --- | --- |
+| Python 3 on PATH (`python3`, or `python.exe` on Windows; CI uses 3.11) | the Remote Script tests, `package:verify`, `journey:verify` |
+| `ffmpeg` on PATH | `audio:oracle` |
+| A locally supplied Extensions SDK in `vendor/` | building or type-checking the Live extension (its tests don't need it) |
+
+On Windows, a few tests create symlinks, which needs Developer Mode or an
+administrator account. Without it, some of them skip and a few fail with
+`EPERM`; CI's Windows runner has the right.
+
+## Kumi
+
+Run from the repository root.
+
+| Command | What it does |
+| --- | --- |
+| `npm run typecheck` | Builds the runtime, then type-checks the app and the runtime |
+| `npm test` | Builds, then runs the app's, the runtime's and the Live extension's tests |
+| `KUMI_TEST_BRIDGE=1 npm test` | The same, with the bridge interoperability test required rather than skipped; build the bridge first (`npm run setup` does) |
+
+`npm test` gives the tests a home of their own: `HOME`, `USERPROFILE`,
+`APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME` and `KUMI_HOME` point into a fresh
+temporary folder, and `KUMI_REMOTE_SCRIPTS_DIR` and `KUMI_LIVE_EXTENSIONS_DIR`
+are dropped, so no test can reach your Live folders or `~/.kumi`.
+
+## The bridge
+
+Run from `apps/mcp-server`, after `npm ci`.
+
+| Command | What it does |
+| --- | --- |
+| `npm run typecheck` | Type-checks the bridge |
+| `npm test` | Builds, runs every test file one at a time, then the script tests: release docs, capability manifest, docs drift and CI retention |
+| `npm run property-test` | Property tests of the audio analysis on generated audio: bounded, finite, no raw PCM in results |
+| `npm run coverage` | Tests with V8 coverage: at least 85% of lines, 65% of branches and 84% of functions overall, a floor for every module, and higher bars for delivery, lifecycle, host, remote-adapter, project and Session MIDI |
+| `npm run benchmark` | Latency at the largest audio input, uninstrumented; not part of `npm test` or coverage |
+| `npm run audio:oracle` | Compares the loudness and true-peak measurements with FFmpeg's `ebur128` on generated audio |
+| `npm run compatibility` | `policy:verify` (the Node policy in package.json, CI and the docs), then this Node and system |
+| `npm run package:verify` | Packs the bridge, installs the tarball and checks it (below) |
+| `npm run journey:verify` | Installs the packed bridge and drives the five user journeys through it, against a fake Live |
+| `npm run capability:manifest` | Regenerates `docs/evidence/capability-manifest.json` after a registry change; a test compares it |
+
+`package:verify` refuses any file outside its own list, checks every hash in
+`release-manifest.json` and that `LICENSE.md` matches the repository's. Then it
+starts the installed server in both MCP protocol eras, runs `setup`, `migrate`
+and `diagnostics`, runs the lifecycle (install, an activation that can't reach
+Live, repair, a refused rollback, uninstall) in a folder whose name has spaces
+and non-ASCII letters, and has the installed Remote Script answer an
+authenticated discovery against a fake Live. `ABLETON_MCP_ARTIFACT=<tarball>`
+makes `package:verify` and `journey:verify` check a given tarball instead of
+packing one.
+
+## The Remote Script
+
+From the repository root:
 
 ```sh
 python3 -m unittest discover -s remote-script -p 'test_*.py'
-git diff --check
-git diff --cached --check
+python3 -m compileall -q remote-script/AbletonMcpBridge
 ```
 
-Node tests compile into `dist/` and cover MCP lifecycle, schema validation,
-bounded concurrent stdio framing, async adapter behavior, authenticated
-loopback responses, Session audition preflight/apply/stop, transactions,
-capability-aware tool discovery and deployment policy profiles with
-list-changed notifications, deterministic seeded MIDI transforms with
-interim-fenced chunked execution and replay-aware resume, Browser inspection
-and hardened one-file import, read-only Arrangement-automation, take-lane/comp,
-and warp-marker probes with revision-bound paging, standards loudness/true peak, bounded reference alignment,
-secret-stripped worker cancellation/queue limits, secure WAV/ASD lifecycle,
-signal-chain diagnosis, consent-bound capture normal/cancel paths, properties,
-delivery, receipt-driven install/activation/upgrade/repair/rollback/uninstall,
-journey planning/fallback/rights/accessibility contracts, and package
-installation. `journey:verify` installs the packed artifact, translates only
-allowlisted traits, blocks identity/copy collisions, and drives every `planned`
-stage of all five plans through actual tool results. It validates stage/status
-ordering, binds events across any explicit replan, records package SHA-256 and
-terminal residual state, and covers MIDI/structure/Arrangement, expressive notes,
-Browser loading followed by capability replan and published-parameter undo,
-standards reference analysis and non-causal Live context,
-routing/recording/subscription/realtime contracts, uncertainty, and recovery
-with explicit `fake-live` provenance. Real-Live-only capture and host realtime
-authority remain unavailable in that evidence rather than being promoted. Python tests cover
-the dependency-free Control Surface entrypoint, canonical registry loading and
-hashing, authentication, sequencing/replay rejection, main-thread queueing,
-fake-Live references, hierarchical discovery, empty clip slots,
-shape-dependent operation advertisement, Session playback operations, Session
-MIDI, locators, structure, device/parameter validation, track-scoped routing
-choices, capture fences/watchdog/emergency/cleanup, and bridge teardown. The
-package verifier starts the installed production bridge and checks
-authenticated fake Set, scene, track, child-slot, and playback discovery.
+The tests run the Remote Script against fake Live objects: authentication,
+sequencing, the main-thread queue, the registry and its hash, discovery,
+transactions, capture and realtime safety, and the optional Willington provider.
 
-The offline-Set/MIDI regressions exercise malformed XML, comments/CDATA,
-child-value timing, unknown length refusal, source-byte evidence, root/symlink
-media boundaries, optional MIDI privacy and note-revision ordering, pre-expansion
-note limits, chord registers/bassline boundaries, and order-independent key
-ranking. Property-authority probes replace a Set/track identity while preserving
-its reference and values before/after apply and undo, and ensure uncertain undo
-cannot resume forward apply. These synthetic fixtures do not certify arbitrary
-Set versions, listening quality, or behavior in a running Live instance.
+## Kumi's Live extension
 
-CI builds one clean local unpublished tarball on Ubuntu 24.04, runs
-`package:verify` before upload, repeats the pack from a fresh detached local
-clone plus fresh `npm ci` and compares bytes, records the exact Git SHA and
-tarball SHA-256, then installs that same artifact in every Node 22/24 Ubuntu
-24.04, macOS 15, and Windows Server 2025 job. Each candidate job verifies strict
-inventory/hashes and exercises lifecycle plan/install, unavailable activation,
-idempotent repair, unowned rollback refusal, and uninstall; Windows additionally
-tests native ACL repair, junction refusal, held-file recovery, and shipped
-version-2 migration. The stable `Required CI` context fails unless the candidate,
-complete Node/OS matrix, and complete Python matrix all succeed. These remain
-host/package contracts.
+Root `npm test` runs `apps/live-extension/test`, which loads the committed
+`dist/extension.js` against a fake Live and checks it against its recorded
+sha256. Building it (`npm run build` in `apps/live-extension`) needs the
+Extensions SDK in `vendor/`; without it, the committed build stays as it is.
+After a rebuild, commit `dist/extension.js` with its `.sha256`.
 
-The operator-only packaged real-Live Phase 8 verifier is not a CI substitute.
-After installing an `npm pack` artifact and visibly preparing the disposable
-Set/output/destination route, run it with explicit evidence inputs:
+## Checks with Live or a model
+
+These are opt-in. They change real things or spend real tokens, so CI doesn't
+run them.
+
+| Command (from the root) | Needs | What it does |
+| --- | --- | --- |
+| `npm run accept:live --workspace @kumi/app -- --set "<Set>"` | Live with a disposable copy of a Set open | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
+| `npm run eval:changes --workspace @kumi/app [-- <case>]` | Your sign-in and model | How the model uses Kumi's tools, against a synthetic bridge with the real bridge's tool schemas. Never touches Live. |
+| `npm run probe:inference --workspace @kumi/app` | Your sign-in | One authenticated request with a harmless tool. Never touches Live. |
+
+After the bridge's tools change, run `node apps/kumi/scripts/make-bridge-tools.mjs`
+(with the bridge built) to refresh the schemas `eval:changes` uses.
+
+The bridge also has an operator-only capture check, `npm run audio:live-verify`
+in `apps/mcp-server`. It needs a bridge installed by the lifecycle and activated
+on real Live, a prepared disposable Set, and `PHASE8_CLI`, `PHASE8_RECEIPT`,
+`PHASE8_EXPECTED_GIT_SHA`, `PHASE8_TARBALL_SHA`,
+`PHASE8_EXPECTED_REGISTRY_HASH` and `PHASE8_OUTPUT_SAFETY_PROVENANCE` (optional:
+`PHASE8_CONFIG`, `PHASE8_SET_NAME`, `PHASE8_LIVE_VERSION`,
+`PHASE8_SOURCE_TRACK_INDEX`, `PHASE8_DESTINATION_TRACK_INDEX`,
+`PHASE8_RECORDED_DIRECTORY`). It checks the installed files against the receipt
+before touching Live, then records, cancels and recovers a capture, and puts
+back everything it changed.
+
+## Docs
+
+After editing docs, from `apps/mcp-server` (once `npm ci` has run there):
 
 ```sh
-PHASE8_CLI=/absolute/receipt-owned/dist/src/cli.js \
-PHASE8_CONFIG=/absolute/receipt-owned/bridge-config.json \
-PHASE8_RECEIPT=/absolute/receipt-owned/install-receipt.json \
-PHASE8_EXPECTED_GIT_SHA=<40-hex-candidate-sha> \
-PHASE8_TARBALL_SHA=<64-hex-artifact-sha256> \
-PHASE8_EXPECTED_REGISTRY_HASH=<64-hex-canonical-registry-sha256> \
-PHASE8_OUTPUT_SAFETY_PROVENANCE='<fresh operator observation>' \
-PHASE8_LIVE_VERSION='<visible Live version>' \
-  npm run audio:live-verify > /owner-only/path/phase-8-audio-live.json
+npm run policy:verify
+node --test scripts/docs-drift.test.mjs scripts/release-documentation.test.mjs
 ```
 
-Before touching Live, the verifier requires an activated real-Live lifecycle
-receipt, binds the expected clean Git SHA, artifact digest, canonical registry,
-receipt-owned CLI/configuration, release-manifest digest, every installed package
-file, and every installed Remote Script file, and rejects extra, missing,
-linked, or drifted package bytes. It then requires runtime `remote-script` /
-`real-live` provenance and the same registry hash. The verifier also refuses a
-missing raw-media directory, non-empty source device baseline, absent source
-clip, or destination other than visibly prepared
-`No Input`/unarmed/monitoring-off/empty. It verifies cancellation response
-suppression while the original host remains alive, kills another host during
-capture, requires mapper-watchdog finalization, independently recovers, and
-compensates its temporary notes/mixer/device mutations on failure.
+`policy:verify` checks that the docs stating the supported Node versions, and
+the README badges, still say 22 and 24. The drift test checks that the English,
+Chinese and Japanese user guides name the same tools, and that no file count
+sits next to words like manifest or tarball (name `release-manifest.json`
+instead). The release-documentation test stages the bridge's packed guides
+and checks every link in them. `npm run package:verify` checks the same guides
+inside the installed package.
 
-The built-in V8 coverage gate measures compiled runtime code (excluding the
-separate benchmark-only entrypoints and wall-clock benchmark test, which runs
-uninstrumented only in the standalone `npm run benchmark` gate and is deliberately excluded from `npm test` and coverage) and enforces at least 85% lines, 65%
-branches, and 84% functions overall, production-module floors, and stronger
-thresholds for delivery, lifecycle, host, remote-adapter, project, and Session
-MIDI modules. Instrumented timing is not performance evidence. Coverage is a
-regression signal, not a substitute
-for real-Live, security, recovery, or platform evidence.
+## CI
 
-The benchmark warms the declared maximum PCM input and reports repeated latency measurements. `audio:oracle` generates temporary PCM, compares BS.1770/EBU and true-peak outputs to FFmpeg `ebur128`, and removes the owner-only temporary tree; it commits no third-party audio. Latency, output size, bounded-memory, DSP-oracle, package, and real-Live evidence are distinct concerns; none substitutes for another.
+Three workflows run on every pull request and every push to `main`:
 
-## Compound recovery and library-reader regressions
+| Workflow | Jobs | What runs |
+| --- | --- | --- |
+| **CI** | `Build exact local candidate` (Ubuntu, Node 24) | Whitespace check; the bridge's typecheck, tests, property tests, coverage, benchmark, `audio:oracle`, `compatibility` and `package:verify`; packs the bridge twice (the second time from a fresh clone) and requires identical bytes; keeps the tarball as the `exact-local-candidate` artifact for 90 days |
+| | `Node 22, 24 / ubuntu-24.04, macos-15, windows-2025` (six jobs) | The bridge's typecheck, tests, property tests, benchmark and `compatibility`; `package:verify`, `scripts/verify-candidate.mjs` and `journey:verify` against that same tarball; setup, migration and diagnostics |
+| | `Python Remote Script contract` (the same three systems, Python 3.11) | Checks the Remote Script files against the tarball, runs the Python tests, compiles the package |
+| | `Required CI` | Passes only when all of the above passed |
+| **Kumi** | `Kumi / Node 22`, `Kumi / Node 24` (Ubuntu), `Kumi / macOS / Node 24`, `Kumi / Windows / Node 24` | Root typecheck, builds the bridge, `npm test` with `KUMI_TEST_BRIDGE=1`, `git diff --check` |
+| **Installer** | `Build the release bundle`, then `Install / macOS`, `Linux`, `Windows` | Builds the bundle and serves it locally. On each system: installs as producers do (Windows PowerShell 5.1 on Windows), checks the version, `doctor` and the bridge loading, installs again as a repair, runs `kumi bridge --yes` into a scratch Remote Scripts folder, `kumi update` (and `--rollback` on macOS and Linux), and `kumi uninstall`. On a `v*` tag, `publish` then attaches the bundle to the release. |
 
-`compound-recovery.test.ts` uses an explicit simulator execution ledger to test
-lost apply, compensation, and undo replies; exact argument/key retention;
-post-acknowledgement readback failures; rejection of externally matching values
-and substituted identities; and creation-time fingerprint fencing. It does not
-stand in for a production bridge or real-Live run. `batch.test.ts` also covers
-policy changes between preview/apply/undo and during awaited snapshots.
-`device-state.test.ts` covers duplicate sibling paths, refusal of output symlinks
-before writes, and quantization that never exceeds parameter bounds.
-
-`sqlite-reader.test.ts` checks signed 48-/64-bit integer decoding, precision
-refusal, negative row IDs, reserved-page-aware bounds, unsupported text encodings, and
-malformed b-tree/page bounds. Library search remains UTF-8-only, read-only and
-fail-closed for unsupported file layouts or uncheckpointed WAL.
+To merge into `main`, `Required CI` and the four Kumi jobs must pass. The
+Installer isn't required. [Releases and distribution](DISTRIBUTION_POLICY.md#merge-gate)
+has the rest of the rules.
 
 ## What passing means
 
-Passing proves deterministic repository behavior and package contracts. It does not prove a real Control Surface loaded in Ableton Live, a supported Live API shape, visible Set state, audible or realtime behavior, platform installer runtime, accessibility, hardware, signing, notarization, or release publication.
+Passing shows the code behaves as its tests say, the packages install and run
+on macOS, Linux and Windows, and the installer works on GitHub's runners. It
+doesn't show that the Remote Script loads in your Live, that Live's API has the
+shape the fakes have, how anything sounds, or that a terminal or screen reader
+works with Kumi. The opt-in checks above, and the records in
+[implementation status](IMPLEMENTATION_STATUS.md#evidence), cover real Live.
 
-## Change discipline
+## Writing tests
 
-Add success and fail-closed tests for every new protocol method or Live side
-effect. Cover stale epochs/cursors/revisions, expired confirmations,
-conflicting idempotency keys, timeouts, cancellation before and after
-dispatch, disconnects, lost acknowledgements, partial mutation, compensation
-failure, external edits, external playback, and guarded undo. The packaged production journey and tracked real-Live phase evidence must keep
-`fake-live`, simulator, and `real-live` provenance distinct. Phase 8 evidence
-must include normal capture, controlled recapture, cancellation cleanup, host-
-restart watchdog recovery, exact baseline readback, and zero WAV/ASD residuals.
-Keep fixtures bounded and privacy-preserving. Never open, copy, stage, package, or
-expose the protected local SDK evidence.
+For every new protocol method or change to Live, add a test that it works and
+tests that it refuses what it should: stale references, revisions and epochs,
+expired confirmations, a reused idempotency key, timeouts, cancellation before
+and after it's sent, disconnects, a lost acknowledgement, partial changes,
+failed compensation, a change made in Live meanwhile, and undo. Keep fake Live,
+the simulator and real Live apart in what a test claims (`fake-live`,
+`simulator` and `real-live` provenance). Keep fixtures small and free of
+private data, and never let a test reach real Live folders or `~/.kumi`.

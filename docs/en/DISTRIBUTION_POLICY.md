@@ -1,69 +1,95 @@
-# Distribution, signing, and publication policy
+# Releases and distribution
 
 English · [简体中文](../zh-CN/DISTRIBUTION_POLICY.md) · [日本語](../ja/DISTRIBUTION_POLICY.md)
 
-## Chosen channel
+How Kumi and its bridge reach people, what that does and doesn't prove, and
+what the bridge's package may contain. The steps for cutting a release are in
+[the developer guide](DEVELOPER_GUIDE.md#releasing).
 
-The only release channel configured in this repository is an **exact local npm
-tarball** created with `npm pack`. The software and tarball are licensed under
-the [MIT License](../../LICENSE.md). Package metadata remains `private: true` to
-prevent accidental `npm publish`; candidates are not published to npm, GitHub
-Releases, or another registry. Installation is by exact local path and SHA-256.
-The SHA proves byte integrity, not publisher identity.
+## Channels
 
-The local artifact is unsigned and is not Apple-notarized. Native macOS or
-Windows installers are not shipped. Public publication, code signing,
-notarization, and trademark review require a separate owner decision,
-authorized identities, and dedicated release gates. MIT grants software reuse
-and redistribution rights; it does not grant Ableton trademark rights, imply
-Ableton endorsement, establish publisher identity, or certify a platform.
+| What | Where | How people get it |
+| --- | --- | --- |
+| Kumi | GitHub Releases of `user1303836/kumi`: `kumi.tar.gz`, `kumi-release.json` and `SHA256SUMS`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
+| The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as the `npm pack` tarball and that tarball already installed | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
+| The bridge on its own | No release of its own. Build it with `npm pack`, or take the `exact-local-candidate` artifact a CI run keeps for 90 days | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 
-## Artifact allowlist
+The installer scripts are read from the `main` branch; the bundle they install
+comes from the latest published release (or the one `KUMI_VERSION` names). A
+release is a draft until the maintainer publishes it, and only a published
+release is "latest". Nothing is published to npm: every package is
+`private: true`, so `npm publish` refuses.
 
-The tarball may contain only:
+## Integrity, not identity
 
-- compiled runtime JavaScript and declarations (no source maps or tests);
-- the Remote Script, canonical operation registry, and their manifest;
-- the release manifest/provenance record and package metadata;
-- the MIT license notice; and
-- the allowlisted user, safety, operations, recovery, testing, support,
-  distribution, and implementation-status documents.
+Nothing is signed or notarized, and there are no native installers (`.pkg`,
+`.msi`). The installer checks the bundle against the sha256 in
+`kumi-release.json`, and Node against nodejs.org's `SHASUMS256.txt`; `kumi update`
+checks the bundle the same way, and `kumi bridge` checks the bridge's tarball
+against the hash recorded when the bundle was built. A checksum from the same
+place as the download proves the bytes arrived intact, not who made them.
 
-It must not contain verification/test runners, test fixtures, dependencies,
-credentials, configuration, local state, logs, backups, captured media,
-generated evidence, or any protected local SDK material. `package:verify`
-rejects every path outside the independently enumerated allowlist and verifies
-all manifest hashes. Release provenance records the exact Node, npm, and
-TypeScript versions, platform/architecture and hosted image identifiers,
-package-lock/workflow SHA-256 values, source commit/dirty state, and runnable
-recipe. CI repeats packing from a fresh detached local clone and fresh `npm ci`
-before comparing bytes; only an executed exact-SHA job proves it.
+The software is [MIT licensed](../../LICENSE.md). The licence grants no rights
+to Ableton's trademarks, and Kumi isn't affiliated with or endorsed by Ableton.
 
-## Required checks and emergency procedure
+## What the bridge's package may contain
 
-`Required CI` is the stable merge-gate context. It succeeds only when the exact
-candidate build, complete Node/OS installed-candidate matrix, and complete
-Python Remote Script matrix all succeed. The repository should have no standing
-ruleset bypass actor.
+- compiled runtime JavaScript and type declarations (no source maps, no tests);
+- the Remote Script, its README, the operation registry and their hash
+  manifest;
+- Kumi's Live extension: its manifest, `package.json`, built `extension.js` and
+  that file's sha256;
+- the bridge's guides (`README.md` and `release-docs/`);
+- `release-manifest.json`, `package.json` and `LICENSE.md`.
 
-An emergency settings change is reserved to the repository owner only. Before
-changing the rule, the owner must open an incident issue recording the reason,
-exact commit SHA, failed/unavailable check, risk, and recovery plan. The owner
-may then temporarily change only the blocking setting, merge the recorded SHA,
-immediately restore the rule, run the full exact-candidate matrix, and record a
-post-bypass review and result in the incident. A bypass never converts missing
-or failed evidence into a passing claim.
+Nothing else: no scripts, test fixtures, `node_modules`, credentials,
+configuration, local state, logs, captured media or evidence. `npm run
+package:verify` refuses any path outside its own explicit list, and
+`release-manifest.json` is the source of truth for the exact payload. CI packs
+the bridge twice, the second time from a fresh clone with a fresh `npm ci`, and
+requires identical bytes.
 
-## Evidence boundaries
+## The release manifest
 
-Linux is a host/package-contract platform only; Ableton Live is not certified
-there. macOS real-Live evidence currently covers the explicitly recorded Live
-12.4.5b8 beta environment. Windows CI can prove host, ACL, lifecycle, and
-package contracts but is not Windows Live evidence. An exact supported matrix
-and its unavailable cells are in `SUPPORT_MATRIX.md`.
+`release-manifest.json` (schema `ableton-mcp-release/v2`) records the package
+name and version, the source commit and whether the tree was dirty, the Node
+range and majors, the Node, npm and TypeScript versions and runner image that
+built it, the SHA-256 of `package-lock.json` and of the CI workflow, the build
+recipe, the protocol versions and registry hash, each payload file's role and
+SHA-256, and the distribution fields.
 
-A release candidate is eligible for the configured local channel only when the
-same tarball is reproducible, its manifest identifies the exact clean Git
-commit, all local and hosted gates for that SHA pass, and applicable real-Live
-evidence names the same artifact digest. Historical, simulator, fake-Live, or
-stale evidence never fills a missing candidate cell.
+The distribution fields say `channel: "local-npm-tarball"`, `published: false`,
+`signed: false` and `notarized: false`, and `package:verify` and the lifecycle
+require exactly those values. Here "local" and "unpublished" describe the
+tarball itself, built with `npm pack` and installed from a local path by its
+hash: never published to a registry. It does reach people inside the Kumi
+bundle on GitHub Releases. The lifecycle still accepts the older
+`ableton-mcp-private-release/v1` manifest so an existing installation can be
+upgraded or rolled back.
+
+## Merge gate
+
+The `main` branch has one ruleset:
+
+- changes arrive by pull request; no approving review is required;
+- required checks, which must pass on the branch as it is up to date with
+  `main`: `Required CI`, `Kumi / Node 22`, `Kumi / Node 24`,
+  `Kumi / Windows / Node 24` and `Kumi / macOS / Node 24`;
+- `main` can't be deleted or force-pushed;
+- the repository admin role can bypass these rules for pull requests.
+
+The Installer workflow isn't a required check, but on a tag its `publish` job
+runs only after the bundle has installed on macOS, Linux and Windows.
+[Testing](TESTING.md#ci) describes every job.
+
+## Open owner decisions
+
+- **Signing and notarization** of Kumi's bundle and installers on macOS and
+  Windows.
+- **Redistributing the Extensions SDK.** Kumi's Live extension is built from a
+  locally supplied pre-release Ableton Extensions SDK, which the repository
+  never commits because its licence restricts redistributing the SDK. The built
+  `extension.js` bundles the extension with the SDK code it uses, and it is
+  committed and shipped in the bridge's package and the Kumi bundle. Whether
+  that is allowed is for the owner to settle.
+- **The admin bypass** on the `main` ruleset: keep it, or remove it.

@@ -1,66 +1,43 @@
-# 跨平台交付与生命周期
+# 安装桥接
 
 [English](../en/DELIVERY.md) · 简体中文 · [日本語](../ja/DELIVERY.md)
 
-## 发布产物与渠道
+桥接由两部分组成：由 Live 加载的 `AbletonMcpBridge` Remote Script，以及由 Kumi（或其他 MCP 客户端）启动的本地 MCP 服务器。两者都在同一个包 `@ableton-mcp/mcp-server` 中，并由同一个工具安装：桥接的生命周期 CLI `ableton-mcp-lifecycle`。它在做任何修改之前先制定计划，把安装的内容记录在回执中，并且能够精确地修复、回滚和移除这些内容。使用 Kumi 时，`kumi bridge` 会替你运行它。
 
-唯一配置的发布产物是由 `npm pack` 创建的精确本地 npm tarball,按本地
-路径与 SHA-256 安装。它采用 MIT 许可;`private: true` 仅用于防止意外
-发布到 npm。该产物未签名、未公证、未发布。详见
-[DISTRIBUTION_POLICY.md](DISTRIBUTION_POLICY.md)。
+## 使用 Kumi 安装
 
-`package:verify` 拒绝精确允许列表之外的任何路径,逐字节比较打包与仓库中
-的 MIT 许可证,并对照每一个编译后的运行时、Remote Script、注册表、文档
-与许可证字节验证 `release-manifest.json`。tarball 只能包含编译后的运行时
-JavaScript 与声明、带注册表与清单的 Remote Script、发布清单与软件包元
-数据、MIT 许可证文件,以及允许列表中的用户/安全/运维文档。测试、验证
-脚本、源码映射、依赖、密钥、配置、状态、备份、日志、捕获的媒体、证据与
-受保护的本地材料都被排除。
+退出 Live，然后运行 `kumi bridge`。它会：
 
-新清单使用 `ableton-mcp-release/v2`、`local-npm-tarball` 渠道、MIT SPDX
-元数据与明确的 `license` 负载角色。生命周期仅为现有回执的升级/回滚严格
-兼容精确的旧版 v1/UNLICENSED/private 渠道元组;混合元组会被拒绝。清单
-记录软件包版本、精确源码提交与脏标志、Node 范围与主版本、宿主/桥接协议、
-规范注册表哈希、分发渠道、签名/公证/发布状态、文件角色与 SHA-256 值。
-发布候选必须来自干净提交。SHA-256 证明字节完整性,而不是发布者身份;MIT
-也不授予 Ableton 商标权或表示签名、认证、关联或认可。
+1. 在 Live 运行时拒绝执行，并请你确认 Live 已关闭（`--yes` 可事先确认）；
+2. 从 Kumi 发行包中把桥接的包复制到它专用的文件夹（在源码副本中则改用 `npm pack` 打包），并检查其哈希；
+3. 运行生命周期的 `install`，如果已经装有桥接则运行 `upgrade`：先给出计划，再执行修改；
+4. 把 Kumi 的 Live 扩展放进 Live 的 Extensions 文件夹，Live 12.4 及更高版本会运行它；
+5. 最多等待十分钟，等 Live 通过新桥接连接上来，期间每隔几秒运行一次生命周期的 `activate`。
 
-## 候选保留与获取
+之后首次打开 Live 时，请在 **Settings → Link, Tempo & MIDI** 中将 **AbletonMcpBridge** 选为 Control Surface。在有未提交修改的源码副本中，`kumi bridge --allow-dirty` 仍会安装（仅供开发者使用）。
 
-CI 为 `exact-local-candidate` 与匹配的 `candidate-verification-*` 请求 **90 天**保留期。这是获取窗口，不是永久发布渠道；仓库策略或删除可能缩短它，旧的过期产物也不会恢复。
-到期前，将 tarball、`candidate-metadata.json`、验证报告、run URL、精确 PR head 和受测提交 SHA 一起保存在所有者控制的归档中。即使源 SHA 相同，也不能用重建产物替换已绑定回执的字节。
+当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行 `kumi bridge`。`kumi uninstall` 会提出通过生命周期的 `uninstall` 把桥接和扩展从 Live 中移除，并且在 Live 仍从桥接的文件加载时保留这些文件。`kumi doctor` 检查整条链路。[Kumi 指南](KUMI_GUIDE.md#连接-live)从制作人的角度介绍了这些内容。
 
-选择目标提交的已完成成功 run，使用新的空下载目录（需 GitHub CLI）：
+| 内容 | 位置 |
+| --- | --- |
+| 桥接的包 | `~/.kumi/bridge/<version>-<time>/node_modules/@ableton-mcp/mcp-server` |
+| 它的状态：密钥、配置、回执、操作日志 | `~/.kumi/bridge/state`，或已安装的桥接配置所在的文件夹 |
+| Remote Script | User Library 的 Remote Scripts 文件夹中的 `AbletonMcpBridge`（见 [Live 的文件夹](#live-的文件夹)） |
+| Kumi 的 Live 扩展 | Live 的 Extensions 文件夹中的 `kumi.kumi` |
 
-```sh
-gh run view "$RUN_ID" --repo user1303836/kumi \
-  --json headSha,status,conclusion,url
-gh run download "$RUN_ID" --repo user1303836/kumi \
-  --name exact-local-candidate --dir "$CANDIDATE_DIR"
-gh run download "$RUN_ID" --repo user1303836/kumi \
-  --pattern 'candidate-verification-*' --dir "$EVIDENCE_DIR"
-```
+`KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 覆盖这两个 Live 文件夹，`KUMI_HOME` 改变 `~/.kumi` 的位置，`KUMI_BRIDGE_WAIT_SECONDS` 设置等待 Live 的时长（`0` 表示不等待）。Kumi 通过 `bridge-reference.json` 找到已安装的桥接，该文件由生命周期写在 Remote Script 旁边。
 
-将 run 的 `headSha` 与目标 PR head 比较，并从 run 保留实际 checkout 提交及 parents。PR CI 测试 GitHub 的**合成 merge commit**：元数据 `gitSha` 与 manifest 的 `source.commit` 标识该受测提交，不一定等于 `headSha`。将 parents 与目标 head / base 绑定；main push 通常使用同一 SHA。安装前也要比较 tarball SHA-256 与元数据。
-重跑 `apps/mcp-server/scripts/verify-candidate.mjs` 时，使用位于**元数据受测 SHA 的隔离源码 checkout**，在 `apps/mcp-server` 运行 `npm ci && npm run build`，再向检验器传入 tarball 和元数据绝对路径。不同 checkout 即使看似等价的 PR head 也会被拒绝；不要覆盖 `GITHUB_SHA` 来绕过。这验证字节与来源，不证明发布者身份或新增真实 Live 认证。过期后应请求新的已验证候选，不能依赖失效链接或用 `npx` 运行未发布包名。公开发布、签名与持久 beta 渠道仍需所有者单独决定。
+## 独立桥接
 
-## 支持矩阵
+供 Kumi 以外的 MCP 客户端使用。你需要 Node：支持 Node 22 和 24，推荐 Node 24 LTS。你还需要桥接的 tarball：
 
-Node 22、24 是显式支持的主版本，推荐 Node 24 LTS。Node 25 已终止维护，Node 26 尚未验证。
-旧 Node-25 策略的制品仍可用于收据绑定的状态验证、修复和精确回滚，但不能作为新安装 / 升级候选。
-1.0.2 允许从 1.0.1 显式升级；这不表示发布软件包或放松制品 / 收据校验。
-Linux、macOS 与 Windows 的宿主/
-软件包契约在 CI 运行。Live 认证是独立的,绝不从宿主测试推断;见
-[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md)。
+- **自己构建：** 在干净的源码副本中运行 `cd apps/mcp-server && npm ci && npm pack`。用未提交的修改构建的 tarball 只有加上 `--allow-dirty-private-build` 才能安装。
+- **或从 CI 获取：** 每次 CI 运行都会把 `exact-local-candidate` 产物保留 90 天，其中的 `candidate-metadata.json` 给出它的 sha256。在拉取请求上，它是用 GitHub 的合并提交构建的，而不是分支的最新提交。
 
-## 精确的平台设置
-
-### macOS 15(bash/zsh)
-
-使用用户级 Remote Scripts 目录;不要写入 Live 应用包内部。完整保留空格:
+把包安装到它长期存放的位置，然后把桥接安装进 Live。macOS（bash 或 zsh）：
 
 ```sh
-ARTIFACT="$(cd "$(dirname '/absolute/candidate.tgz')" && pwd)/$(basename '/absolute/candidate.tgz')"
+ARTIFACT=/absolute/path/to/ableton-mcp-mcp-server-x.y.z.tgz
 ARTIFACT_SHA="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 INSTALL_ROOT="$HOME/Library/Application Support/AbletonMcp/package"
 STATE="$HOME/Library/Application Support/AbletonMcp/state"
@@ -69,242 +46,122 @@ mkdir -p "$INSTALL_ROOT" "$REMOTE_SCRIPTS"
 npm install --prefix "$INSTALL_ROOT" --ignore-scripts --no-audit --no-fund "$ARTIFACT"
 PACKAGE_ROOT="$INSTALL_ROOT/node_modules/@ableton-mcp/mcp-server"
 LIFECYCLE="$INSTALL_ROOT/node_modules/.bin/ableton-mcp-lifecycle"
+
+"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" --state-dir "$STATE" \
+  --package-root "$PACKAGE_ROOT" --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA"
+# 阅读计划，退出 Live，然后：
+"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" --state-dir "$STATE" \
+  --package-root "$PACKAGE_ROOT" --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA" \
+  --apply --confirm-live-stopped
 ```
 
-从 Live 的正常 UI 停止它并确认已退出;生命周期绝不杀死它。运行下面的
-安装命令。重启 Live,打开 **Live → Settings → Link, Tempo & MIDI**,
-在一个 Control Surface 行中选择 `AbletonMcpBridge`,然后运行
-`activate`。卸载时,在 Live 停止状态下运行 lifecycle uninstall,重启
-Live 以卸载脚本,更新 MCP 客户端配置,保留状态/证据后才删除
-`$INSTALL_ROOT`。
-
-### Windows Server 2025 宿主契约 / Windows Live 过程(PowerShell)
-
-托管宿主契约使用 Windows Server 2025。Windows 11 + Ableton Live 未认证;
-以下是收集该缺失单元格的精确操作步骤,而不是通过声明:
+Windows（PowerShell）：
 
 ```powershell
-$Artifact = (Resolve-Path 'C:\absolute\candidate.tgz').Path
+$Artifact = (Resolve-Path 'C:\absolute\path\to\ableton-mcp-mcp-server-x.y.z.tgz').Path
 $ArtifactSha = (Get-FileHash -Algorithm SHA256 $Artifact).Hash.ToLowerInvariant()
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'AbletonMcp\package'
 $State = Join-Path $env:LOCALAPPDATA 'AbletonMcp\state'
-$RemoteScripts = Join-Path ([Environment]::GetFolderPath('MyMusic')) 'Ableton\User Library\Remote Scripts'
-New-Item -ItemType Directory -Force $InstallRoot,$RemoteScripts | Out-Null
+$RemoteScripts = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Ableton\User Library\Remote Scripts'
+New-Item -ItemType Directory -Force $InstallRoot, $RemoteScripts | Out-Null
 npm install --prefix $InstallRoot --ignore-scripts --no-audit --no-fund $Artifact
 $PackageRoot = Join-Path $InstallRoot 'node_modules\@ableton-mcp\mcp-server'
 $Lifecycle = Join-Path $InstallRoot 'node_modules\.bin\ableton-mcp-lifecycle.cmd'
+
 & $Lifecycle install --remote-scripts-dir $RemoteScripts --state-dir $State `
   --package-root $PackageRoot --artifact $Artifact --artifact-sha256 $ArtifactSha
+# 阅读计划，退出 Live（在任务管理器中确认），然后：
 & $Lifecycle install --remote-scripts-dir $RemoteScripts --state-dir $State `
   --package-root $PackageRoot --artifact $Artifact --artifact-sha256 $ArtifactSha `
   --apply --confirm-live-stopped
 ```
 
-第一次省略 `--apply` 并检查 JSON 计划。在第二条命令前,在 Live 的 UI
-中 visibly 停止它并在任务管理器中确认;不要自动化进程终止。重启 Live,
-在 **Options → Preferences → Link, Tempo & MIDI** 下选择
-`AbletonMcpBridge`,然后运行:
+如果你移动过 User Library，请改用它的 Remote Scripts 文件夹（见 [Live 的文件夹](#live-的文件夹)）。然后打开 Live，将 **AbletonMcpBridge** 选为 Control Surface，并用同样的三个文件夹选项运行 `activate`。[用户指南](USER_GUIDE.md)介绍了如何用 `--config <state>/bridge-config.json` 让 MCP 客户端指向已安装的服务器。
 
-```powershell
-& $Lifecycle activate --remote-scripts-dir $RemoteScripts --state-dir $State --package-root $PackageRoot
+升级时，把新的 tarball 安装到新的前缀下，然后用新的 `--package-root`、`--artifact` 和 `--artifact-sha256` 运行 `upgrade`。移除时，运行 `uninstall`，重启 Live，更新 MCP 客户端的配置，最后才删除 npm 前缀目录。
+
+## 生命周期 CLI 参考
+
+```text
+ableton-mcp-lifecycle <action> --remote-scripts-dir DIR [options]
 ```
 
-升级时,把新 tarball 安装到单独的 `$NewInstallRoot`,用 `Get-FileHash`
-计算其哈希,停止 Live,并使用下文 `upgrade` 的相同语法(换成新的软件包/
-tarball 路径)。卸载时,停止 Live,先运行计划,再运行
-`uninstall --apply --confirm-live-stopped`;重启 Live,更新客户端,保留
-回执/隔离证据,然后删除 npm 前缀。绝不要对未经回执证明的路径使用安装器
-或 `Remove-Item -Recurse`。
+| 操作 | 作用 | 需要 |
+| --- | --- | --- |
+| `install` | 创建仅限所有者访问的密钥和桥接配置，安装 Remote Script，写入回执 | `--artifact`、`--artifact-sha256`；Live 已停止 |
+| `activate` | 在不改动 Live 或安装的情况下，检查 Live 是否加载了这个桥接并通过它应答；把结果记录在回执中 | Live 正在运行，已选择 Control Surface |
+| `upgrade` | 用更新的包替换桥接，保留密钥，并保留上一个版本以供 `rollback` | 更新的 `--artifact`、它的 sha256、它的 `--package-root`；Live 已停止 |
+| `repair` | 把已安装的内容与回执比较；加上 `--apply` 时，把被改动的文件移到隔离区，并恢复包自带的文件 | — |
+| `rollback` | 回到上次升级时保留的版本 | Live 已停止 |
+| `uninstall` | 移除回执所拥有的文件；把被改动或未知的文件移到隔离区；保留密钥 | Live 已停止 |
+| `status` | 只读报告：回执、文件完整性、漂移、权限、能否回滚 | — |
 
-## 回执驱动的生命周期 CLI
+| 选项 | 含义 |
+| --- | --- |
+| `--remote-scripts-dir DIR` | Live 的 Remote Scripts 文件夹（必需） |
+| `--state-dir DIR` | 密钥、配置、回执和操作日志所在的位置。默认为 `~/.config/ableton-mcp`，在 Windows 上为 `%APPDATA%\ableton-mcp` |
+| `--package-root DIR` | 要使用的已安装包。默认：本 CLI 所属的包 |
+| `--artifact FILE`、`--artifact-sha256 HEX` | tarball 及其哈希；生命周期会对照 tarball 自身的清单检查已安装的包 |
+| `--config FILE`、`--secret FILE` | 配置和密钥的其他路径（默认：状态文件夹中的 `bridge-config.json` 和 `bridge.secret`） |
+| `--host`、`--port`、`--realtime-port` | 新安装使用的回环地址和端口：默认为 `127.0.0.1`（或 `::1`）、9765 和 9766 |
+| `--timeout-ms N` | 写入配置的桥接请求超时（默认 5000） |
+| `--apply` | 执行修改。没有它时，每个操作都只制定计划 |
+| `--confirm-live-stopped` | 表示你已退出 Live；带 `--apply` 的 `install`、`upgrade`、`rollback` 和 `uninstall` 需要它 |
+| `--purge-secret` | 与 `uninstall` 一起使用：同时删除密钥，前提是该密钥由生命周期创建 |
+| `--enable-bridge-diagnostics` | 与 `install` 一起使用：开启 Remote Script 的诊断日志 |
+| `--allow-dirty-private-build` | 接受用未提交的修改构建的包（仅供开发者使用） |
 
-所有示例都使用已安装产物中的 `ableton-mcp-lifecycle`。始终为所选 Live
-安装传递精确的 Live **Remote Scripts 父目录**。路径可以包含空格与
-Unicode。该工具绝不猜测应用包路径、绝不选择 Control Surface、绝不杀死
-Live,也绝不跟随符号链接/联接点祖先。
+每次运行都会在 stdout 上输出一个 JSON 结果（`ableton-mcp-lifecycle/v1`），其 `state` 为 `planned`、`completed`、`activation-required`、`blocked` 或 `failed`。被拒绝时则改为在 stderr 上输出 `ableton-mcp-lifecycle-error/v1`，其中的路径已被移除。被阻止、失败和被拒绝的运行以 2 退出。回执的状态在安装、升级、修复和回滚之后为 `installed-restart-required`，在 `activate` 通过桥接连上 Live 之后为 `activated`，移除之后为 `uninstalled`。
 
-选择所有者控制的状态与精确候选值:
+生命周期从不退出或启动 Live，从不选择 Control Surface，从不猜测 Live 的文件夹，也从不跟随给定路径中的符号链接或联接点（junction）。它在工作时持有锁，并为最近一次修改保留操作日志；中途失败时会恢复原有内容。运行被中断后，请先查看 `status` 和操作日志再重试，并按它们的提示使用 `repair` 或 `rollback`。
 
-其余示例使用上面 macOS 设置中的 POSIX shell 变量。在 Windows 上使用相应
-的 PowerShell 变量并以 `& $Lifecycle` 调用;选项名称与安全门完全相同。
+各操作的更多说明：
 
-每个变更命令都先支持不变更的计划(省略 `--apply`)。安装、升级、回滚
-与卸载还要求操作者停止 Live 并传递 `--confirm-live-stopped`;该工具
-绝不把进程不存在当作证明,也绝不杀死进程。
+- **安装**（`install`）在做任何修改之前，会对照哈希检查 tarball 的字节、对照 tarball 的清单检查包，并检查端口是否空闲。它会在 Remote Script 的文件夹中放一个名为 `__pycache__` 的空文件，使 Live 无法写入或加载它的编译副本；该位置上的其他任何东西都算作漂移。
+- **激活**（`activate`）只有在收到真实 Live 带有预期注册表哈希的经认证应答后，才会记录 `activated`。模拟器、过期或错误的注册表，或者没有应答，都会得到 `activation-required`，并说明下一步该做什么。已记录的激活只是历史，并不证明 Live 现在已连接。
+- **升级**（`upgrade`）要求严格更新的版本，并拒绝已漂移的文件。它会保留上一个版本和配置以供 `rollback`。
+- **修复**（`repair`）从不创建缺失的密钥，因为新的密钥就意味着对桥接的新授权。再次运行它不会做任何修改。
+- **卸载**（`uninstall`）会保留密钥（除非使用 `--purge-secret`），并保留诊断日志。删除只是普通的 unlink，而不是安全擦除。
 
-### 安装
+**诊断日志。** 安装时加上 `--enable-bridge-diagnostics`，Remote Script 会把简短、已脱敏的记录写入状态文件夹中的 `bridge-diagnostics.log`：仅限所有者访问，排队后在后台写入，最多 16 MiB。不加这个标志就没有日志。
+
+## Live 的文件夹
+
+| 文件夹 | macOS | Windows |
+| --- | --- | --- |
+| Remote Scripts（默认 User Library） | `~/Music/Ableton/User Library/Remote Scripts` | `Documents\Ableton\User Library\Remote Scripts`（或在 `OneDrive\Documents` 下） |
+| Extensions（Live 12.4 或更高） | `~/Library/Application Support/Ableton/Extensions` | `%LOCALAPPDATA%\Ableton\Extensions`（尚未确认） |
+| Control Surface 设置 | Live → Settings → Link, Tempo & MIDI | Options → Settings → Link, Tempo & MIDI |
+
+如果你移动过 User Library，Live 的 **Settings → Library** 会显示它的位置；Kumi 会从 Live 的偏好设置中自行找到它。切勿安装到 Live 的应用程序文件夹中。
+
+## 检查安装
 
 ```sh
-"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA"
-
-"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA" \
-  --apply --confirm-live-stopped
+ableton-mcp-diagnostics --config /absolute/path/to/bridge-config.json
 ```
 
-预检对精确的本地 tarball 字节做哈希,把 tarball 内嵌的发布清单与完整
-的严格清单/负载哈希绑定到解包的软件包根,验证发布清单、空的自有目标、
-祖先/链接安全、不同的回环端口与端口可用性,然后才创建状态。应用创建
-owner-only 密钥与配置,原子地安装 Remote Script/注册表/清单/引用,然后
-写入 owner-only 回执与日志。密钥、配置或桥接暂存之后的任何注入或真实
-失败,都会移除新授权并恢复先前状态。成功是
-`installed-restart-required`,而不是激活。
+它会输出一份 JSON 报告。遇到不受支持的 Node 或系统时以 1 退出；即使无法连接 Live 也以 0 退出，因此请阅读它的各个字段：
 
-只有在计划与应用命令中显式加入 `--enable-bridge-diagnostics`,Remote
-Script 文件诊断才会启用。该选项仅在 `$STATE/bridge-diagnostics.log`
-配置一个 owner-only、单链接的常规文件;固定且经脱敏的记录在回调线程外
-排队,文件上限为 256 KiB。不带该选项重新安装或卸载会禁用已配置的接收器;
-卸载后日志会保留供检查。详见 [OPERATIONS.md](OPERATIONS.md)。
+| 字段 | 含义 |
+| --- | --- |
+| `nodeSupported`、`platformSupported` | Node 和系统受支持 |
+| `readiness.package` | 包及其 Remote Script 文件存在且完好（并不表示 Live 已加载它们；`status` 检查的是已安装的副本） |
+| `readiness.configured` | 配置有效，指定了桥接，并且有可读取的密钥 |
+| `readiness.authenticatedBridge` | Remote Script 通过经认证的连接作出了应答，且探查成功（`registryHash` 显示其注册表） |
+| `readiness.realLiveOperational` | 该应答来自真实的 Live（`real-live` 来源），而不是模拟器 |
+| `ready` | 以上全部满足 |
 
-### 激活
+密钥永远不会被输出。重新安装并不能修复连接问题：请检查 Live 是否已重启、是否已选择 Control Surface，以及配置、密钥和端口是否一致。
 
-1. 重启 Live。
-2. 在 Live 偏好设置中选择 `AbletonMcpBridge` 作为 Control Surface。
-3. 运行:
+## 把配置迁移到版本 2
+
+默认情况下，`ableton-mcp-migrate` 会原样保留旧的（旧式或版本 1 的）客户端配置。如果提供了所有桥接字段和一个已存在的、仅限所有者访问的密钥，它会写出一份版本 2 的桥接配置：
 
 ```sh
-"$LIFECYCLE" activate --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
+ableton-mcp-migrate --input /absolute/old.json --output /absolute/bridge-v2.json \
+  --bridge-host 127.0.0.1 --bridge-port 9765 --realtime-port 9766 \
+  --secret-file /absolute/bridge.secret
 ```
 
-激活是只读的。只有在已认证状态、规范注册表身份、有界发现与
-`real-live` 来源之后,才记录 `activated`。伪造、模拟器、不可用、陈旧
-或错误注册表的响应保持 `activation-required`,并给出重启/选择修复
-指引。
-
-### 升级
-
-把新 tarball 安装到单独的软件包路径,停止 Live,审阅计划,然后应用:
-
-```sh
-"$LIFECYCLE" upgrade --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root '/absolute/new/package/root' \
-  --artifact '/absolute/path/to/new-candidate.tgz' \
-  --artifact-sha256 '<new-tarball-sha>'
-
-"$LIFECYCLE" upgrade --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root '/absolute/new/package/root' \
-  --artifact '/absolute/path/to/new-candidate.tgz' \
-  --artifact-sha256 '<new-tarball-sha>' \
-  --apply --confirm-live-stopped
-```
-
-升级拒绝漂移与相同候选,保留所有者密钥,暂存新配置/桥接,保留先前的
-配置与精确的 Remote Script 代际,验证哈希,并记录回滚身份。失败会恢复
-先前的桥接/配置,所有者回执不变。之后重启并激活。
-
-### 修复
-
-```sh
-"$LIFECYCLE" repair --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
-"$LIFECYCLE" repair --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" --apply
-```
-
-修复比对回执自有的哈希、未知文件、配置摘要与密钥权限。干净的修复是
-幂等的。应用把漂移的树/配置移入 owner-only 隔离区,只恢复清单自有的
-负载。缺失的密钥绝不静默重新生成,因为那会制造新的桥接授权。修复有
-变化后重启并激活。
-
-### 回滚
-
-```sh
-"$LIFECYCLE" rollback --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --apply --confirm-live-stopped
-```
-
-回滚要求回执绑定的保留代际,验证其文件,原子地交换桥接/配置,把失败
-代际隔离以支持反向回滚,并记录又一次重启/激活要求。没有精确的先前
-代际时拒绝。
-
-### 卸载
-
-```sh
-"$LIFECYCLE" uninstall --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --apply --confirm-live-stopped
-```
-
-移除精确的回执自有桥接文件与未变更的受管配置。被修改或未知的桥接内容
-移入隔离区而不是删除。密钥默认保留;只有对回执证明由本生命周期创建的
-密钥,才添加 `--purge-secret`。清除是普通解除链接,不是取证级安全擦除
-声明。最终回执记录 `uninstalled`;只有在客户端配置不再指向 npm 软件包
-后才单独删除它。重启 Live 以卸载 Control Surface。
-
-### 配置迁移
-
-迁移 CLI 默认保留 legacy/v1 输出。要生成精确的版本 2 桥接配置,提供
-每一个带授权的桥接字段与一个已存在的 owner-only 密钥;入口必须已经是
-绝对路径:
-
-```sh
-ableton-mcp-migrate --input '/absolute/legacy-or-v1.json' \
-  --output '/absolute/bridge-v2.json' \
-  --bridge-host 127.0.0.1 --bridge-port 9765 \
-  --realtime-port 9766 --secret-file '/absolute/bridge.secret'
-```
-
-它绝不在迁移期间创建密钥,绝不接受非回环主机,并拒绝畸形端口、链接/
-不安全密钥以及替换(除非显式 `--force`)。
-
-### 状态、日志与恢复
-
-```sh
-"$LIFECYCLE" status --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
-```
-
-状态是只读的,分别报告回执状态、软件包/配置/Remote Script 完整性、
-文件漂移、权限、回滚可用性、保留的清理或保留路径,以及历史激活回执。
-历史激活绝不是当前连通性证据;当安装完整性漂移时,会降级为等效的
-restart-required 状态。安装器在 Python 缓存目录路径上拥有一个名为
-`__pycache__` 的空常规文件。这个回执绑定的阻塞器阻止 Live 生成或加载
-未验证的字节码,同时保持源码模块可读。用目录、缓存负载、链接或任何
-其他条目替换它都是可处理的漂移。即使对于未列出该阻塞器的旧版回执,
-这个不变量也会被强制执行;状态/激活故障关闭,`repair --apply` 会迁移
-该代际。`lifecycle-journal.json` 记录上一次事务结果(不含密钥)。中断
-后不要盲目重试:检查回执、日志、隔离区、Live 进程与状态;按指示使用
-修复或回滚。
-
-## 已测试的故障矩阵
-
-单元测试与已安装 tarball 测试覆盖:空格/Unicode、不变更计划、显式停止
-确认、端口占用、所有者权限、叶子与祖先符号链接、每个提交边界后的安装
-失败、漂移/未知文件、回执绑定的 Python 字节码缓存阻塞、隔离、幂等修复、
-升级回滚、显式回滚、已升级代际注销、可重试的卸载清理、卸载保留/清除、
-畸形选项、restart-required 状态,以及诚实的不可用激活。托管 Windows
-运行增加原生 DACL 与占用文件/进程行为;macOS 运行增加 POSIX 模式/链接
-行为。通过的生命周期测试仍然不是已加载的 Windows Live Control Surface
-观察。
-
-## 首次设置决策路径（不是 #66 引导向导）
-
-1. 安装 Node 24 LTS（仍支持 22），获取并验证精确候选。
-2. 使用上述平台路径，查看 lifecycle install 计划，自行停止 Live，再带显式已停止确认执行。不要猜测 Remote Scripts 目录或绕过链接 / 所有权拒绝。
-3. 重启 Live，选择 `AbletonMcpBridge` Control Surface；执行 lifecycle `activate`，再运行 `ableton-mcp-diagnostics --config /absolute/bridge-config.json`。
-4. MCP 客户端使用同一 `--config` 与精确的已安装入口，协议方式见 [USER_GUIDE.md](USER_GUIDE.md)。
-
-| 阶段 | 证据 / 下一步 |
-|---|---|
-| Runtime / 平台 | `nodeSupported` / `platformSupported`；使用受支持环境，不覆盖 engine 限制 |
-| 软件包 | `readiness.package`、入口与 assets；目录存在不等于候选完整 |
-| 配置 / 密钥 | `config.valid`、`bridgeConfigured`、`secretPermissions`；修复回执绑定配置与所有者文件，不打印密钥 |
-| 安装位置 | lifecycle `status` 检查实际 Remote Scripts 位置；诊断的 `remoteScriptInstalled` 仅表示包内 assets，不证明 Live 已加载 |
-| 认证 bridge | `authenticatedReachable`、`registryHash`、`diagnosticErrors`；检查重启 / Control Surface / 同一配置密钥 / loopback 端口 / registry |
-| 真实 Live | `readiness.realLiveOperational`、`provenance`、discovery；simulator / fake-Live 不能满足 activation |
-| 发布 | `readiness.releaseCertified` 保持 false；另行保留精确候选矩阵与外部证据 |
-
-诊断退出码 0 **不等于就绪**，配置或连接字段仍可能为 false。不要以反复安装来修复连接，也不要删除不确定的 receipt / journal。
-setup 仍需参数；#66 的单命令可恢复引导、分阶段修复提示、确认目的目录和干净机器测试尚未实现。当前没有 `onboard` 命令或通用 `--yes` 授权绕过。
-
-## 分层诊断
-
-诊断报告五个独立的层:软件包、已配置桥接、已认证桥接、真实 Live 运行
-与发布认证。旧的 `ready` 摘要只对已认证的真实 Live 运行为真。发布认证
-在精确候选矩阵与外部门禁完成前保持 false。探测失败返回有界错误码,
-而不是变成正面证据。
+它从不创建密钥，只接受回环主机，并且在没有 `--force` 时拒绝替换已存在的文件。
