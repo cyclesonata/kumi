@@ -4075,9 +4075,14 @@ impl DeterministicLiveSimulator {
                 return Err(LiveError::range_error("parameter value violates quantization"));
             }
         }
-        if target.get("revision").filter(|v| !v.is_null()).cloned().unwrap_or(1.into())
-            != args.get("expectedRevision").cloned().unwrap_or(Value::Null)
-        {
+        let revision = target.get("revision").filter(|v| !v.is_null()).cloned().unwrap_or(1.into());
+        let expected_revision = args.get("expectedRevision").cloned().unwrap_or(Value::Null);
+        let same_revision = if revision.is_number() && expected_revision.is_number() {
+            revision.as_f64() == expected_revision.as_f64()
+        } else {
+            revision == expected_revision
+        };
+        if !same_revision {
             return Err(LiveError::error("parameter revision changed since preview"));
         }
         Ok(reference.into())
