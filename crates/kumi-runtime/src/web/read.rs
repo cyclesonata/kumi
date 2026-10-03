@@ -250,11 +250,9 @@ fn picture(url: &str, response: WebResponse, title: Option<String>) -> Page {
     page
 }
 fn pretty(value: &Value) -> String {
-    let mut bytes = Vec::new();
-    let mut serializer = serde_json::Serializer::with_formatter(&mut bytes, serde_json::ser::PrettyFormatter::with_indent(b" "));
-    value.serialize(&mut serializer).unwrap();
-    String::from_utf8(bytes).unwrap()
+    kumi_common::js::json::stringify_pretty(value, 1)
 }
+
 fn patch(url: &str, value: &Value, kind: &str, title: Option<String>, truncated: bool) -> Option<Page> {
     let summary = max_patch_summary(value)?;
     let mut page = Page::new(url, kind, format!("{summary}\n\nThe whole patch, as Max saves it:\n{}", pretty(value)));

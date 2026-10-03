@@ -434,3 +434,25 @@ async fn no_service_connection_is_said_as_offline() {
         "Kumi couldn't reach any search service (Exa, Parallel, Keenable, Firecrawl or DuckDuckGo): is this computer online?"
     );
 }
+#[tokio::test(flavor = "current_thread")]
+async fn max_patch_json_keeps_source_number_spelling_and_numeric_key_order() {
+    struct Patch;
+    #[async_trait(?Send)]
+    impl WebClient for Patch {
+        async fn fetch(&self, url: &str, _request: WebRequest) -> Result<WebResponse, WebFailure> {
+            Ok(WebResponse {
+                url: url.into(),
+                status: 200,
+                headers: Default::default(),
+                content_type: "application/json".into(),
+                charset: None,
+                body: br#"{"patcher":{"boxes":[{"box":{"maxclass":"newobj","text":"cycle~"}}],"lines":[],"rect":[0.0,1.0,1e-7,1e20],"10":"ten","2":"two"}}"#.to_vec(),
+                truncated: false,
+                skipped: false,
+            })
+        }
+    }
+    let page = read_page(&Patch, "https://example.com/device.maxpat", None, None).await.unwrap();
+    let text = page.text.split_once("The whole patch, as Max saves it:\n").unwrap().1;
+    assert_eq!(text,"{\n \"patcher\": {\n  \"2\": \"two\",\n  \"10\": \"ten\",\n  \"boxes\": [\n   {\n    \"box\": {\n     \"maxclass\": \"newobj\",\n     \"text\": \"cycle~\"\n    }\n   }\n  ],\n  \"lines\": [],\n  \"rect\": [\n   0,\n   1,\n   1e-7,\n   100000000000000000000\n  ]\n }\n}");
+}
