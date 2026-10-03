@@ -37,6 +37,10 @@ path = "src/bin/ableton-mcp-install-remote-script.rs"
 name = "ableton-mcp-lifecycle"
 path = "src/bin/ableton-mcp-lifecycle.rs"
 
+[[bin]]
+name = "ableton-mcp-analysis-worker"
+path = "src/bin/ableton-mcp-analysis-worker.rs"
+
 [dependencies]
 kumi-common.workspace = true
 async-trait.workspace = true
