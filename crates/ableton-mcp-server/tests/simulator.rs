@@ -153,3 +153,18 @@ fn simulator_subscriptions_preserve_set_identity_and_reentrant_removal() {
     live.reconnect().unwrap();
     assert_eq!(*seen.borrow(), vec![1]);
 }
+
+#[test]
+fn simulator_invalid_authority_fields_match_typescript_errors() {
+    let cases: Vec<Value> = serde_json::from_str(include_str!("fixtures/simulator-errors.json")).unwrap();
+    let mut mismatches = Vec::new();
+    for case in cases {
+        let live = DeterministicLiveSimulator::new();
+        let result = live.invoke(&serde_json::from_value(case["invocation"].clone()).unwrap());
+        let actual = result.err().map(|e| e.to_string());
+        if actual.as_deref() != case["error"].as_str() {
+            mismatches.push(format!("{}: got {:?}, expected {}", case["name"], actual, case["error"]));
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}

@@ -3952,6 +3952,9 @@ impl DeterministicLiveSimulator {
         let state = self.state.borrow();
         let path = clip_path(&state, reference)?;
         let clip = state.pointer(&path).unwrap();
+        if !args.contains_key("expectedClipAuthority") {
+            return Err(LiveError::error("unsupported simulator authority value"));
+        }
         if args.get("expectedClipAuthority") != Some(&Self::session_clip_authority(&state, reference)?)
             || args.get("expectedNotesRevision") != clip.get("notesRevision")
         {
@@ -4013,6 +4016,13 @@ impl DeterministicLiveSimulator {
         let mut current = Self::parameter_authority(&state, reference)?;
         if lean {
             current.as_object_mut().unwrap().remove("siblings");
+        }
+        if ["expectedObjectIdentity", "expectedOwnerRef", "expectedOwnerIdentity", "expectedTrackRef", "expectedTrackIdentity"]
+            .iter()
+            .any(|key| !args.contains_key(*key))
+            || (!lean && !args.contains_key("expectedSiblings"))
+        {
+            return Err(LiveError::error("unsupported simulator authority value"));
         }
         let mut expected = serde_json::json!({"ref":reference});
         for (key, arg) in [
@@ -4153,6 +4163,8 @@ impl DeterministicLiveSimulator {
     fn invoke_operation(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
         use serde_json::json;
         match operation {
+            "tuning.read" | "tuning.set" | "groove.read" | "groove.set" | "groove.edit" | "song.read" | "song.set"
+            | "song.time-convert" | "transport.action" => self.invoke_set_state(operation, args),
             "undo.step.begin" => {
                 let previous = self.undo_step.borrow_mut().take();
                 if let Some(step) = &previous {
@@ -4263,6 +4275,194 @@ impl DeterministicLiveSimulator {
                 Ok(json!({"changed":true,"revision":revision}))
             }
             "session.clip-launch" | "session.clip-stop" => self.session_clip_playback(operation, args),
+            "track.create" => {
+                self.require_structure_revision(args)?;
+                let kind = args
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .filter(|kind| ["midi", "audio"].contains(kind))
+                    .ok_or_else(|| LiveError::type_error("track kind must be audio or midi"))?;
+                let name = string_arg(args, "name")?;
+                let mut state = self.state.borrow_mut();
+                let size = array(&state["tracks"]).len();
+                let index = if let Some(value) = args.get("index") {
+                    value
+                        .as_u64()
+                        .and_then(|v| usize::try_from(v).ok())
+                        .filter(|v| *v <= size)
+                        .ok_or_else(|| LiveError::range_error("track index is invalid"))?
+                } else {
+                    size
+                };
+                let number = size as u64 + self.sequence.get() + 1;
+                let reference = format!("track:track-{number}");
+                let slots=array(&state["scenes"]).iter().map(|scene|json!({"ref":format!("clip-slot:{number}:{}",scene["index"]),"parentRef":reference,"objectIdentity":format!("simulator:clip-slot:{number}:{}",scene["index"]),"sceneIndex":scene["index"],"clipRef":null,"empty":true})).collect::<Vec<_>>();
+                let track = json!({"ref":reference,"objectIdentity":format!("simulator:track:{number}"),"name":name,"kind":"regular","mediaKind":kind,"volume":0.85,"pan":0,"mute":false,"solo":false,"armed":false,"clips":[],"clipSlots":slots,"devices":[],"sends":[0,0]});
+                state["tracks"].as_array_mut().unwrap().insert(index, track.clone());
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.clone().into()), json!({"operation":operation,"track":track}));
+                let mut result = track;
+                result["kind"] = kind.into();
+                result["index"] = index.into();
+                result["createdFingerprint"] = self.structure_created_fingerprint("track", &reference)?.into();
+                Ok(result)
+            }
+            "track.delete" => {
+                self.require_structure_revision(args)?;
+                let reference = string_arg(args, "ref")?;
+                let mut state = self.state.borrow_mut();
+                let index = array(&state["tracks"])
+                    .iter()
+                    .position(|track| track["ref"] == reference)
+                    .ok_or_else(|| LiveError::error(format!("unknown track reference: {reference}")))?;
+                if args.get("expectedObjectIdentity") != state["tracks"][index].get("objectIdentity") {
+                    return Err(LiveError::error("track object identity changed; deletion refused"));
+                }
+                let mut members = HashSet::new();
+                if state["tracks"][index]["kind"] == "group" {
+                    let mut pending = vec![reference.to_string()];
+                    while let Some(group) = pending.pop() {
+                        for track in array(&state["tracks"]) {
+                            if track["groupTrackRef"] == group {
+                                if let Some(r) = track["ref"].as_str() {
+                                    if members.insert(r.to_string()) {
+                                        pending.push(r.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let deleted = state["tracks"].as_array_mut().unwrap().remove(index);
+                state["tracks"].as_array_mut().unwrap().retain(|track| track["ref"].as_str().is_none_or(|r| !members.contains(r)));
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":operation,"track":deleted}));
+                Ok(json!({"deleted":reference}))
+            }
+            "scene.create" => {
+                self.require_structure_revision(args)?;
+                let name = string_arg(args, "name")?;
+                let mut state = self.state.borrow_mut();
+                let size = array(&state["scenes"]).len();
+                let index = if let Some(value) = args.get("index") {
+                    value
+                        .as_u64()
+                        .and_then(|v| usize::try_from(v).ok())
+                        .filter(|v| *v <= size)
+                        .ok_or_else(|| LiveError::range_error("scene index is invalid"))?
+                } else {
+                    size
+                };
+                let number = size as u64 + self.sequence.get() + 1;
+                let reference = format!("scene:scene-{number}");
+                let scene = json!({"ref":reference,"objectIdentity":format!("sim-object:scene:{number}"),"name":name,"index":index});
+                state["scenes"].as_array_mut().unwrap().insert(index, scene.clone());
+                for (i, scene) in state["scenes"].as_array_mut().unwrap().iter_mut().enumerate() {
+                    scene["index"] = i.into();
+                }
+                for track in state["tracks"].as_array_mut().unwrap() {
+                    let mut slots = array(&track["clipSlots"]).to_vec();
+                    for slot in &mut slots {
+                        if slot["sceneIndex"].as_u64().unwrap() >= index as u64 {
+                            slot["sceneIndex"] = (slot["sceneIndex"].as_u64().unwrap() + 1).into();
+                        }
+                    }
+                    let track_ref = track["ref"].as_str().unwrap();
+                    slots.push(json!({"ref":format!("clip-slot:{track_ref}:{reference}"),"parentRef":track_ref,"objectIdentity":format!("simulator:clip-slot:{track_ref}:{reference}"),"sceneIndex":index,"clipRef":null,"empty":true}));
+                    slots.sort_by_key(|slot| slot["sceneIndex"].as_u64().unwrap());
+                    track["clipSlots"] = Value::Array(slots);
+                }
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.clone().into()), json!({"operation":operation,"scene":scene}));
+                let mut result = self.get(&reference.clone().into())?.unwrap();
+                result["createdFingerprint"] = self.structure_created_fingerprint("scene", &reference)?.into();
+                Ok(result)
+            }
+            "scene.delete" => {
+                self.require_structure_revision(args)?;
+                let reference = string_arg(args, "ref")?;
+                let mut state = self.state.borrow_mut();
+                let index = array(&state["scenes"])
+                    .iter()
+                    .position(|scene| scene["ref"] == reference)
+                    .ok_or_else(|| LiveError::error(format!("unknown scene reference: {reference}")))?;
+                if args.get("expectedObjectIdentity") != state["scenes"][index].get("objectIdentity") {
+                    return Err(LiveError::error("scene object identity changed; deletion refused"));
+                }
+                state["scenes"].as_array_mut().unwrap().remove(index);
+                for (i, scene) in state["scenes"].as_array_mut().unwrap().iter_mut().enumerate() {
+                    scene["index"] = i.into();
+                }
+                for track in state["tracks"].as_array_mut().unwrap() {
+                    track["clipSlots"] = Value::Array(
+                        array(&track["clipSlots"])
+                            .iter()
+                            .filter(|slot| slot["sceneIndex"].as_u64() != Some(index as u64))
+                            .cloned()
+                            .map(|mut slot| {
+                                let old = slot["sceneIndex"].as_u64().unwrap();
+                                if old > index as u64 {
+                                    slot["sceneIndex"] = (old - 1).into();
+                                }
+                                slot
+                            })
+                            .collect(),
+                    );
+                }
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":operation,"ref":reference}));
+                Ok(json!({"deleted":reference}))
+            }
+            "track.rename" | "scene.rename" | "clip.rename" | "device.rename" | "locator.rename" => {
+                let reference = string_arg(args, "ref")?;
+                let name = string_arg(args, "name")?;
+                let mut state = self.state.borrow_mut();
+                let path = match operation {
+                    "track.rename" => {
+                        array(&state["tracks"]).iter().position(|row| row["ref"] == reference).map(|i| format!("/tracks/{i}"))
+                    }
+                    "scene.rename" => {
+                        array(&state["scenes"]).iter().position(|row| row["ref"] == reference).map(|i| format!("/scenes/{i}"))
+                    }
+                    "locator.rename" => array(&state["arrangement"]["locators"])
+                        .iter()
+                        .position(|row| row["ref"] == reference)
+                        .map(|i| format!("/arrangement/locators/{i}")),
+                    "clip.rename" => array(&state["tracks"])
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, t)| {
+                            array(&t["clips"]).iter().position(|row| row["ref"] == reference).map(|j| format!("/tracks/{i}/clips/{j}"))
+                        })
+                        .or_else(|| {
+                            array(&state["arrangementClips"])
+                                .iter()
+                                .position(|item| item["clip"]["ref"] == reference)
+                                .map(|i| format!("/arrangementClips/{i}/clip"))
+                        }),
+                    _ => array(&state["tracks"]).iter().enumerate().find_map(|(i, t)| {
+                        array(&t["devices"]).iter().position(|row| row["ref"] == reference).map(|j| format!("/tracks/{i}/devices/{j}"))
+                    }),
+                };
+                let target = path.as_ref().and_then(|path| state.pointer(path));
+                let authority=match operation{
+                    "track.rename"|"scene.rename"=>target.map(|target|simulator_revision(&json!({"ref":target["ref"],"objectIdentity":target["objectIdentity"],"name":target["name"]}))),
+                    "locator.rename"=>state["arrangement"]["locatorRevision"].as_str().map(String::from),
+                    "clip.rename"=>Some(if reference.starts_with("arrangement-clip:"){simulator_revision(&json!({"expectedObjectIdentity":target.map(|t|&t["objectIdentity"]),"expectedAuthorityRevision":Self::arrangement_authority_revision(&state,reference)?}))}else{simulator_revision(&Self::session_clip_authority(&state,reference)?)}),
+                    _=>array(&state["tracks"]).iter().find_map(|track|array(&track["devices"]).iter().find(|device|device["ref"]==reference).map(|device|simulator_revision(&json!({"ref":device["ref"],"objectIdentity":device["objectIdentity"],"trackRef":track["ref"],"trackIdentity":track["objectIdentity"],"ownerRef":track["ref"],"ownerIdentity":track["objectIdentity"],"siblings":array(&track["devices"]).iter().map(|d|json!({"ref":d["ref"],"objectIdentity":d["objectIdentity"]})).collect::<Vec<_>>()})))),
+                };
+                if target.is_none()
+                    || target.unwrap().get("objectIdentity") != args.get("expectedObjectIdentity")
+                    || target.unwrap().get("name") != args.get("expectedName")
+                    || authority.as_deref() != args.get("expectedAuthorityRevision").and_then(Value::as_str)
+                {
+                    return Err(LiveError::error("rename target identity, hierarchy, or name changed since preview"));
+                }
+                state.pointer_mut(&path.unwrap()).unwrap()["name"] = name.into();
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":operation,"name":name}));
+                Ok(json!({"renamed":reference,"name":name}))
+            }
             "clip.create" => {
                 let reference = string_arg(args, "trackRef")?;
                 let mut state = self.state.borrow_mut();
@@ -4407,6 +4607,14 @@ impl DeterministicLiveSimulator {
                     .into_iter()
                     .map(|key| (key.into(), mixer[key].clone()))
                     .collect();
+                if args.get("expectedObjectIdentity") == track.get("objectIdentity")
+                    && args.get("expectedVolumeIdentity") == mixer.get("volumeIdentity")
+                    && args.get("expectedPanIdentity") == mixer.get("panIdentity")
+                    && args.get("expectedCueIdentity") == mixer.get("cueIdentity")
+                    && !args.contains_key("expectedSendIdentities")
+                {
+                    return Err(LiveError::error("unsupported simulator authority value"));
+                }
                 if args.get("expectedObjectIdentity") != track.get("objectIdentity")
                     || args.get("expectedVolumeIdentity") != mixer.get("volumeIdentity")
                     || args.get("expectedPanIdentity") != mixer.get("panIdentity")
@@ -4776,5 +4984,336 @@ impl DeterministicLiveSimulator {
         let payload = if launching { json!({"operation":operation,"slot":reference}) } else { json!({"operation":operation}) };
         self.emit(LiveEventType::Transport, Some(reference.into()), payload);
         Ok(if launching { json!({"launched":reference,"targets":[target]}) } else { json!({"stopped":true}) })
+    }
+}
+
+impl DeterministicLiveSimulator {
+    fn require_structure_revision(&self, args: &Map<String, Value>) -> Result<(), LiveError> {
+        let state = self.state.borrow();
+        let revision = crate::registry::sha256_hex(&kumi_common::js::json::stringify(
+            &serde_json::json!({"tracks":array(&state["tracks"]).iter().enumerate().map(|(index,item)|serde_json::json!([item["ref"],item["objectIdentity"],item["name"],item["kind"],index])).collect::<Vec<_>>(),"scenes":array(&state["scenes"]).iter().enumerate().map(|(index,item)|serde_json::json!([item["ref"],item["objectIdentity"],item["name"],index])).collect::<Vec<_>>()}),
+        ));
+        if args.get("expectedStructureRevision") != Some(&Value::String(revision)) {
+            Err(LiveError::error("Session structure changed since preview"))
+        } else {
+            Ok(())
+        }
+    }
+    fn arrangement_authority_revision(state: &Value, reference: &str) -> Result<String, LiveError> {
+        let item = array(&state["arrangementClips"])
+            .iter()
+            .find(|item| item["clip"]["ref"] == reference)
+            .ok_or_else(|| LiveError::error("Arrangement clip hierarchy is unavailable"))?;
+        let track = array(&state["tracks"])
+            .iter()
+            .find(|track| track["ref"] == item["trackRef"])
+            .ok_or_else(|| LiveError::error("Arrangement clip hierarchy is unavailable"))?;
+        Ok(simulator_revision(
+            &serde_json::json!({"clip":{"ref":reference,"objectIdentity":item["clip"]["objectIdentity"]},"owner":{"ref":track["ref"],"objectIdentity":track["objectIdentity"]},"siblings":array(&state["arrangementClips"]).iter().filter(|item|item["trackRef"]==track["ref"]).map(|item|serde_json::json!({"ref":item["clip"]["ref"],"objectIdentity":item["clip"]["objectIdentity"]})).collect::<Vec<_>>()}),
+        ))
+    }
+    fn structure_created_fingerprint(&self, kind: &str, reference: &str) -> Result<String, LiveError> {
+        use serde_json::json;
+        let snapshot = self.snapshot_value();
+        if kind == "track" {
+            let track = array(&snapshot["tracks"])
+                .iter()
+                .find(|track| track["ref"] == reference)
+                .ok_or_else(|| LiveError::error("created track fingerprint is unavailable"))?;
+            let typed: Track = from_live_json(track.clone())?;
+            let owned = owned_track_fingerprint_row(&typed);
+            let clips = array(&snapshot["arrangement"]["clips"])
+                .iter()
+                .filter(|clip| clip["trackRef"] == reference || clip["parentRef"] == reference)
+                .cloned()
+                .collect::<Vec<_>>();
+            return Ok(simulator_revision(&json!({"track":owned,"arrangementClips":clips})));
+        }
+        let scene = array(&snapshot["scenes"])
+            .iter()
+            .find(|scene| scene["ref"] == reference)
+            .ok_or_else(|| LiveError::error("created scene fingerprint is unavailable"))?;
+        let scene_identity = json!({"ref":scene["ref"],"parentRef":scene["parentRef"],"objectIdentity":scene["objectIdentity"],"name":scene["name"],"triggerable":scene["triggerable"]});
+        let contents=array(&snapshot["tracks"]).iter().map(|track|{let slot=array(&track["clipSlots"]).iter().find(|slot|slot["sceneIndex"]==scene["index"]);let clip=slot.and_then(|slot|array(&track["clips"]).iter().find(|clip|clip["ref"]==slot["clipRef"]));let owned=slot.map(|slot|json!({"ref":slot["ref"],"parentRef":slot["parentRef"],"trackRef":slot["trackRef"],"objectIdentity":slot["objectIdentity"],"clipRef":slot["clipRef"],"empty":slot["empty"]}));json!({"trackRef":track["ref"],"trackIdentity":track["objectIdentity"],"slot":owned,"clip":clip})}).collect::<Vec<_>>();
+        Ok(simulator_revision(&json!({"scene":scene_identity,"contents":contents})))
+    }
+}
+
+fn ranged_number(value: &Value, min: f64, max: f64, integer: bool, message: &str) -> Result<f64, LiveError> {
+    value
+        .as_f64()
+        .filter(|v| v.is_finite() && *v >= min && *v <= max && (!integer || v.fract() == 0.0))
+        .ok_or_else(|| LiveError::range_error(message))
+}
+fn bounded_text(value: &Value, max: usize, message: &str) -> Result<String, LiveError> {
+    value
+        .as_str()
+        .filter(|s| !s.is_empty() && kumi_common::js::string::utf16_len(s) <= max)
+        .map(String::from)
+        .ok_or_else(|| LiveError::range_error(message))
+}
+fn song_settings_state(song: &Value) -> Value {
+    serde_json::json!({"selectOnLaunch":song["selectOnLaunch"],"signatureNumerator":song["signatureNumerator"],"signatureDenominator":song["signatureDenominator"],"swingAmount":song["swingAmount"],"clipTriggerQuantization":song["clipTriggerQuantization"]["value"],"midiRecordingQuantization":song["midiRecordingQuantization"]["value"]})
+}
+impl DeterministicLiveSimulator {
+    fn invoke_set_state(&self, operation: &str, args: &Map<String, Value>) -> Result<Value, LiveError> {
+        use serde_json::json;
+        let mut state = self.state.borrow_mut();
+        match operation {
+            "tuning.read" => Ok(
+                json!({"tuningSystem":state["tuning"]["system"],"scale":state["tuning"]["scale"],"revision":simulator_revision(&state["tuning"])}),
+            ),
+            "groove.read" => Ok(
+                json!({"grooveAmount":state["groovePool"]["amount"],"grooves":state["groovePool"]["grooves"],"revision":simulator_revision(&state["groovePool"])}),
+            ),
+            "song.read" => {
+                let mut result = state["song"].clone();
+                result["revision"] = simulator_revision(&result).into();
+                Ok(result)
+            }
+            "tuning.set" | "groove.set" | "song.set" => {
+                if args.get("setRef") != state["set"].get("ref") || args.get("expectedObjectIdentity") != state["set"].get("objectIdentity")
+                {
+                    return Err(LiveError::error("Set identity changed since preview"));
+                }
+                let field = if operation == "tuning.set" {
+                    "tuning"
+                } else if operation == "groove.set" {
+                    "groovePool"
+                } else {
+                    "song"
+                };
+                let prior = if field == "song" { song_settings_state(&state[field]) } else { state[field].clone() };
+                let expected = if field == "song" { "expectedStateRevision" } else { "expectedRevision" };
+                if args.get(expected) != Some(&Value::String(simulator_revision(&prior))) {
+                    return Err(LiveError::error(match field {
+                        "tuning" => "tuning or scale state changed since preview",
+                        "groovePool" => "groove state changed since preview",
+                        _ => "song settings state changed since preview",
+                    }));
+                }
+                let target = &mut state[field];
+                if field == "tuning" {
+                    if let Some(value) = args.get("name") {
+                        target["system"]["name"] = bounded_text(value, 256, "name is invalid")?.into();
+                    }
+                    for key in ["lowestNote", "highestNote", "referencePitch"] {
+                        if let Some(value) = args.get(key) {
+                            let valid = value.as_object().is_some_and(|fields| {
+                                fields.len() <= 8
+                                    && fields.iter().all(|(key, value)| {
+                                        let length = kumi_common::js::string::utf16_len(key);
+                                        length > 0
+                                            && length <= 64
+                                            && (value.is_null()
+                                                || value.is_boolean()
+                                                || value.as_f64().is_some_and(|v| v.is_finite() && v.abs() <= 1e9)
+                                                || value.as_str().is_some_and(|s| kumi_common::js::string::utf16_len(s) <= 256))
+                                    })
+                            });
+                            if !valid {
+                                return Err(LiveError::range_error("tuning setting dictionaries are invalid"));
+                            }
+                            target["system"][key] = value.clone();
+                        }
+                    }
+                    if let Some(value) = args.get("noteTunings") {
+                        if !value.as_array().is_some_and(|rows| {
+                            rows.len() == 128
+                                && rows.iter().all(|row| {
+                                    row["note"].as_f64().is_some_and(|n| n.is_finite() && n.fract() == 0.0 && (0.0..=127.0).contains(&n))
+                                        && row["deviation"].as_f64().is_some_and(|n| n.is_finite() && n.abs() <= 1200.0)
+                                })
+                        }) {
+                            return Err(LiveError::range_error("noteTunings must contain exactly 128 valid entries"));
+                        }
+                        if array(value).iter().map(|row| row["note"].as_f64().unwrap() as i64).collect::<HashSet<_>>().len() != 128 {
+                            return Err(LiveError::range_error("noteTunings notes are invalid"));
+                        }
+                        target["system"]["noteTunings"] = value.clone();
+                    }
+                    if let Some(value) = args.get("rootNote") {
+                        ranged_number(value, 0.0, 11.0, true, "rootNote is invalid")?;
+                        target["scale"]["rootNote"] = value.clone();
+                    }
+                    if let Some(value) = args.get("scaleName") {
+                        target["scale"]["scaleName"] = bounded_text(value, 256, "scaleName is invalid")?.into();
+                    }
+                    if let Some(value) = args.get("scaleMode") {
+                        if !value.is_boolean() {
+                            return Err(LiveError::range_error("scaleMode is invalid"));
+                        }
+                        target["scale"]["scaleMode"] = value.clone();
+                    }
+                    if args.contains_key("scaleIntervals") {
+                        return Err(LiveError::range_error("scaleIntervals is read-only and cannot be assigned"));
+                    }
+                } else if field == "groovePool" {
+                    target["amount"] =
+                        ranged_number(args.get("grooveAmount").unwrap_or(&Value::Null), 0.0, 1.3, false, "grooveAmount is invalid")?.into();
+                } else {
+                    for key in ["signatureNumerator", "signatureDenominator"] {
+                        if let Some(value) = args.get(key) {
+                            ranged_number(value, 1.0, 99.0, true, &format!("{key} is invalid"))?;
+                            target[key] = value.clone();
+                        }
+                    }
+                    if let Some(value) = args.get("swingAmount") {
+                        ranged_number(value, 0.0, 1.0, false, "swingAmount is invalid")?;
+                        target["swingAmount"] = value.clone();
+                    }
+                    if let Some(value) = args.get("clipTriggerQuantization") {
+                        let index = ranged_number(value, 0.0, 13.0, true, "clipTriggerQuantization is invalid")? as usize;
+                        let names = [
+                            "none", "8-bars", "4-bars", "2-bars", "1-bar", "1/2", "1/2T", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T",
+                            "1/32",
+                        ];
+                        target["clipTriggerQuantization"] = json!({"name":names[index],"value":value});
+                    }
+                    if let Some(value) = args.get("selectOnLaunch") {
+                        if !value.is_boolean() {
+                            return Err(LiveError::type_error("selectOnLaunch is invalid"));
+                        }
+                        target["selectOnLaunch"] = value.clone();
+                    }
+                    if let Some(value) = args.get("midiRecordingQuantization") {
+                        let index = ranged_number(value, 0.0, 8.0, true, "midiRecordingQuantization is invalid")? as usize;
+                        target["midiRecordingQuantization"] = json!({"name":format!("rec_quantisation_{index}"),"value":value});
+                    }
+                }
+                drop(state);
+                self.emit(LiveEventType::State, None, json!({"operation":operation}));
+                let state = self.state.borrow();
+                let next = if field == "song" { song_settings_state(&state[field]) } else { state[field].clone() };
+                Ok(json!({"changed":true,"revision":simulator_revision(&next)}))
+            }
+            "groove.edit" => {
+                let reference = string_arg(args, "ref")?;
+                let index = array(&state["groovePool"]["grooves"])
+                    .iter()
+                    .position(|g| g["ref"] == reference)
+                    .ok_or_else(|| LiveError::error("groove reference is stale or invalid"))?;
+                if args.get("expectedObjectIdentity") != state["groovePool"]["grooves"][index].get("objectIdentity") {
+                    return Err(LiveError::error("groove identity changed since preview"));
+                }
+                if args.get("expectedRevision") != Some(&Value::String(simulator_revision(&state["groovePool"]))) {
+                    return Err(LiveError::error("groove state changed since preview"));
+                }
+                let groove = &mut state["groovePool"]["grooves"][index];
+                if let Some(value) = args.get("name") {
+                    groove["name"] = bounded_text(value, 256, "name is invalid")?.into();
+                }
+                if let Some(value) = args.get("base") {
+                    ranged_number(value, 0.0, 16.0, true, "base is invalid")?;
+                    groove["base"] = value.clone();
+                }
+                for key in ["quantizationAmount", "randomAmount", "timingAmount", "velocityAmount"] {
+                    if let Some(value) = args.get(key) {
+                        ranged_number(value, 0.0, 1.0, false, &format!("{key} is invalid"))?;
+                        groove[key] = value.clone();
+                    }
+                }
+                drop(state);
+                self.emit(LiveEventType::Object, Some(reference.into()), json!({"operation":operation}));
+                Ok(json!({"changed":true,"revision":simulator_revision(&self.state.borrow()["groovePool"])}))
+            }
+            "song.time-convert" => {
+                if args.get("setRef") != state["set"].get("ref") {
+                    return Err(LiveError::error("set reference is stale or invalid"));
+                }
+                match args.get("query").and_then(Value::as_str) {
+                    Some("beats-loop") => Ok(
+                        json!({"available":true,"loopStart":state["playback"]["transport"]["loop"].get("start").filter(|v|!v.is_null()).unwrap_or(&json!(0)),"loopLength":state["playback"]["transport"]["loop"].get("length").filter(|v|!v.is_null()).unwrap_or(&json!(4)),"smpte":null}),
+                    ),
+                    Some("current-smpte") => {
+                        let format = match args.get("smpteFormat").filter(|v| !v.is_null()) {
+                            Some(value) => value.as_str().ok_or_else(|| LiveError::range_error("smpteFormat is invalid"))?,
+                            None => "smpte-25",
+                        };
+                        if !["smpte-24", "smpte-25", "smpte-29", "smpte-30", "smpte-30-drop"].contains(&format) {
+                            return Err(LiveError::range_error("smpteFormat is invalid"));
+                        }
+                        let tempo = state["set"]["tempo"]
+                            .as_f64()
+                            .filter(|v| v.is_finite() && (20.0..=999.0).contains(v))
+                            .ok_or_else(|| LiveError::error("tempo is unavailable for time conversion"))?;
+                        let total = (state["playback"]["transport"]["position"].as_f64().unwrap_or(0.0) * 60.0 / tempo).max(0.0);
+                        let fps = if format == "smpte-24" {
+                            24.0
+                        } else if format == "smpte-30" || format == "smpte-30-drop" {
+                            30.0
+                        } else {
+                            25.0
+                        };
+                        Ok(
+                            json!({"available":true,"loopStart":null,"loopLength":null,"smpte":{"hours":(total/3600.0).floor(),"minutes":((total%3600.0)/60.0).floor(),"seconds":(total%60.0).floor(),"frames":((total-total.floor())*fps).floor()}}),
+                        )
+                    }
+                    _ => Err(LiveError::range_error("time-convert query is invalid")),
+                }
+            }
+            "transport.action" => {
+                if args.get("setRef") != state["set"].get("ref") || args.get("expectedObjectIdentity") != state["set"].get("objectIdentity")
+                {
+                    return Err(LiveError::error("Set identity changed since preview"));
+                }
+                if args.get("expectedRevision") != state["playback"].get("revision") {
+                    return Err(LiveError::error("transport state changed since preview"));
+                }
+                let finite = |key: &str, message: &str| {
+                    args.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).ok_or_else(|| LiveError::range_error(message))
+                };
+                match args.get("action").and_then(Value::as_str) {
+                    Some("start" | "continue" | "play-selection") => {
+                        state["playback"]["transport"]["playing"] = true.into();
+                        state["set"]["playing"] = true.into();
+                    }
+                    Some("stop") => {
+                        state["playback"]["transport"]["playing"] = false.into();
+                        state["set"]["playing"] = false.into();
+                    }
+                    Some("force-link-beat-time") => {
+                        let beat = finite("beatTime", "beatTime is required for force-link-beat-time")?;
+                        state["playback"]["transport"]["position"] = beat.into();
+                        state["set"]["position"] = beat.into();
+                    }
+                    Some("stop-all-clips") => {
+                        for track in state["tracks"].as_array_mut().unwrap() {
+                            track["playingSlotIndex"] = Value::Null;
+                            track["firedSlotIndex"] = Value::Null;
+                        }
+                        state["playback"]["transport"]["playing"] = false.into();
+                        state["set"]["playing"] = false.into();
+                    }
+                    Some("back-to-arrangement") => {
+                        for track in state["tracks"].as_array_mut().unwrap() {
+                            track["backToArranger"] = false.into();
+                        }
+                        if state["song"].is_object() {
+                            state["song"]["backToArranger"] = false.into();
+                        }
+                    }
+                    Some("scrub") => {
+                        let beat = finite("beatTime", "beatTime distance is required for scrub")?;
+                        state["playback"]["transport"]["position"] =
+                            (state["playback"]["transport"]["position"].as_f64().unwrap_or(0.0) + beat).into();
+                    }
+                    Some("jump-by") => {
+                        let beats = finite("beats", "beats is required to jump")?;
+                        state["playback"]["transport"]["position"] =
+                            (state["playback"]["transport"]["position"].as_f64().unwrap_or(0.0) + beats).max(0.0).into();
+                        state["set"]["position"] = state["playback"]["transport"]["position"].clone();
+                    }
+                    Some("tap-tempo" | "nudge-up" | "nudge-down" | "re-enable-automation" | "trigger-session-record") => {}
+                    _ => return Err(LiveError::range_error("transport action is invalid")),
+                }
+                let revision = format!("{}:transport:{}", self.epoch.get(), self.next_sequence());
+                state["playback"]["revision"] = revision.clone().into();
+                drop(state);
+                self.emit(LiveEventType::Transport, None, json!({"operation":operation}));
+                Ok(json!({"done":true,"revision":revision}))
+            }
+            _ => unreachable!("set-state dispatcher only receives explicit operation names"),
+        }
     }
 }
