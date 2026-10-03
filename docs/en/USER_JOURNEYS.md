@@ -1,169 +1,134 @@
-# Capability-aware user journeys
+# Worked examples
 
 English · [简体中文](../zh-CN/USER_JOURNEYS.md) · [日本語](../ja/USER_JOURNEYS.md)
 
-Five guided composition workflows — beat/song creation, advanced drums, sound
-design, reference comparison, and performance diagnosis — exposed through the
-read-only `plan_user_journey` tool, the `ableton://journeys` resource, and five
-MCP prompts.
+Short sessions with the bridge's tools, as an MCP client sends them. Each step
+shows a tool and its arguments. Values in angle brackets come from an earlier
+answer: refs from `live_discover`, a `transactionId` from a preview. Pick your
+own `idempotencyKey`, 8 to 128 characters, new for each apply. The
+[user guide](USER_GUIDE.md) describes every tool and
+[how changes work](USER_GUIDE.md#how-changes-work).
 
-A journey is a plan over the same purpose-specific guarded tools used by direct
-callers. A plan is **not** mutation authority: it contains no transaction
-token, confirmation token, or idempotency key.
+## Look at the Set
 
-## Shared contract
+```text
+live_status     {}
+live_discover   {"kind": "track", "limit": 50}
+live_discover   {"kind": "device", "parent": "<trackRef>"}
+live_discover   {"kind": "parameter", "parent": "<deviceRef>"}
+```
 
-1. Call `live_status` and plan against the reported adapter, epoch,
-   capabilities, operations, registry hash, and provenance.
-2. Announce each ordered text stage. Status is never represented by color alone.
-3. Discover fresh exact refs and revisions before previewing.
-4. Show the impact, targets, bounds, expected result, and recovery route.
-5. Stop at every confirmation gate. A confirmation from one preview never
-   authorizes another stage.
-6. Apply through only the purpose-specific tool named in the stage. Do not use
-   a generic invocation or infer authority from natural language.
-7. Verify fresh authoritative postconditions. Cancellation, timeout, lost
-   acknowledgement, or contradictory readback means `uncertain`, not success.
-8. Recover with the transaction-owned undo/stop/cleanup route or independent
-   emergency authority, then list every residual.
+`live_status` should say `"connected": true` and `"provenance": "real-live"`.
+Each discovery page returns `items`, and a `nextCursor` while there are more.
+Refs look like `1232800184424618:track:4`. They hold until Live's epoch
+changes, which happens when Live restarts or the bridge reconnects.
 
-`traits` is bounded to 1,000 printable characters, `bars` to 1–16, and plans
-cap note creation at 512. Only allowlisted rhythmic, density, energy, timbre,
-space, dynamics, harmony, and arrangement descriptors enter derived guidance.
-The original request remains labelled untrusted for operator context. If
-identity or exact-copy language is detected, **all** extraction is blocked —
-even coincident words such as "Bright" or "Major" — and the caller must restate
-traits without names. Identity/copy text never enters note, topology, or
-diagnostic guidance. If no safe trait is recognized, every stage is
-`blocked-by-intent`, mode is `intent-clarification-required`, and no journey is
-executable. Plan IDs are deterministic for the same normalized request and
-negotiated Live state; a changed connection state, adapter, epoch, provenance,
-registry hash, operation set, capability set, safe translation, or input
-produces a different plan.
+## Change the tempo, then undo it
 
-## 1. Create an editable beat or song section
+```text
+live_tempo_preview  {"tempo": 124}
+live_tempo_apply    {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "tempo-124-a1"}
+live_undo           {"transactionId": "<id>", "confirmation": "undo", "idempotencyKey": "tempo-undo-a1"}
+```
 
-Prompt: `create_beat_or_song`
+The preview answers with `priorTempo`, `proposedTempo`,
+`confirmation: "apply"` and `expiresAt`, and changes nothing. The apply answers
+`"state": "applied"` with the tempo Live now has. Sending the same apply again
+with the same key changes nothing and answers again. The `change_tempo_safely`
+prompt and the `ableton://live-workflow` resource describe the same steps.
 
-The journey translates allowlisted high-level rhythmic, harmonic, arrangement,
-and production traits into bounded tempo, role-event, grid, section, and
-pitch-unset guidance before an exact structure/MIDI preview. It discovers the
-Set, empty target slots, tempo, devices, and stopped playback; previews Session
-structure and MIDI separately; requires exact confirmation for each mutation;
-auditions only after a separate output-safety preview; revises notes by stable
-IDs; and verifies or guardedly undoes the result. Arrangement, revision, and
-audition stages are marked `planned` only when their exact capabilities and
-operations are negotiated; otherwise each is `unavailable` with a non-mutating
-fallback.
+## Make a change in one call
 
-If required Session/MIDI capabilities are missing, the server returns an
-editable note/structure plan and names each unavailable operation. It does not
-claim that Live contains or played the result.
+```text
+live_change  {"tool": "live_mixer_preview", "args": {"trackRef": "<trackRef>", "mute": true}, "idempotencyKey": "mute-bass-a1"}
+```
 
-## 2. Sequence advanced drums
+The answer is the apply's, with the preview's under `preview`. Its
+`transactionId` works with `live_undo` like any other.
 
-Prompt: `sequence_advanced_drums`
+## Load an instrument and shape it
 
-This journey discovers Drum Rack pad pitches instead of guessing a mapping. It
-can preview and verify bounded velocity, fractional timing, probability,
-velocity deviation, and release velocity when those fields are advertised.
-Unsupported MPE, groove extraction, per-note expression, or modulation remains
-explicitly unavailable; ordinary timing or velocity is never relabelled as one
-of those features. Audition and recovery target only the exact owned clip.
+```text
+live_browser_search              {"category": "instruments", "query": "drift"}
+live_browser_load_preview        {"itemId": "<itemId>", "trackRef": "<trackRef>"}
+live_browser_load_apply          {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "load-drift-a1"}
+live_discover                    {"kind": "device", "parent": "<trackRef>"}
+live_discover                    {"kind": "parameter", "parent": "<deviceRef>"}
+live_device_parameter_preview    {"deviceRef": "<deviceRef>", "values": [{"parameterRef": "<cutoffRef>", "value": 0.4}, {"parameterRef": "<resonanceRef>", "value": 0.2}]}
+live_device_parameter_apply      {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "drift-tone-a1"}
+```
 
-## 3. Design a sound using available owned/native devices
+The load goes after the track's devices; a track that already has an instrument
+refuses a second one. Several parameters set in one preview make one change
+with one undo.
 
-Prompt: `design_owned_sound`
+## Write a clip and hear it
 
-The journey derives semantic topology/control directions, searches the Browser
-with stable result IDs, and previews loading one selected result. A Set with no
-device can still advertise Browser loading; `devices`, `parameters`, and
-`device.parameter.set` are therefore renegotiated after load. The client must
-replan after that connection-scoped negotiation rather than assuming the old
-plan changed. Parameter changes use exact published numeric controls and
-bounds. Plug-ins that expose no Live parameter or preset API get manual
-instructions only. Presence of a device is not claimed as causal audio proof.
+```text
+live_discover              {"kind": "clip-slot", "parent": "<trackRef>"}
+live_midi_clip_preview     {"trackRef": "<trackRef>", "sceneIndex": 0, "name": "Bass", "length": 4,
+                            "notes": [{"pitch": 36, "start": 0, "duration": 0.5, "velocity": 100},
+                                      {"pitch": 36, "start": 1.5, "duration": 0.5, "velocity": 90}]}
+live_midi_clip_apply       {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "bass-clip-a1"}
+live_clip_launch_preview   {"slotRef": "<slotRef>", "outputSafety": {"safe": true, "provenance": "monitors checked at a low level"}}
+live_clip_launch_apply     {"transactionId": "<id>", "confirmation": "<confirmation>", "idempotencyKey": "bass-play-a1"}
+live_clip_launch_stop      {"transactionId": "<id>", "confirmation": "<stopConfirmation>", "idempotencyKey": "bass-stop-a1"}
+```
 
-## 4. Compare against a user-supplied reference
+The slot must be empty. A MIDI clip preview expires after 30 seconds. The
+launch preview hands out two unpredictable tokens: `confirmation` to launch
+and `stopConfirmation` to stop. The stop ends only that clip; anything else
+playing carries on.
 
-Prompt: `compare_reference_mix`
+## Delete a track, then get it back
 
-Local standards analysis remains available when Live is disconnected. The
-journey accepts caller-supplied/generated PCM with an explicit rights and
-consent relationship, runs bounded disposable workers, reports ITU-R
-BS.1770-5/EBU R128 loudness and true peak, alignment confidence, dynamics,
-spectrum, and transient aggregates, and returns no raw PCM. Fresh Live context
-or guarded Session Resampling capture is optional. Observed topology,
-measurements, and hypotheses remain separate; no causal claim is made from mere
-device or routing presence.
+```text
+live_track_delete_preview  {"trackRef": "<trackRef>"}
+live_track_delete_apply    {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "drop-fx-a1"}
+live_song_undo             {"confirmation": "undo-in-live", "idempotencyKey": "drop-fx-undo-a1"}
+```
 
-Automatic alignment ambiguity causes refusal or a documented manual/disabled
-fallback. A proposed mixer experiment is one reversible hypothesis with fresh
-same-scope measurement, not mastering certainty.
+The preview lists what goes with the track (`alsoDeletes`: a group takes its
+tracks). `live_undo` can't bring a deleted track back, but Live's own undo can.
+`live_song_undo` undoes whatever Live did last, so use it straight away.
 
-## 5. Diagnose a mix, recording, or performance setup
+## Several changes as one Cmd-Z
 
-Prompt: `diagnose_performance_setup`
+```text
+live_undo_step_begin  {"label": "Build the drop"}
+...                   previews and applies
+live_undo_step_end    {"stepId": "<stepId>"}
+```
 
-The read-only first pass aggregates playback, arm, monitoring, routing, mixer,
-device, automation, project, subscription, and realtime recovery state. It
-ranks exact-ref findings before proposing a change. Feedback-prone routing,
-recording, audible playback, and realtime arming use separate previews and
-confirmations. Realtime reports distinguish accepted packets from applied
-changes and require bounded token expiry/disarm plus independent TCP emergency
-stop. Unknown latency remains unknown; the server does not claim a low-latency
-path from UDP availability alone.
+Every change in between is one step in Live's undo history. Each change keeps
+its own `live_undo` too. The step closes by itself after two minutes, or the
+`timeoutMs` you give, and when the connection goes.
 
-When routing, mixer, transport, recording, or stop authority is unavailable,
-the fallback is a read-only checklist. It never arms, monitors, records,
-routes, plays, or claims readiness.
+## Guided plans
 
-## Rights-aware intent translation
+`plan_user_journey` returns a plan for one of five journeys and changes nothing.
+A plan lists ordered stages, each with the tools to use, and marks a stage
+`unavailable` when this Live lacks what it needs, with a fallback. The same
+plans come as prompts, and the `ableton://journeys` resource lists them with
+their availability.
 
-Artist, record, song, person, and exact-copy wording in `traits` is retained
-only as `untrustedOriginalRequest` and excluded from derived creative guidance.
-Detection blocks the entire extraction because names can contain vocabulary
-words; the user must resubmit recognized allowlisted high-level descriptors
-without identity/copy wording. Such a request produces a clarification
-requirement rather than a fake translation. Plans do not request or claim
-access to protected source material, do not promise exact replication, and do
-not assert legal clearance. Reference PCM must be supplied or generated by the
-caller under a relationship the caller is authorized to use. The server cannot
-determine copyright ownership or licensing.
+| Journey | Prompt | The plan covers |
+| --- | --- | --- |
+| `create-beat-or-song` | `create_beat_or_song` | Tracks, scenes and a MIDI clip built from your description; optional Arrangement copy, note revisions and an audition |
+| `sequence-advanced-drums` | `sequence_advanced_drums` | A drum pattern on the Drum Rack's real pad notes, with timing, probability and velocity variation |
+| `design-owned-sound` | `design_owned_sound` | Finding and loading a device from the Browser, shaping its parameters, before-and-after audition |
+| `compare-reference-mix` | `compare_reference_mix` | Comparing your audio with a reference you supply, optional Live context, one reversible mixer experiment |
+| `diagnose-performance-setup` | `diagnose_performance_setup` | Reading playback, arm, monitoring, routing and mixer state, then routing and mixer fixes; optional recording or realtime control |
 
-## Progress and recovery language
+The plan takes these inputs:
 
-Every plan supplies this ordered execution vocabulary:
+- `traits` (required): 1–1,000 characters describing the music.
+- `experienceLevel` (optional): `beginner` or `advanced`.
+- `bars` (optional): 1–16.
 
-`discovering` → `planned` → `awaiting_confirmation` → `applying` →
-`verifying` → `completed`
-
-The returned stage status is explicitly a planning template (`planned` or
-`unavailable`), not execution truth. A client/agent derives runtime progress
-from actual purpose-specific tool results, and a terminal path can instead be
-`recovered` or `uncertain`. A terminal result must state residual playback,
-recording, routing, temporary media, realtime authority, and created-object
-state as applicable. Clients should announce the stage title before details and
-keep beginner summaries separate from exact refs, epochs, revisions, and
-registry hashes.
-
-## Accessibility scope and known limitations
-
-The shipped product is a JSON-RPC/MCP stdio service and CLI, not a graphical
-editor. Its accessible contract is therefore text-first:
-
-- semantic tool, resource, prompt, stage, impact, confirmation, and status names;
-- deterministic reading order in arrays and prompt text;
-- no mouse-only server instruction and no color-only result;
-- text alternatives required for waveform, spectrum, meter, and other visual
-  summaries;
-- bounded output suitable for client announcements and cancellation.
-
-There is no server-owned focus cursor, panel, canvas, or keyboard shortcut, so
-focus management and contrast are not applicable at the stdio boundary. The
-host does **not** control the accessibility behavior of an MCP client,
-terminal, or Ableton Live. VoiceOver/Narrator support, focus order, key
-bindings, and the accessibility of Live plug-in windows depend on those
-products and versions. Operators requiring assistive technology should validate
-their chosen client and Live version; inaccessible plug-in UI remains a manual
-limitation rather than a claimed capability.
+The plan uses only general musical traits from your description: rhythm,
+density, energy, timbre, space, dynamics, harmony, arrangement. If the
+description names an artist, a song or a record, or asks for an exact copy,
+nothing is taken from it. Every stage is then marked `blocked-by-intent`, and
+the plan asks you to describe the sound without naming anyone. The same request
+against the same Live state always gives the same plan.

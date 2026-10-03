@@ -1,74 +1,43 @@
-# クロスプラットフォームデリバリーとライフサイクル
+# ブリッジのインストール
 
 [English](../en/DELIVERY.md) · [简体中文](../zh-CN/DELIVERY.md) · 日本語
 
-## リリース成果物とチャネル
+ブリッジは二つの部分からなります。Live が読み込む Remote Script `AbletonMcpBridge` と、Kumi（またはほかの MCP クライアント）が起動するローカルの MCP サーバーです。どちらも一つのパッケージ `@ableton-mcp/mcp-server` に入っていて、一つのツールでインストールします。それがブリッジのライフサイクル CLI、`ableton-mcp-lifecycle` です。このツールは何かを変更する前に計画を立て、インストールしたものをレシートに記録し、まさにそれを修復、ロールバック、削除できます。Kumi を使う場合は、`kumi bridge` がこれを実行します。
 
-設定されている唯一のリリース成果物は、`npm pack` で作成する正確なローカル
-npm tarball で、ローカルパスと SHA-256 でインストールします。MIT ライセンスで、
-`private: true` は npm への誤公開を防ぐためだけに維持されています。成果物は
-未署名・未公証・未公開です。詳細は
-[DISTRIBUTION_POLICY.md](DISTRIBUTION_POLICY.md) を参照してください。
+## Kumi で使う
 
-`package:verify` は正確な許可リスト外のすべてのパスを拒否し、パッケージ内の
-MIT ライセンスをリポジトリのバイトと比較し、コンパイル済みランタイム、Remote
-Script、レジストリ、ドキュメント、ライセンスの全バイトを
-`release-manifest.json` に対して検証します。tarball には、コンパイル済み
-JavaScript と宣言、レジストリとマニフェスト付き Remote Script、リリース
-マニフェストとパッケージメタデータ、MIT ライセンス、許可されたユーザー/
-安全/運用ドキュメントのみが含まれます。テスト、検証スクリプト、ソースマップ、
-依存関係、シークレット、設定、状態、バックアップ、ログ、キャプチャメディア、
-エビデンス、保護されたローカルマテリアルは除外されます。
+Live を終了してから `kumi bridge` を実行します。このコマンドは次のことを行います：
 
-新しいマニフェストは `ableton-mcp-release/v2`、`local-npm-tarball` チャネル、
-MIT SPDX メタデータ、明示的な `license` ペイロードロールを使用します。
-ライフサイクルは既存レシートのアップグレード/ロールバックに限り、正確な旧
-v1/UNLICENSED/private チャネルの組を厳格に認識し、混在した組を拒否します。
-マニフェストは、パッケージバージョン、正確なソースコミットとダーティフラグ、
-Node 範囲とメジャー、ホスト/ブリッジプロトコル、正規レジストリハッシュ、
-配布チャネル、署名/公証/公開状態、ファイルロール、SHA-256 値を記録します。
-候補はクリーンなコミットから作成します。SHA-256 はバイト整合性であって公開者
-ID ではなく、MIT は Ableton の商標権、署名、認証、提携、承認を意味しません。
+1. Live の実行中は拒否し、Live が閉じていることの確認を求めます（`--yes` で事前に確認できます）。
+2. ブリッジのパッケージを Kumi のバンドルから専用のフォルダーにコピーし（チェックアウトでは代わりに `npm pack` でパックします）、そのハッシュを確認します。
+3. ライフサイクルの `install`（ブリッジがすでにある場合は `upgrade`）を実行します。まず計画、次に変更です。
+4. Kumi の Live 拡張機能を Live の Extensions フォルダーに置きます。Live 12.4 以降はこれを実行します。
+5. Live が新しいブリッジを通じて接続するのを最大 10 分間待ち、その間、数秒ごとにライフサイクルの `activate` を実行します。
 
-## 候補の保持と取得
+そのあと初めて Live を開いたら、**Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** を Control Surface として選びます。コミットされていない変更があるチェックアウトでは、`kumi bridge --allow-dirty` でそれでもインストールできます（開発者向け）。
 
-CI は `exact-local-candidate` と `candidate-verification-*` を **90 日**保持するよう要求します。永続的な配布チャネルではなく、リポジトリ方針や削除で短縮される場合があります。期限切れの旧成果物は復活しません。
-期限前に tarball、`candidate-metadata.json`、検証レポート、run URL、正確な PR head とテスト対象 commit SHA を所有者管理の場所へまとめて保存してください。同じソース SHA から再ビルドしたファイルでも、既存レシートに結び付いた成果物と置き換えてはいけません。
+`kumi update` は、Live の中のブリッジが Kumi のものより古く、Live が閉じているときに、`kumi bridge` を代わりに実行します。`kumi uninstall` は、ライフサイクルの `uninstall` を通じてブリッジと拡張機能を Live から取り除くかどうかを尋ね、Live がまだブリッジのファイルを読み込んでいる間はそれを残します。`kumi doctor` はつながり全体を確認します。プロデューサー側から見た説明は [Kumi ガイド](KUMI_GUIDE.md#live-につなぐ)にあります。
 
-目的のコミットで完了・成功した run を選び、新しい空の保存先を使います（GitHub CLI が必要）:
+| 対象 | 場所 |
+| --- | --- |
+| ブリッジのパッケージ | `~/.kumi/bridge/<version>-<time>/node_modules/@ableton-mcp/mcp-server` |
+| その状態：シークレット、設定、レシート、ジャーナル | `~/.kumi/bridge/state`、またはすでにインストールされているブリッジ設定のフォルダー |
+| Remote Script | User Library の Remote Scripts フォルダー内の `AbletonMcpBridge`（[Live のフォルダー](#live-のフォルダー)を参照） |
+| Kumi の Live 拡張機能 | Live の Extensions フォルダー内の `kumi.kumi` |
 
-```sh
-gh run view "$RUN_ID" --repo user1303836/kumi \
-  --json headSha,status,conclusion,url
-gh run download "$RUN_ID" --repo user1303836/kumi \
-  --name exact-local-candidate --dir "$CANDIDATE_DIR"
-gh run download "$RUN_ID" --repo user1303836/kumi \
-  --pattern 'candidate-verification-*' --dir "$EVIDENCE_DIR"
-```
+`KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は二つの Live のフォルダーを上書きし、`KUMI_HOME` は `~/.kumi` の場所を移し、`KUMI_BRIDGE_WAIT_SECONDS` は Live を待つ時間を設定します（`0` で待ちません）。Kumi は、ライフサイクルが Remote Script の隣に書き込む `bridge-reference.json` を通じて、インストールされたブリッジを見つけます。
 
-run の `headSha` と目的の PR head を照合し、実際の checkout commit と parents を run から保持します。PR CI は GitHub の**合成 merge commit**をテストします。メタデータの `gitSha` と manifest の `source.commit` はその commit で、`headSha` と同一とは限りません。parents を目的の head / base に束縛します。main push では通常同じ SHA です。tarball の SHA-256 とメタデータも照合します。
-検証はメタデータの**テスト対象 SHA の隔離 checkout**で行い、`apps/mcp-server` から `npm ci && npm run build`、続いて `node scripts/verify-candidate.mjs` に tarball とメタデータの絶対パスを渡します。同等に見える PR head でも別 checkout は拒否されます。`GITHUB_SHA` を上書きして回避しません。バイトと来歴の検証であり、発行者の身元や新しい実 Live 認証ではありません。期限切れなら新たに検証された候補を要求してください。未公開パッケージを `npx` で実行しません。公開・署名・永続的 beta チャネルは別途所有者の決定が必要です。
+## スタンドアロンのブリッジ
 
-## サポートマトリクス
+Kumi 以外の MCP クライアント向けです。Node が必要です。Node 22 と 24 に対応しており、Node 24 LTS を推奨します。ブリッジの tarball も必要です：
 
-Node 22、24 をサポートし、Node 24 LTS を推奨します。Node 25 は EOL、Node 26 は未検証です。
-旧 Node-25 ポリシーのアーティファクトはレシートに紐付く状態確認・修復・正確なロールバックに限り検証可能で、新規インストール / アップグレードには使えません。
-1.0.2 は 1.0.1 からの明示的アップグレードを可能にします。公開や検証条件の緩和ではありません。
-Linux、macOS、
-Windows のホスト/パッケージ契約は CI で実行されます。Live 認証は別個であり、
-ホストテストから推測されることはありません。
-[SUPPORT_MATRIX.md](SUPPORT_MATRIX.md) を参照してください。
+- **自分でビルドする：** クリーンなチェックアウトで `cd apps/mcp-server && npm ci && npm pack` を実行します。コミットされていない変更からビルドした tarball は、`--allow-dirty-private-build` を付けたときだけインストールできます。
+- **または CI から取得する：** CI の各実行は `exact-local-candidate` アーティファクトを 90 日間保持し、`candidate-metadata.json` にその sha256 が記載されています。プルリクエストでは、ブランチの先頭ではなく GitHub のマージコミットからビルドされます。
 
-## 正確なプラットフォームセットアップ
-
-### macOS 15(bash/zsh)
-
-ユーザーの Remote Scripts ディレクトリを使用してください。Live アプリ
-ケーションバンドル内に書き込まないでください。スペースを正確に保持して
-ください:
+パッケージをずっと置いておく場所にインストールしてから、ブリッジを Live にインストールします。macOS（bash または zsh）：
 
 ```sh
-ARTIFACT="$(cd "$(dirname '/absolute/candidate.tgz')" && pwd)/$(basename '/absolute/candidate.tgz')"
+ARTIFACT=/absolute/path/to/ableton-mcp-mcp-server-x.y.z.tgz
 ARTIFACT_SHA="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 INSTALL_ROOT="$HOME/Library/Application Support/AbletonMcp/package"
 STATE="$HOME/Library/Application Support/AbletonMcp/state"
@@ -77,276 +46,122 @@ mkdir -p "$INSTALL_ROOT" "$REMOTE_SCRIPTS"
 npm install --prefix "$INSTALL_ROOT" --ignore-scripts --no-audit --no-fund "$ARTIFACT"
 PACKAGE_ROOT="$INSTALL_ROOT/node_modules/@ableton-mcp/mcp-server"
 LIFECYCLE="$INSTALL_ROOT/node_modules/.bin/ableton-mcp-lifecycle"
+
+"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" --state-dir "$STATE" \
+  --package-root "$PACKAGE_ROOT" --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA"
+# 計画を読み、Live を終了してから：
+"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" --state-dir "$STATE" \
+  --package-root "$PACKAGE_ROOT" --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA" \
+  --apply --confirm-live-stopped
 ```
 
-Live を通常の UI から停止し、終了したことを確認してください。ライフサイクルが
-強制終了することはありません。以下のインストールコマンドを実行してください。
-Live を再起動し、**Live → Settings → Link, Tempo & MIDI** を開き、Control
-Surface 行で `AbletonMcpBridge` を選択してから、`activate` を実行してください。
-アンインストールするには、Live を停止した状態で lifecycle uninstall を実行し、
-Live を再起動してスクリプトをアンロードし、MCP クライアント設定を更新してから、
-ステータス/エビデンスを保持した後でのみ `$INSTALL_ROOT` を削除してください。
-
-### Windows Server 2025 ホスト契約 / Windows Live 手順(PowerShell)
-
-ホストされたホスト契約は Windows Server 2025 を使用します。Windows 11 +
-Ableton Live は未認証です。以下は欠落しているセルを収集するための正確な
-オペレーター手順であり、パスの主張ではありません:
+Windows（PowerShell）：
 
 ```powershell
-$Artifact = (Resolve-Path 'C:\absolute\candidate.tgz').Path
+$Artifact = (Resolve-Path 'C:\absolute\path\to\ableton-mcp-mcp-server-x.y.z.tgz').Path
 $ArtifactSha = (Get-FileHash -Algorithm SHA256 $Artifact).Hash.ToLowerInvariant()
 $InstallRoot = Join-Path $env:LOCALAPPDATA 'AbletonMcp\package'
 $State = Join-Path $env:LOCALAPPDATA 'AbletonMcp\state'
-$RemoteScripts = Join-Path ([Environment]::GetFolderPath('MyMusic')) 'Ableton\User Library\Remote Scripts'
-New-Item -ItemType Directory -Force $InstallRoot,$RemoteScripts | Out-Null
+$RemoteScripts = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Ableton\User Library\Remote Scripts'
+New-Item -ItemType Directory -Force $InstallRoot, $RemoteScripts | Out-Null
 npm install --prefix $InstallRoot --ignore-scripts --no-audit --no-fund $Artifact
 $PackageRoot = Join-Path $InstallRoot 'node_modules\@ableton-mcp\mcp-server'
 $Lifecycle = Join-Path $InstallRoot 'node_modules\.bin\ableton-mcp-lifecycle.cmd'
+
 & $Lifecycle install --remote-scripts-dir $RemoteScripts --state-dir $State `
   --package-root $PackageRoot --artifact $Artifact --artifact-sha256 $ArtifactSha
+# 計画を読み、Live を終了して（タスクマネージャーで確認）から：
 & $Lifecycle install --remote-scripts-dir $RemoteScripts --state-dir $State `
   --package-root $PackageRoot --artifact $Artifact --artifact-sha256 $ArtifactSha `
   --apply --confirm-live-stopped
 ```
 
-最初は `--apply` を省略して JSON プランを確認してください。2 番目のコマンドの
-前に、Live をその UI で目視で停止し、タスクマネージャーで確認してください。
-プロセス終了を自動化しないでください。Live を再起動し、**Options →
-Preferences → Link, Tempo & MIDI** で `AbletonMcpBridge` を選択してから、
-以下を実行してください:
+User Library を移動した場合は、代わりにその Remote Scripts フォルダーを使います（[Live のフォルダー](#live-のフォルダー)を参照）。次に Live を開き、**AbletonMcpBridge** を Control Surface として選び、同じ三つのフォルダーのオプションを付けて `activate` を実行します。インストールしたサーバーを `--config <state>/bridge-config.json` で MCP クライアントに指定する方法は、[ユーザーガイド](USER_GUIDE.md)で説明しています。
 
-```powershell
-& $Lifecycle activate --remote-scripts-dir $RemoteScripts --state-dir $State --package-root $PackageRoot
+アップグレードするには、新しい tarball を新しいプレフィックスにインストールし、新しい `--package-root`、`--artifact`、`--artifact-sha256` を付けて `upgrade` を実行します。削除するには、`uninstall` を実行し、Live を再起動し、MCP クライアントの設定を更新してから、最後に npm のプレフィックスを削除します。
+
+## ライフサイクル CLI リファレンス
+
+```text
+ableton-mcp-lifecycle <action> --remote-scripts-dir DIR [options]
 ```
 
-アップグレードするには、新しい tarball を別の `$NewInstallRoot` にインストールし、
-`Get-FileHash` でハッシュを計算し、Live を停止して、以下に示す `upgrade` と
-同じ構文で新しいパッケージ/tarball パスを使用してください。アンインストール
-するには、Live を停止し、プランを実行してから `uninstall --apply
---confirm-live-stopped` を実行してください。Live を再起動し、クライアントを
-更新し、レシート/隔離エビデンスを保持してから、npm プレフィックスを削除して
-ください。レシートで証明されていないパスに対してインストーラーや
-`Remove-Item -Recurse` を使用しないでください。
+| アクション | 内容 | 必要なもの |
+| --- | --- | --- |
+| `install` | 所有者だけがアクセスできるシークレットとブリッジ設定を作成し、Remote Script をインストールし、レシートを書き込みます | `--artifact`、`--artifact-sha256`。Live が停止していること |
+| `activate` | Live にもインストールにも変更を加えずに、Live がこのブリッジを読み込み、ブリッジを通じて応答することを確認します。結果をレシートに記録します | Live が実行中で、Control Surface が選ばれていること |
+| `upgrade` | ブリッジを新しいパッケージに置き換えます。シークレットと、`rollback` 用に前のバージョンを残します | より新しい `--artifact`、その sha256、その `--package-root`。Live が停止していること |
+| `repair` | インストールされているものをレシートと比べます。`--apply` を付けると、変更されたファイルを隔離場所に移し、パッケージ本来のファイルを復元します | — |
+| `rollback` | 最後のアップグレードが残したバージョンに戻します | Live が停止していること |
+| `uninstall` | レシートが所有するファイルを削除します。変更されたファイルや不明なファイルは隔離場所に移します。シークレットは残します | Live が停止していること |
+| `status` | 読み取り専用のレポート：レシート、ファイルの完全性、ドリフト、権限、ロールバックが可能かどうか | — |
 
-## レシート駆動ライフサイクル CLI
+| オプション | 意味 |
+| --- | --- |
+| `--remote-scripts-dir DIR` | Live の Remote Scripts フォルダー（必須） |
+| `--state-dir DIR` | シークレット、設定、レシート、ジャーナルを置く場所。デフォルトは `~/.config/ableton-mcp`、Windows では `%APPDATA%\ableton-mcp` |
+| `--package-root DIR` | 使用するインストール済みのパッケージ。デフォルト：この CLI が属するパッケージ |
+| `--artifact FILE`、`--artifact-sha256 HEX` | tarball とそのハッシュ。ライフサイクルは、インストールされたパッケージを tarball 自身のマニフェストと照合します |
+| `--config FILE`、`--secret FILE` | 設定とシークレットの別のパス（デフォルト：状態フォルダー内の `bridge-config.json` と `bridge.secret`） |
+| `--host`、`--port`、`--realtime-port` | 新しいインストールのループバックアドレスとポート。デフォルトは `127.0.0.1`（または `::1`）、9765、9766 |
+| `--timeout-ms N` | 設定に書き込まれる、ブリッジのリクエストのタイムアウト（デフォルト 5000） |
+| `--apply` | 変更を実行します。これがなければ、どのアクションも計画を立てるだけです |
+| `--confirm-live-stopped` | Live を終了したことの確認。`--apply` を付けた `install`、`upgrade`、`rollback`、`uninstall` で必要です |
+| `--purge-secret` | `uninstall` と一緒に使い、シークレットも削除します。ライフサイクルが作成したシークレットの場合だけです |
+| `--enable-bridge-diagnostics` | `install` と一緒に使い、Remote Script の診断ログを有効にします |
+| `--allow-dirty-private-build` | コミットされていない変更からビルドしたパッケージを受け入れます（開発者向け） |
 
-すべての例は、インストールされた成果物の `ableton-mcp-lifecycle` を使用します。
-選択した Live インストールの正確な Live **Remote Scripts 親ディレクトリ**を
-常に渡してください。パスにはスペースと Unicode を含めることができます。この
-ツールは、アプリケーションバンドルパスを推測したり、Control Surface を選択
-したり、Live を強制終了したり、シンボリックリンク/ジャンクションの祖先を
-たどったりしません。
+各実行は stdout に JSON の結果を一つ出力します（`ableton-mcp-lifecycle/v1`）。その `state` は `planned`、`completed`、`activation-required`、`blocked`、`failed` のいずれかです。拒否された場合は、代わりに stderr に `ableton-mcp-lifecycle-error/v1` を、パスを取り除いて出力します。blocked、failed、拒否された実行は終了コード 2 で終わります。レシートのステータスは、install、upgrade、repair、rollback の後は `installed-restart-required`、`activate` がブリッジを通じて Live に到達した後は `activated`、削除の後は `uninstalled` になります。
 
-オーナーが管理する状態と正確な候補値を選択してください:
+ライフサイクルは、Live を終了したり起動したりせず、Control Surface を選ばず、Live のフォルダーを推測せず、与えられたパス内のシンボリックリンクやジャンクションをたどりません。作業中はロックを保持し、最後の変更のジャーナルを残します。途中で失敗した場合は、元の状態に戻します。実行が中断されたら、再試行する前に `status` とジャーナルを読み、それらが示すとおりに `repair` または `rollback` を使ってください。
 
-残りの例では、上記の macOS セットアップの POSIX シェル変数を使用します。
-Windows では対応する PowerShell 変数を使用し、`& $Lifecycle` で呼び出して
-ください。オプション名と安全ゲートは同一です。
+各アクションの詳細：
 
-すべての変更コマンドは、まず非変更プランをサポートします(`--apply` を省略)。
-インストール、アップグレード、ロールバック、アンインストールはさらに、
-オペレーターが Live を停止して `--confirm-live-stopped` を渡すことを要求します。
-このツールはプロセスの不在を証明として扱わず、プロセスを強制終了しません。
+- **Install** は何かを変更する前に、tarball のバイト列をそのハッシュと、パッケージを tarball のマニフェストと照合し、ポートが空いていることを確認します。Remote Script のフォルダーに `__pycache__` という名前の空のファイルを置き、Live がコンパイル済みのコピーを書き込んだり読み込んだりできないようにします。その場所にほかのものがあると、ドリフトとして扱われます。
+- **Activate** は、期待されるレジストリハッシュを持つ本物の Live から認証済みの応答があった後でのみ `activated` を記録します。シミュレーター、古いまたは誤ったレジストリ、応答なしの場合は `activation-required` になり、次に何をすべきかを伝えます。記録されたアクティベーションは履歴であり、いま Live が接続している証拠ではありません。
+- **Upgrade** は厳密に新しいバージョンを必要とし、ドリフトしたファイルがあると拒否します。`rollback` 用に前のバージョンと設定を残します。
+- **Repair** は、欠けているシークレットを決して作成しません。新しいシークレットは、ブリッジに対する新しい権限になるからです。もう一度実行しても何も変わりません。
+- **Uninstall** は、`--purge-secret` がない限りシークレットを残し、診断ログも残します。削除は通常の unlink であり、安全な消去ではありません。
 
-### インストール
+**診断ログ。** インストール時に `--enable-bridge-diagnostics` を付けると、Remote Script は状態フォルダー内の `bridge-diagnostics.log` に、短く秘匿処理した記録を書き込みます。所有者だけがアクセスでき、キューに入れてバックグラウンドで書き込まれ、最大 16 MiB です。このフラグがなければログはありません。
+
+## Live のフォルダー
+
+| フォルダー | macOS | Windows |
+| --- | --- | --- |
+| Remote Scripts（デフォルトの User Library） | `~/Music/Ableton/User Library/Remote Scripts` | `Documents\Ableton\User Library\Remote Scripts`（または `OneDrive\Documents` の下） |
+| Extensions（Live 12.4 以降） | `~/Library/Application Support/Ableton/Extensions` | `%APPDATA%\Ableton\Extensions`（未確認） |
+| Control Surface の設定 | Live → Settings → Link, Tempo & MIDI | Options → Settings → Link, Tempo & MIDI |
+
+User Library を移動した場合は、Live の **Settings → Library** にその場所が表示されます。Kumi は Live の環境設定から自分で見つけます。Live のアプリケーションフォルダーには決してインストールしないでください。
+
+## インストールの確認
 
 ```sh
-"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA"
-
-"$LIFECYCLE" install --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --artifact "$ARTIFACT" --artifact-sha256 "$ARTIFACT_SHA" \
-  --apply --confirm-live-stopped
+ableton-mcp-diagnostics --config /absolute/path/to/bridge-config.json
 ```
 
-プリフライトは正確なローカル tarball バイトをハッシュし、tarball に埋め込まれた
-リリースマニフェストと完全な厳密なインベントリ/ペイロードハッシュを抽出された
-パッケージルートにバインドし、リリースマニフェスト、空の所有デスティネーション、
-祖先/リンクの安全性、個別のループバックポート、ポートの可用性を検証してから
-状態を作成します。適用はオーナー専用シークレットと設定を作成し、Remote
-Script/レジストリ/マニフェスト/参照をアトミックにインストールしてから、
-オーナー専用レシートとジャーナルを書き込みます。シークレット、設定、ブリッジの
-ステージング後の注入または実際の障害は、新しい権限を削除し、以前の状態を復元
-します。成功は `installed-restart-required` であり、アクティベーションでは
-ありません。
+JSON のレポートを出力します。対応していない Node やシステムでは終了コード 1 で終わり、Live に到達できない場合でも 0 で終わるので、各フィールドを読んでください：
 
-Remote Script のファイル診断は、確認したプランと適用コマンドの両方に
-`--enable-bridge-diagnostics` を明示した場合だけ有効です。このオプトインは
-`$STATE/bridge-diagnostics.log` にオーナー専用・単一リンクの通常ファイルだけを
-用意します。固定・秘匿化済みレコードはコールバックスレッド外でキューされ、
-ファイル上限は 256 KiB です。このフラグなしの再インストール/アンインストールで
-設定済みシンクは無効になり、ログは確認のため保持されます。詳細は
-[OPERATIONS.md](OPERATIONS.md) を参照してください。
+| フィールド | 意味 |
+| --- | --- |
+| `nodeSupported`、`platformSupported` | Node とシステムが対応している |
+| `readiness.package` | パッケージとその Remote Script のファイルが存在し、損なわれていない（Live がそれを読み込んだという意味ではありません。インストールされたコピーは `status` で確認します） |
+| `readiness.configured` | 設定が有効で、ブリッジを指定しており、読み取れるシークレットがある |
+| `readiness.authenticatedBridge` | Remote Script が認証済みの接続で応答し、ディスカバリーが成功した（`registryHash` がそのレジストリを示します） |
+| `readiness.realLiveOperational` | その応答がシミュレーターではなく本物の Live（`real-live` の来歴）から来た |
+| `ready` | 上記のすべて |
 
-### アクティベーション
+シークレットは決して出力されません。再インストールは接続を直す方法ではありません。Live を再起動したか、Control Surface が選ばれているか、設定、シークレット、ポートが一致しているかを確認してください。
 
-1. Live を再起動します。
-2. Live の環境設定で Control Surface として `AbletonMcpBridge` を選択します。
-3. 実行:
+## 設定をバージョン 2 に移行する
+
+`ableton-mcp-migrate` は、デフォルトでは古い（レガシーまたはバージョン 1 の）クライアント設定をそのまま残します。ブリッジのすべてのフィールドと、所有者だけがアクセスできる既存のシークレットを与えると、バージョン 2 のブリッジ設定を書き込みます：
 
 ```sh
-"$LIFECYCLE" activate --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
+ableton-mcp-migrate --input /absolute/old.json --output /absolute/bridge-v2.json \
+  --bridge-host 127.0.0.1 --bridge-port 9765 --realtime-port 9766 \
+  --secret-file /absolute/bridge.secret
 ```
 
-アクティベーションは読み取り専用です。認証済みステータス、正規レジストリ ID、
-有界ディスカバリ、`real-live` 出所の後にのみ `activated` を記録します。
-偽物、シミュレーター、利用不可、古い、または誤ったレジストリの応答は、
-再起動/選択の修正とともに `activation-required` のままです。
-
-### アップグレード
-
-新しい tarball を別のパッケージパスにインストールし、Live を停止し、プランを
-確認してから適用してください:
-
-```sh
-"$LIFECYCLE" upgrade --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root '/absolute/new/package/root' \
-  --artifact '/absolute/path/to/new-candidate.tgz' \
-  --artifact-sha256 '<new-tarball-sha>'
-
-"$LIFECYCLE" upgrade --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root '/absolute/new/package/root' \
-  --artifact '/absolute/path/to/new-candidate.tgz' \
-  --artifact-sha256 '<new-tarball-sha>' \
-  --apply --confirm-live-stopped
-```
-
-アップグレードはドリフトと同一候補を拒否し、オーナーシークレットを保持し、
-新しい設定/ブリッジをステージし、以前の設定と正確な Remote Script 世代を
-保持し、ハッシュを検証し、ロールバック ID を記録します。失敗は以前の
-ブリッジ/設定を復元し、オーナーレシートを変更しません。その後再起動して
-アクティベートしてください。
-
-### 修復
-
-```sh
-"$LIFECYCLE" repair --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
-"$LIFECYCLE" repair --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" --apply
-```
-
-修復は、レシート所有のハッシュ、不明なファイル、設定ダイジェスト、シークレット
-権限を比較します。クリーンな修復は冪等です。適用はドリフトしたツリー/設定を
-オーナー専用隔離に移動し、マニフェスト所有のペイロードのみを復元します。
-欠落したシークレットがサイレントに再生成されることはありません。それは新しい
-ブリッジ権限を捏造することになるからです。変更された修復の後は再起動して
-アクティベートしてください。
-
-### ロールバック
-
-```sh
-"$LIFECYCLE" rollback --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --apply --confirm-live-stopped
-```
-
-ロールバックはレシート紐付けの保持世代を必要とし、そのファイルを検証し、
-ブリッジ/設定をアトミックに交換し、失敗した世代を逆ロールバック用に隔離し、
-さらなる再起動/アクティベーション要件を記録します。正確な前世代が存在しない
-場合は拒否します。
-
-### アンインストール
-
-```sh
-"$LIFECYCLE" uninstall --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT" \
-  --apply --confirm-live-stopped
-```
-
-正確なレシート所有のブリッジファイルと変更されていない管理対象設定が削除
-されます。変更または不明なブリッジコンテンツは削除ではなく隔離に移動されます。
-シークレットはデフォルトで保持されます。レシートがこのライフサイクルで作成
-されたことを証明するシークレットにのみ `--purge-secret` を追加してください。
-パージは通常のアンリンクであり、フォレンジック安全消去の主張ではありません。
-最終レシートは `uninstalled` を記録します。クライアント設定が指さなくなって
-からでのみ、npm パッケージを個別に削除してください。Live を再起動して
-Control Surface をアンロードしてください。
-
-### 設定マイグレーション
-
-マイグレーション CLI はデフォルトでレガシー/v1 出力を保持します。正確な
-バージョン 2 ブリッジ設定を生成するには、すべての権限保持ブリッジフィールドと
-既存のオーナー専用シークレットを提供してください。エントリーポイントはすでに
-絶対パスである必要があります:
-
-```sh
-ableton-mcp-migrate --input '/absolute/legacy-or-v1.json' \
-  --output '/absolute/bridge-v2.json' \
-  --bridge-host 127.0.0.1 --bridge-port 9765 \
-  --realtime-port 9766 --secret-file '/absolute/bridge.secret'
-```
-
-マイグレーション中にシークレットを作成することはなく、非ループバックホストを
-受け付けず、不正なポート、リンク/安全でないシークレット、`--force` が明示的
-でない置換を拒否します。
-
-### ステータス、ジャーナル、回復
-
-```sh
-"$LIFECYCLE" status --remote-scripts-dir "$REMOTE_SCRIPTS" \
-  --state-dir "$STATE" --package-root "$PACKAGE_ROOT"
-```
-
-ステータスは読み取り専用で、レシート状態、パッケージ/設定/Remote Script
-整合性、ファイルドリフト、権限、ロールバック可用性、保持されたクリーンアップ
-または保持パス、過去のアクティベーションレシートを分離します。過去の
-アクティベーションは現在の接続性のエビデンスではなく、インストール整合性が
-ドリフトすると実効的な restart-required ステータスにダウングレードされます。
-インストーラーは Python のキャッシュディレクトリパスに `__pycache__` という
-空の通常ファイルを所有します。このレシート紐付けブロッカーは、Live が未検証の
-バイトコードを生成またはロードするのを防ぎ、ソースモジュールは読み取り可能な
-ままにします。ディレクトリ、キャッシュペイロード、リンク、その他のエントリに
-置き換えることは実行可能なドリフトです。この不変条件は、ブロッカーをリスト
-していなかったレガシーレシートにも強制されます。ステータス/アクティベーションは
-フェイルクローズし、`repair --apply` がその世代を移行します。
-`lifecycle-journal.json` はシークレットなしで最後のトランザクション結果を記録
-します。中断時は盲目に再試行しないでください。レシート、ジャーナル、隔離、
-Live プロセス、ステータスを検査し、指示された修復またはロールバックを使用して
-ください。
-
-## テスト済み障害マトリクス
-
-ユニットおよびインストール済み tarball テストは、スペース/Unicode、非変更
-プラン、明示的な停止確認、占有ポート、オーナー権限、リーフおよび祖先
-シンボリックリンク、各コミット境界後のインストール失敗、ドリフト/不明な
-ファイル、レシート紐付け Python バイトコードキャッシュブロッキング、隔離、
-冪等修復、アップグレードロールバック、明示的ロールバック、アップグレード
-世代の退役、再試行可能なアンインストールクリーンアップ、アンインストール
-保持/パージ、不正なオプション、restart-required 状態、正直な利用不可
-アクティベーションをカバーします。ホストされた Windows 実行はネイティブ
-DACL と保持ファイル/プロセス動作を追加します。macOS 実行は POSIX モード/
-リンク動作を追加します。パスしたライフサイクルテストは、ロードされた
-Windows Live Control Surface の観測ではありません。
-
-## 初回セットアップの判断手順（#66 のガイド付き wizard ではありません）
-
-1. Node 24 LTS（22 も対応）を用意し、正確な候補を取得・検証します。
-2. 上記 OS 別パスで lifecycle の install plan を確認し、自分で Live を停止してから明示的停止確認付きで apply します。保存先を推測したり、リンク / 所有権の拒否を回避しません。
-3. Live を再起動し、Control Surface として `AbletonMcpBridge` を選択します。lifecycle `activate`、続いて `ableton-mcp-diagnostics --config /absolute/bridge-config.json` を実行します。
-4. 同じ `--config` と正確なインストール済み実行ファイルを MCP クライアントに指定します。方式は [USER_GUIDE.md](USER_GUIDE.md) を参照してください。
-
-| 段階 | 証拠 / 次の操作 |
-|---|---|
-| Runtime / OS | `nodeSupported` / `platformSupported`。engine 制約を回避せず対応環境を使用 |
-| Package | `readiness.package` と entrypoint / assets。フォルダーの存在だけでは不十分 |
-| 設定 / secret | `config.valid`、`bridgeConfigured`、`secretPermissions`。レシートの設定・所有ファイルを修復し、secret を表示しない |
-| 導入先 | lifecycle `status` で実際の Remote Scripts 導入先を検証。診断の `remoteScriptInstalled` はパッケージ内 assets で、Live がロードした証拠ではない |
-| 認証 bridge | `authenticatedReachable`、`registryHash`、`diagnosticErrors`。再起動 / Control Surface / 同じ設定・secret / loopback port / registry を確認 |
-| 実 Live | `readiness.realLiveOperational`、`provenance`、discovery。simulator / fake-Live は activation を満たさない |
-| Release | `readiness.releaseCertified` は false。正確な候補の matrix と外部証拠を別途保持 |
-
-診断の終了コード 0 だけで readiness を判断しません。設定や接続の値が false の場合があります。接続修復のために導入を繰り返したり、不確定な receipt / journal を消してはいけません。
-setup は引数指定方式のままです。#66 は、再開可能なガイド付き単一コマンド、段階別修復、確認付き保存先選択、クリーン環境テストのため引き続き未完了です。`onboard` コマンドや汎用 `--yes` 承認回避はありません。
-
-## レイヤード診断
-
-診断は 5 つの個別のレイヤーを報告します: パッケージ、設定済みブリッジ、
-認証済みブリッジ、実 Live 運用、リリース認証。レガシーの `ready` サマリーは、
-認証済み実 Live 運用に対してのみ true です。リリース認証は、正確な候補
-マトリクスと外部ゲートが完了するまで false のままです。プローブ失敗は、
-肯定的なエビデンスになるのではなく、有界なエラーコードを返します。
+シークレットを作成することはなく、ループバックのホストだけを受け付け、`--force` がなければ既存のファイルを置き換えません。

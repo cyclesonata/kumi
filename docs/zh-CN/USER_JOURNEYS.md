@@ -1,140 +1,103 @@
-# 能力感知的用户旅程
+# 操作示例
 
 [English](../en/USER_JOURNEYS.md) · 简体中文 · [日本語](../ja/USER_JOURNEYS.md)
 
-五个引导式创作工作流 —— 节拍/歌曲创作、进阶鼓组、声音设计、参考对比与
-演出诊断 —— 通过只读的 `plan_user_journey` 工具、`ableton://journeys`
-资源与五个 MCP 提示词暴露。
+以下是用桥接工具完成的几段简短会话，按 MCP 客户端发送的形式列出。每一步给出一个工具及其参数。尖括号中的值来自之前的应答：引用来自 `live_discover`，`transactionId` 来自预览。`idempotencyKey` 由你自己选定，8 到 128 个字符，每次应用都要用新的。[用户指南](USER_GUIDE.md)介绍了每个工具以及[修改的工作方式](USER_GUIDE.md#修改的工作方式)。
 
-旅程是对直接调用者所使用的同一组用途特定护栏工具的计划。计划**不是**
-变更授权:它不包含事务令牌、确认令牌或幂等键。
+## 查看工程
 
-## 共享契约
+```text
+live_status     {}
+live_discover   {"kind": "track", "limit": 50}
+live_discover   {"kind": "device", "parent": "<trackRef>"}
+live_discover   {"kind": "parameter", "parent": "<deviceRef>"}
+```
 
-1. 调用 `live_status`,依据报告的适配器、epoch、能力、操作、注册表哈希
-   与来源进行规划。
-2. 宣告每个有序文本阶段。状态绝不仅用颜色表示。
-3. 预览前发现新鲜的精确引用与修订。
-4. 展示影响、目标、边界、预期结果与恢复路径。
-5. 在每个确认门处停下。一个预览的确认绝不授权另一个阶段。
-6. 只通过该阶段指定的用途特定工具应用。不要使用通用调用,也不要从自然
-   语言推断授权。
-7. 验证新鲜的权威事后状态。取消、超时、确认丢失或矛盾回读意味着
-   `uncertain`,而不是成功。
-8. 通过事务自有的 undo/stop/cleanup 路径或独立的紧急授权恢复,然后列出
-   全部残留。
+`live_status` 应显示 `"connected": true` 和 `"provenance": "real-live"`。每一页发现结果都返回 `items`，还有更多结果时会附带 `nextCursor`。引用的形式类似 `1232800184424618:track:4`。它们在 Live 的 epoch 改变之前一直有效；Live 重启或桥接重连时 epoch 就会改变。
 
-`traits` 限制为 1,000 个可打印字符,`bars` 为 1–16,计划限制音符创建
-最多 512 个。只有允许列表中的节奏、密度、能量、音色、空间、动态、和声与
-编曲描述词进入派生指导。原始请求保留为不受信任的标记以供操作者参考。
-如果检测到身份或精确复制语言,**所有**提取都会被阻止 —— 即使是
-"Bright" 或 "Major" 这类巧合词汇 —— 调用方必须不带名称地重述特征。
-身份/复制文本绝不进入音符、拓扑或诊断指导。如果没有识别到安全特征,
-每个阶段都是 `blocked-by-intent`,模式为
-`intent-clarification-required`,没有旅程可执行。对于相同的归一化请求
-与已协商的 Live 状态,计划 ID 是确定性的;连接状态、适配器、epoch、
-来源、注册表哈希、操作集、能力集、安全翻译或输入的变化都会产生不同的
-计划。
+## 修改速度，然后撤销
 
-## 1. 创建可编辑的节拍或歌曲段落
+```text
+live_tempo_preview  {"tempo": 124}
+live_tempo_apply    {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "tempo-124-a1"}
+live_undo           {"transactionId": "<id>", "confirmation": "undo", "idempotencyKey": "tempo-undo-a1"}
+```
 
-提示词:`create_beat_or_song`
+预览返回 `priorTempo`、`proposedTempo`、`confirmation: "apply"` 和 `expiresAt`，不做任何修改。应用返回 `"state": "applied"` 以及 Live 现在的速度。用同一个键再次发送同一个应用请求不会改变任何东西，只会再次应答。`change_tempo_safely` 提示词和 `ableton://live-workflow` 资源描述的也是同样的步骤。
 
-该旅程把允许列表中的高层节奏、和声、编曲与制作特征,翻译为有界的速度、
-角色事件、网格、段落与音高未定的指导,然后才进行精确的结构/MIDI 预览。
-它发现 Set、空目标槽位、速度、设备与停止的播放;分别预览 Session 结构
-与 MIDI;每项变更都需要精确确认;只在单独的输出安全预览后试听;按稳定
-ID 修订音符;并验证或受护栏地撤销结果。Arrangement、修订与试听阶段只有
-在其精确能力与操作已协商时才标记为 `planned`;否则各自为
-`unavailable` 并附带不变更的回退。
+## 一次调用完成修改
 
-如果缺少必需的 Session/MIDI 能力,服务器返回可编辑的音符/结构计划并
-指出每个不可用的操作。它不会声称 Live 包含或播放了结果。
+```text
+live_change  {"tool": "live_mixer_preview", "args": {"trackRef": "<trackRef>", "mute": true}, "idempotencyKey": "mute-bass-a1"}
+```
 
-## 2. 编排进阶鼓组
+应答是应用的结果，预览的结果在 `preview` 下。其中的 `transactionId` 和其他修改一样可以用于 `live_undo`。
 
-提示词:`sequence_advanced_drums`
+## 加载乐器并调整音色
 
-该旅程发现 Drum Rack pad 音高,而不是猜测映射。当相应字段被宣告时,它
-可以预览并验证有界的力度、分数时值、概率、力度偏移与释放力度。不支持的
-MPE、律动提取、逐音符表情或调制保持明确不可用;普通时值或力度绝不会被
-重新标记为那些特性。试听与恢复只针对精确的自有的剪辑。
+```text
+live_browser_search              {"category": "instruments", "query": "drift"}
+live_browser_load_preview        {"itemId": "<itemId>", "trackRef": "<trackRef>"}
+live_browser_load_apply          {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "load-drift-a1"}
+live_discover                    {"kind": "device", "parent": "<trackRef>"}
+live_discover                    {"kind": "parameter", "parent": "<deviceRef>"}
+live_device_parameter_preview    {"deviceRef": "<deviceRef>", "values": [{"parameterRef": "<cutoffRef>", "value": 0.4}, {"parameterRef": "<resonanceRef>", "value": 0.2}]}
+live_device_parameter_apply      {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "drift-tone-a1"}
+```
 
-## 3. 用可用的自有/原生设备设计音色
+加载的设备会放在轨道现有设备之后；已经有乐器的轨道会拒绝第二个乐器。在一次预览中设置的多个参数构成一项修改，对应一次撤销。
 
-提示词:`design_owned_sound`
+## 写一个片段并试听
 
-该旅程派生语义化的拓扑/控制方向,以稳定的结果 ID 搜索 Browser,并预览
-加载一个选定结果。没有设备的 Set 仍可宣告 Browser 加载;因此 `devices`、
-`parameters` 与 `device.parameter.set` 在加载后重新协商。客户端必须在
-该连接级协商后重新规划,而不是假设旧计划仍然有效。参数变更使用精确的
-已发布数值控件与边界。不暴露 Live 参数或预设 API 的插件只给出人工说明。
-设备的存在不被声称是因果音频证明。
+```text
+live_discover              {"kind": "clip-slot", "parent": "<trackRef>"}
+live_midi_clip_preview     {"trackRef": "<trackRef>", "sceneIndex": 0, "name": "Bass", "length": 4,
+                            "notes": [{"pitch": 36, "start": 0, "duration": 0.5, "velocity": 100},
+                                      {"pitch": 36, "start": 1.5, "duration": 0.5, "velocity": 90}]}
+live_midi_clip_apply       {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "bass-clip-a1"}
+live_clip_launch_preview   {"slotRef": "<slotRef>", "outputSafety": {"safe": true, "provenance": "monitors checked at a low level"}}
+live_clip_launch_apply     {"transactionId": "<id>", "confirmation": "<confirmation>", "idempotencyKey": "bass-play-a1"}
+live_clip_launch_stop      {"transactionId": "<id>", "confirmation": "<stopConfirmation>", "idempotencyKey": "bass-stop-a1"}
+```
 
-## 4. 与用户提供的参考对比
+槽位必须是空的。MIDI 片段预览在 30 秒后过期。触发预览会给出两个不可预测的令牌：`confirmation` 用于触发，`stopConfirmation` 用于停止。停止只会结束这一个片段；其他正在播放的内容会继续播放。
 
-提示词:`compare_reference_mix`
+## 删除轨道，然后恢复
 
-Live 断开时本地标准分析仍可用。该旅程接受具有明确权利与同意关系的、
-调用方提供/生成的 PCM,运行有界的一次性 worker,报告 ITU-R
-BS.1770-5/EBU R128 响度与真峰值、对齐置信度、动态、频谱与瞬态聚合,
-不返回原始 PCM。新鲜的 Live 上下文或受护栏的 Session Resampling 捕获
-是可选的。观察到的拓扑、测量与假设保持分离;仅凭设备或路由存在不做
-因果声明。
+```text
+live_track_delete_preview  {"trackRef": "<trackRef>"}
+live_track_delete_apply    {"transactionId": "<id>", "confirmation": "apply", "idempotencyKey": "drop-fx-a1"}
+live_song_undo             {"confirmation": "undo-in-live", "idempotencyKey": "drop-fx-undo-a1"}
+```
 
-自动对齐歧义会导致拒绝,或采用文档化的手动/禁用回退。提出的混音器实验
-是一个可逆假设,需要新鲜的同范围测量,而不是母带确定性。
+预览会列出随轨道一起删除的内容（`alsoDeletes`：删除编组会连同其中的轨道）。`live_undo` 无法恢复已删除的轨道，但 Live 自己的撤销可以。`live_song_undo` 撤销的是 Live 最后做的那一步，所以要立即使用。
 
-## 5. 诊断混音、录音或演出设置
+## 多项修改合为一次 Cmd-Z
 
-提示词:`diagnose_performance_setup`
+```text
+live_undo_step_begin  {"label": "Build the drop"}
+...                   previews and applies
+live_undo_step_end    {"stepId": "<stepId>"}
+```
 
-只读的第一遍聚合播放、arm、监听、路由、混音器、设备、自动化、工程、
-订阅与实时恢复状态。它在提出变更前按精确引用排列发现。易产生反馈的路由、
-录音、可发声播放与实时布防使用独立的预览与确认。实时报告区分已接受
-数据包与已应用变更,并要求有界令牌过期/disarm 加独立的 TCP 紧急停止。
-未知延迟保持未知;服务器不会仅因 UDP 可用就声称低延迟路径。
+两者之间的所有修改在 Live 的撤销历史中合为一步。每项修改也各自保留自己的 `live_undo`。该步骤会在两分钟（或你给出的 `timeoutMs`）后自行关闭，连接断开时也会关闭。
 
-当路由、混音器、走带、录音或停止授权不可用时,回退是只读检查清单。它
-绝不 arm、监听、录音、路由、播放或声称就绪。
+## 引导式计划
 
-## 权利感知的意图翻译
+`plan_user_journey` 为五个流程之一返回一份计划，不做任何修改。计划按顺序列出各个阶段及每个阶段要用的工具；如果当前 Live 缺少某个阶段所需的功能，就把该阶段标记为 `unavailable`，并给出替代方案。同样的计划也以提示词的形式提供，`ableton://journeys` 资源会列出它们及其可用性。
 
-`traits` 中的艺人、唱片、歌曲、人物与精确复制措辞,只保留为
-`untrustedOriginalRequest`,并从派生创作指导中排除。检测会阻止整个提取,
-因为名称可能包含普通词汇;用户必须重新提交不含身份/复制措辞的、允许
-列表中的高层描述词。此类请求产生澄清要求,而不是伪造的翻译。计划不
-请求或声称访问受保护的源材料,不承诺精确复制,也不断言法律许可。参考
-PCM 必须由调用方在其有权使用的关系下提供或生成。服务器无法判定版权
-所有权或许可。
+| 流程 | 提示词 | 计划涵盖 |
+| --- | --- | --- |
+| `create-beat-or-song` | `create_beat_or_song` | 根据你的描述搭建轨道、场景和一个 MIDI 片段；可选复制到编曲视图、修改音符和试听 |
+| `sequence-advanced-drums` | `sequence_advanced_drums` | 在 Drum Rack 实际的打击垫音符上编写鼓型，带有时值、概率和力度变化 |
+| `design-owned-sound` | `design_owned_sound` | 从 Browser 查找并加载设备，调整其参数，前后对比试听 |
+| `compare-reference-mix` | `compare_reference_mix` | 将你的音频与你提供的参考音频比较，可选读取 Live 上下文，进行一次可撤销的调音台实验 |
+| `diagnose-performance-setup` | `diagnose_performance_setup` | 读取播放、预备录音、监听、路由和调音台状态，然后修正路由和调音台；可选录音或实时控制 |
 
-## 进度与恢复语言
+计划接受以下输入：
 
-每个计划都提供这个有序的执行词汇表:
+- `traits`（必填）：描述音乐的 1–1,000 个字符。
+- `experienceLevel`（可选）：`beginner` 或 `advanced`。
+- `bars`（可选）：1–16。
 
-`discovering` → `planned` → `awaiting_confirmation` → `applying` →
-`verifying` → `completed`
-
-返回的阶段状态明确是计划模板(`planned` 或 `unavailable`),而不是执行
-真相。客户端/代理从实际的用途特定工具结果推导运行时进度,终态路径也
-可能是 `recovered` 或 `uncertain`。终态结果必须按适用情况说明残留的
-播放、录音、路由、临时媒体、实时授权与已创建对象状态。客户端应先宣告
-阶段标题再展示细节,并把初学者摘要与精确引用、epoch、修订、注册表哈希
-分开。
-
-## 无障碍范围与已知限制
-
-交付的产品是 JSON-RPC/MCP stdio 服务与 CLI,不是图形编辑器。因此其
-无障碍契约是文本优先的:
-
-- 语义化的工具、资源、提示词、阶段、影响、确认与状态名称;
-- 数组与提示文本中的确定性阅读顺序;
-- 没有仅鼠标的服务器指令,没有仅颜色的结果;
-- 波形、频谱、表头与其他视觉摘要需要文本替代;
-- 有界输出,适合客户端宣告与取消。
-
-没有服务器自有的焦点光标、面板、画布或键盘快捷键,因此焦点管理与对比度
-在 stdio 边界不适用。宿主**不**控制 MCP 客户端、终端或 Ableton Live 的
-无障碍行为。VoiceOver/Narrator 支持、焦点顺序、键位绑定以及 Live 插件
-窗口的无障碍,取决于那些产品与版本。需要辅助技术的操作者应验证其选择的
-客户端与 Live 版本;不可访问的插件 UI 是人工限制,而不是声称的能力。
+计划只使用你描述中的一般音乐特征：节奏、密度、能量、音色、空间感、动态、和声、编排。如果描述中点名了某位艺人、某首歌或某张唱片，或者要求精确复制，就不会从中采用任何内容。此时每个阶段都会被标记为 `blocked-by-intent`，计划会请你在不点名任何人的情况下描述想要的声音。针对相同的 Live 状态发出相同的请求，总会得到相同的计划。

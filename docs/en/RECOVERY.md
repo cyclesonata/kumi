@@ -2,154 +2,120 @@
 
 English · [简体中文](../zh-CN/RECOVERY.md) · [日本語](../ja/RECOVERY.md)
 
-What to do when something fails mid-flight. The golden rule: **uncertain state
-is never retried with new authority** — reconcile the exact original
-transaction in an unchanged epoch, or recover manually from fresh
-authoritative state.
+What to do when a call fails or a change is left in doubt.
 
-## Protocol and input errors
+The rule: **never answer an uncertain change with a new one.** If an apply
+times out or loses its reply, retry only that apply, with the same
+`transactionId` and `idempotencyKey`, while the server and Live are still up.
+Otherwise read Live again and put things right by hand.
 
-Correct the request and use a fresh request identifier. For malformed or
-oversized input, discard the rejected frame and inspect only the redacted
-stderr diagnostic. If authentication, framing, sequencing, or response
-correlation is no longer trustworthy, stop and restart the process; do not
-continue the stream.
+## Reading an error
 
-## Configuration and lifecycle errors
+A malformed request gets a JSON-RPC error:
 
-Verify that the configuration path is explicit, regular, non-symlink, and
-owner-controlled; configuration is version 1 or 2; the bridge host is exact
-loopback; ports are distinct/free at install preflight; and the separate
-secret has conclusive owner-only permissions. Never put a secret on the command
-line.
+| Code | Meaning |
+| --- | --- |
+| `-32700` | The line isn't JSON |
+| `-32600` | Invalid request, a message over 500 MiB, an `id` already in use, or the server is shutting down |
+| `-32601` | No such tool |
+| `-32602` | Invalid arguments, or a protocol-version mistake |
+| `-32002` | Not initialized yet, or no such resource or prompt (`2025-11-25`) |
+| `-32022` | Unsupported protocol version (the error lists the supported ones) |
+| `-32000` | Busy: too many requests waiting; retry when some finish |
+| `-32603` | Internal error |
 
-For receipt-driven lifecycle failures, stop Live and inspect
-`install-receipt.json`, `lifecycle-journal.json`, managed hashes, and
-quarantine before retrying. A failed install removes newly created
-secret/config/bridge state. A failed upgrade restores the old config/bridge and
-leaves the receipt generation unchanged. A held file, ACL error,
-symlink/junction, occupied port, or interrupted rename is not success; release
-the handle or fix permissions, then use status and repair. Repair preserves
-drift in quarantine and refuses to manufacture a missing secret. Rollback uses
-only the exact receipt-bound prior generation. Uninstall stages owned paths
-before commit, restores them if commit fails, retires receipt-owned rollback
-generations, quarantines drift, and preserves secrets unless receipt-owned
-purge is explicit. If post-commit removal is blocked, the receipt retains
-`pendingCleanup`; release the handle and repeat the exact uninstall command.
-`preserved` paths are operator content and are never deleted by retry. Never
-manually replace or delete a backup while rollback is advertised. See
-[DELIVERY.md](DELIVERY.md).
+A tool that refuses answers with `isError: true` and
+`{"reason": "...", "remediation": "..."}`. The reason is the bridge's or Live's
+own, in one line. Read it:
 
-## Adapter uncertainty
+- **"Nothing changed in Live"**, or a reason ending "; nothing changed": the
+  call did nothing. Fix what it says, then preview again.
+- **"Live state changed since the preview"**: something changed between preview
+  and apply, perhaps your own edit in Live or another client. Read again, then
+  preview again.
+- **`tool-unavailable-in-current-live-shape`**: this Live doesn't offer the
+  tool right now. Read `ableton://capabilities` to see why.
+- **`tool-denied-by-deployment-policy`**: the
+  [deployment policy](USER_GUIDE.md#deployment-policy) hides it.
+- **The remediation says the change is uncertain**: see the next section.
 
-Authentication failure, registry mismatch, response-MAC failure, replay,
-sequence error, malformed response, timeout, cancellation, disconnect, or
-acknowledgement loss means the result is **unknown**. Do not issue new mutation
-authority. The still-running host may reconnect only to the same authenticated
-bridge and unchanged Live epoch, reuse the exact original transaction,
-confirmation, canonical arguments, and idempotency key, obtain the Remote
-Script ledger result, and verify fresh postconditions. This is reconciliation,
-not a new replay. A changed bridge or Live epoch fails closed and requires
-manual authoritative recovery.
+## When a change is uncertain
 
-Hidden cleanup tokens survive a transport reconnect performed by the same
-adapter instance, but are intentionally not persisted to disk or transferable
-to a replacement host process. Host transaction records are likewise
-in-memory: after process replacement, automatic destructive cleanup is
-unavailable and exact manual readback/recovery is required; only the
-independently authorized emergency stop survives restart.
+A timeout, a disconnect or a lost reply during an apply or an undo leaves the
+change uncertain: it may or may not have happened.
 
-For a cancelled stdio request, no cancellation response is emitted.
-Cancellation before handler dispatch may prevent work; cancellation after
-dispatch does not undo Live work. Treat the latter as uncertain and perform
-fresh readback before any further mutation.
+1. Don't preview it again, and don't send a new key.
+2. While the same server runs and Live hasn't restarted, send the same apply
+   (or undo) again with the same `transactionId` and `idempotencyKey`. The
+   Remote Script remembers what it ran. It answers with the first result, or
+   finishes the change, and the bridge reads it back.
+3. If Live restarted meanwhile, the retry is refused. Read the Set
+   (`live_discover`, `live_snapshot`), see whether the change is there, and set
+   things right by hand.
+4. Then close the record with `live_recovery_finalize`:
 
-## Transaction recovery
+   ```json
+   {"transactionId": "<id>", "resolution": "manually-restored", "confirmation": "finalize-recovery-record",
+    "evidence": {"provenance": "checked the mixer in Live", "scope": "track 3 volume"}}
+   ```
 
-Preview expiry, stale epoch, stale revision, invalid parent, occupied Session
-slot, duplicate structure name, locator collision, unsupported or disabled
-parameter, out-of-range or incorrectly quantized value, or an external edit
-requires fresh authoritative discovery and a new preview. An
-acknowledgement-lost apply, undo, or compensation remains recovery-protected
-and accepts only the exact original idempotency key in the unchanged
-bridge/Live epoch. Multi-step structure, locator, capture, MIDI, and
-automation recovery replays retained exact step arguments, verifies already
-completed steps, and resumes only the transaction-owned remainder. A different
-key fails closed. For device parameters, verify the same device-child
-relationship and exact prior/applied value before restoration.
+   Use `"accepted-current-state"` when you keep Live as it is. Finalizing
+   changes nothing in Live. It is refused while anything plays, records or
+   holds a realtime channel.
 
-Arbitrary device and Arrangement clip deletion is unavailable because deleted
-state cannot be reconstructed. Cleanup deletes only an exact
-transaction-created identity whose creation fingerprint and current hierarchy
-still match; modified or substituted owned objects are refused. After
-authoritative manual recovery, `live_recovery_finalize` requires
-`confirmation=finalize-recovery-record`, a declared resolution, and bounded
-provenance/scope evidence; it refuses active audible/recording/realtime work
-and retires Remote Script replay authority before releasing host capacity.
+Uncertain records count against the server's undo capacity. When they fill it,
+new changes are refused ("capacity is exhausted by recovery-protected work")
+until you finalize them.
 
-For scene audition, first perform fresh authenticated playback discovery. If
-the connection epoch, Set name, scene revision, recording state,
-arm/monitoring state, output evidence, or active targets differ from the
-transaction, guarded stop is refused and the operator must inspect the Set
-manually. Same-epoch acknowledgement loss accepts only the original apply or
-stop key; never substitute a new key. The independent fresh-observation
-`live_session_emergency_stop` remains available after host restart.
+## Common problems
 
-Recording acknowledgement loss is always uncertain. Re-read both recording
-modes, the exact destination track, and playback targets. Reconcile a possibly
-applied start only through the exact original transaction/key in the unchanged
-epoch; never preview or dispatch a second start as recovery. If any recording
-mode remains active, call `live_session_emergency_stop` with the exact fresh
-playback targets and mandatory `expectedRecording` value (`session`,
-`arrangement`, or `both`; use `stopped` only when both fresh flags are false);
-its mapper-side fence also verifies recording state and clears Session Record
-and Arrangement Record before reporting `recordingStopped=true`.
+| Problem | What to do |
+| --- | --- |
+| The server exits with "Unsupported Node.js" | Run it with Node 22 or 24. |
+| "version-1 configuration does not enable a Live adapter" | Write a version 2 file with `ableton-mcp-setup` and the bridge options; see [the configuration file](USER_GUIDE.md#the-configuration-file). |
+| "secret file is invalid", or its permissions "must be conclusively owner-only" | The secret must be one line of 32 or more characters, readable only by you. For a lifecycle install, `ableton-mcp-lifecycle repair` restores them. |
+| `live_status` says `"connected": false` | Check that Live is running with **AbletonMcpBridge** chosen as a Control Surface, and that the configuration's port and secret are the ones the Remote Script uses. Then run `ableton-mcp-diagnostics --config <path>`. |
+| AbletonMcpBridge doesn't load in Live; Live's log says "bridge configuration reference is missing or unsafe" | The Remote Script was installed without `--config`. Install it again with `--config` (see [connect to Live](USER_GUIDE.md#connect-to-live)), or use the lifecycle. |
+| "Unknown or expired … transaction" | The preview expired or the server restarted. Preview again. |
+| `live_undo` refuses: the ref "isn't the one this change was made on any more" | The object was replaced. Put it right by hand, or use `live_song_undo` if Live's last undo step is that change. |
+| You deleted something by mistake | `live_song_undo` (`confirmation: "undo-in-live"`) straight away; `live_undo` can't bring deletions back. |
+| The Live extension's tools are missing | The extension isn't running: it needs Live 12.4 or later, and either installing in Live's Extensions folder or Live's Developer Mode; see [Kumi's Live extension](USER_GUIDE.md#kumis-live-extension). |
 
-## Realtime recovery
+Installation problems (lifecycle receipts, quarantine, repair and rollback) are
+covered in [delivery](DELIVERY.md).
 
-Disarm immediately when `live_realtime_stats` reports callback failures,
-revoked work, pre-dispatch drops, or persistent pending work. Disarm, expiry,
-re-arm, and bridge teardown generation-fence callbacks that have not started.
-Do not infer delivery from UDP send success or the `accepted` counter; only
-`applied` reports a completed verified Live-thread write. Restore touched
-parameters through fresh authoritative refs and verify stopped/non-recording
-state. The TCP `live_session_emergency_stop` is the independent recovery path
-when the realtime token is missing or the data plane is suspect. See
-[REALTIME_CONTROL.md](REALTIME_CONTROL.md).
+## Stop everything that plays or records
 
-## Audio-capture recovery
+`live_session_emergency_stop` stops Session clips, the transport and both
+recording modes. It needs no transaction, so it works after a restart too.
 
-Do not infer cleanup from MCP cancellation, host exit, or transport silence.
-Open a fresh packaged host and call `live_audio_capture_status`. The tool
-redacts the recovery token and raw path but reports exact
-capture/source/destination identities, active/state, watchdog stop, file
-availability, and playback stop.
+1. Read what's playing: `live_discover` with `{"kind": "session-playback"}`.
+2. Send exactly what you read:
 
-If state is not `cleaned`, call `live_audio_capture_emergency_stop` with
-`confirmation=emergency-stop-and-clean` and the exact freshly observed
-identities. This independently stops the exact source/destination slots and
-tracks, transport, and recording; reasserts stop across any quantized-fire
-race; restores owned route/arm/monitor/position state unless an external edit
-is detected; validates, privately quarantines, truncates, and unlinks the exact
-fresh WAV/`.asd` inodes inside the saved project/User Library boundary; and
-deletes only the exact mapper-owned capture clip after raw cleanup.
+   ```json
+   {"confirmation": "emergency-stop", "expectedTargets": ["<trackRef>|<clipSlotRef>|<sceneRef>"],
+    "expectedRecording": "session"}
+   ```
 
-Success requires `cleanup.safe=true`, empty residuals, final state `cleaned`,
-`playbackStopped=true`, and no WAV/ASD file. If the route changed externally,
-media is outside the boundary, the Set path is unavailable, file identity
-changed, format is unsupported, or unlink fails, stop all new capture attempts
-and resolve the named residual manually. Never delete an arbitrary path and do
-not claim forensic erasure. See [AUDIO_INTELLIGENCE.md](AUDIO_INTELLIGENCE.md).
+   `expectedRecording` is `stopped`, `session`, `arrangement` or `both`.
 
-## Restart
+3. If it's refused because playback changed meanwhile, read again and repeat.
+   Success reports `"stopped": true` and `recordingStopped`.
 
-1. Stop the supervisor and preserve redacted diagnostics.
-2. Confirm that no generated archive or credential file is being collected.
-3. Restart `dist/src/cli.js` with stdout and stderr separate.
-4. Initialize with `2025-11-25`, then send `notifications/initialized`.
-5. Obtain fresh status and discovery, preview again, and use a new bounded
-   idempotency key.
+To stop one clip you launched, use `live_clip_launch_stop`; for an audition,
+`live_session_audition_stop`. A capture has its own emergency stop; see
+[audio intelligence](AUDIO_INTELLIGENCE.md). For realtime control, call
+`live_realtime_disarm` and see [realtime control](REALTIME_CONTROL.md).
 
-If real Live is involved, stop and inspect the Set visibly before continuing.
-Repository-controlled evidence cannot substitute for that inspection or prove
-restoration.
+## After a restart
+
+The server keeps its undo records and previews in memory only, so a restart
+loses them. A Live restart, or a reconnect, gives Live a new epoch, and every
+ref from before stops working.
+
+1. Start the server and initialize again.
+2. Call `live_status`, and read the Set again.
+3. Changes made before the restart can't be undone with `live_undo`. Live's own
+   undo (`live_song_undo`) may still hold them.
+4. If a change was uncertain when the server stopped, check it by hand: there
+   is no record left to retry or finalize.
