@@ -72,6 +72,8 @@ pub enum LanguageModelError {
     ApiCall(ApiCallError),
     Kumi(KumiError),
     Other(String),
+    /// A provider's normalized in-stream error, including retry and status metadata.
+    ProviderStream(serde_json::Map<String, Value>),
 }
 
 impl LanguageModelError {
@@ -94,6 +96,7 @@ impl fmt::Display for LanguageModelError {
             Self::ApiCall(error) => f.write_str(&error.message),
             Self::Kumi(error) => f.write_str(&error.message),
             Self::Other(message) => f.write_str(message),
+            Self::ProviderStream(error) => f.write_str(error.get("message").and_then(Value::as_str).unwrap_or("Provider stream error")),
         }
     }
 }

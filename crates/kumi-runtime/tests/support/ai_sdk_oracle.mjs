@@ -14,7 +14,13 @@ const settings = { baseURL: 'http://fixture/v1', apiKey: 'fixture-key', fetch };
 const model = test.provider === 'anthropic' ? createAnthropic(settings).messages(test.model)
   : test.provider === 'openai' ? createOpenAI(settings).responses(test.model)
   : createOpenAICompatible({ ...settings, name: test.name ?? 'fixture', includeUsage: true }).chatModel(test.model);
-const answer = await model.doStream(test.options);
+let answer;
+try {
+  answer = await model.doStream(test.options);
+} catch (error) {
+  process.stdout.write(JSON.stringify({ request, error: { message: error.message, url: error.url, requestBodyValues: error.requestBodyValues, statusCode: error.statusCode, responseBody: error.responseBody, isRetryable: error.isRetryable } }));
+  process.exit(0);
+}
 const parts = [];
 // Rust represents JavaScript Date values as epoch milliseconds.
 for await (const part of answer.stream) parts.push(part.type === "response-metadata" && part.timestamp instanceof Date ? { ...part, timestamp: part.timestamp.getTime() } : part);
