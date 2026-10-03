@@ -6,6 +6,7 @@
 mod events;
 pub mod helpers;
 mod protocol;
+mod reads;
 mod resources;
 pub mod retention;
 
