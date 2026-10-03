@@ -938,7 +938,7 @@ local_test!(set_save_keeps_a_draft_and_failed_answer_abandons_it, {
             });
         });
         project(&h, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-        h.observation.borrow_mut().saved_at = Some(1000);
+        h.observation.borrow_mut().saved_at = Some(1000.);
         h.session.start().await.unwrap();
         h.session.submit("build a Reese", None).await.unwrap();
         h.session.refresh().await.unwrap();
@@ -946,7 +946,7 @@ local_test!(set_save_keeps_a_draft_and_failed_answer_abandons_it, {
         if fail {
             h.session.submit("I love it", None).await.unwrap();
         } else {
-            h.observation.borrow_mut().saved_at = Some(2000);
+            h.observation.borrow_mut().saved_at = Some(2000.);
             h.session.refresh().await.unwrap();
         }
         delay(10).await;

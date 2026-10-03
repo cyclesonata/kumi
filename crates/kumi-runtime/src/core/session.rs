@@ -218,7 +218,7 @@ struct State {
     chosen: Option<Chosen>,
     project: Option<String>,
     set: Option<String>,
-    saved_at: Option<i64>,
+    saved_at: Option<f64>,
     set_name: Option<String>,
     plan: Option<Rc<dyn KernelTool>>,
     turns: u32,

@@ -273,7 +273,7 @@ pub struct Observation {
     /// The Set's track names, when all of them were read (names are data).
     pub tracks: Option<Vec<String>>,
     /// When the saved Set's file was last written: a later time means the producer saved it.
-    pub saved_at: Option<i64>,
+    pub saved_at: Option<f64>,
 }
 
 /// A conversation, kept between sessions: `changes` are what Kumi changed during it (for HISTORY),
