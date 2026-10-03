@@ -237,8 +237,13 @@ impl LoopbackLiveAdapter {
             .ok_or_else(|| LiveError::error("stale loopback event"))?;
         self.event_sequence.set(sequence);
         let event: LiveEvent = serde_json::from_value(result["event"].clone()).map_err(|_| LiveError::error("invalid loopback event"))?;
-        let listeners = self.listeners.borrow().iter().map(|(_, callback)| callback.clone()).collect::<Vec<_>>();
-        for listener in listeners {
+        let mut last = 0;
+        loop {
+            let next = self.listeners.borrow().iter().find(|(id, _)| *id > last).cloned();
+            let Some((id, listener)) = next else {
+                break;
+            };
+            last = id;
             listener(&event);
         }
         Ok(())
@@ -299,9 +304,13 @@ impl LiveAdapter for LoopbackLiveAdapter {
         Ok(self.request(json!({"method":"invoke","operation":invocation.operation,"args":invocation.args}))?.unwrap_or(Value::Null))
     }
     fn subscribe(&self, listener: LiveListener) -> Result<Unsubscribe, LiveError> {
-        let id = self.listener_number.get() + 1;
-        self.listener_number.set(id);
-        self.listeners.borrow_mut().push((id, listener));
+        let existing = self.listeners.borrow().iter().find(|(_, callback)| Rc::ptr_eq(callback, &listener)).map(|(id, _)| *id);
+        let id = existing.unwrap_or_else(|| {
+            let id = self.listener_number.get() + 1;
+            self.listener_number.set(id);
+            self.listeners.borrow_mut().push((id, listener));
+            id
+        });
         if let Err(error) = self.request(json!({"method":"subscribe"})) {
             self.listeners.borrow_mut().retain(|(key, _)| *key != id);
             return Err(error);
