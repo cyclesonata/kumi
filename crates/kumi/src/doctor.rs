@@ -297,10 +297,12 @@ pub fn read_bridge_server(config_path: &str) -> Result<BridgeServer, RuntimeErro
         server.entry = server.command.clone();
     }
     if let Some(root) = server.package_root() {
-        server.version = fs::read(join(&root, "package.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-            .and_then(|v| v.get("version").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string));
+        server.version =
+            fs::read(join(&root, "package.json")).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()).and_then(|v| {
+                let version =
+                    if server.native() { v.get("bridge").filter(|v| v.is_string()).or_else(|| v.get("version")) } else { v.get("version") };
+                version.and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_string)
+            });
     }
     Ok(server)
 }
