@@ -71,6 +71,8 @@ fn sign_in_commands_and_update_bridge_library_flags_match_all_source_results() {
         let input: Vec<String> = serde_json::from_value(case["args"].clone()).unwrap();
         let result = load_config(&input, &env);
         if let Some(error) = case["error"].as_str() {
+            // Source behavior is unchanged; checkout command help names the native Cargo entrypoint.
+            let error = error.replace("npm run kumi --", "cargo run -p kumi --").replace("npm run kumi", "cargo run -p kumi --");
             assert_eq!(result.unwrap_err().to_string(), error, "{input:?}");
         } else {
             let mut expected = case["expected"].clone();
