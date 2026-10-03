@@ -57,7 +57,8 @@ pub use version::KUMI_VERSION;
 // TODO(port): re-exports from providers/local
 // TODO(port): re-exports from auth/store
 // TODO(port): re-exports from auth/openai_codex
-// TODO(port): re-exports from integrations/ableton
+pub use integrations::ableton::{create_inference_only_integration, BRIDGE_TOOLS};
+// Main Ableton integration is implemented separately.
 // TODO(port): re-exports from ears/device
 // TODO(port): re-exports from hands
 pub use core::goal::{create_goal_store, GoalBudget, GoalState, GoalStatus, GoalStore, GOAL_BUDGET};
