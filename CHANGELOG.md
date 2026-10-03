@@ -3,7 +3,9 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## Unreleased
+## 1.7.2 — 2026-10-03
+
+Kumi turns a device's knobs several times faster. Ships with bridge 1.0.73, as 1.7.0 and 1.7.1 did.
 
 - Kumi sets a device's parameters in one request to Live instead of five. Each request waits for
   one of Live's display ticks, so nine parameters on three devices (a rack from a tutorial, say)
