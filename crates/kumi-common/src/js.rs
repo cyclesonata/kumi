@@ -17,8 +17,17 @@ pub mod json {
         if indent == 0 {
             return stringify(value);
         }
+        stringify_with_indent(value, &" ".repeat(indent.min(10)))
+    }
+
+    /// `JSON.stringify(value, null, "\t")`: an indent given as text (JavaScript keeps its first ten characters).
+    pub fn stringify_with_indent(value: &Value, indent: &str) -> String {
+        let unit: String = indent.chars().take(10).collect();
+        if unit.is_empty() {
+            return stringify(value);
+        }
         let mut out = String::new();
-        write(value, &mut out, Some(indent.min(10)), 0);
+        write(value, &mut out, Some(&unit), 0);
         out
     }
 
@@ -34,7 +43,7 @@ pub mod json {
         stringify(value).len()
     }
 
-    fn write(value: &Value, out: &mut String, indent: Option<usize>, depth: usize) {
+    fn write(value: &Value, out: &mut String, indent: Option<&str>, depth: usize) {
         match value {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -82,11 +91,11 @@ pub mod json {
         }
     }
 
-    fn newline(out: &mut String, indent: Option<usize>, depth: usize) {
-        if let Some(width) = indent {
+    fn newline(out: &mut String, indent: Option<&str>, depth: usize) {
+        if let Some(unit) = indent {
             out.push('\n');
-            for _ in 0..depth * width {
-                out.push(' ');
+            for _ in 0..depth {
+                out.push_str(unit);
             }
         }
     }
@@ -381,6 +390,7 @@ mod tests {
         );
         assert_eq!(json::stringify(&json!(f64::NAN)), "null");
         assert_eq!(json::quote("hi"), "\"hi\"");
+        assert_eq!(json::stringify_with_indent(&json!({"a": [1]}), "\t"), "{\n\t\"a\": [\n\t\t1\n\t]\n}");
     }
 
     #[test]
