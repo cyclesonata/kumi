@@ -131,3 +131,42 @@ mod tests {
         assert_eq!(win32_join(&["C:", "tools"]), "C:\\tools");
     }
 }
+
+/// Volume, file index and link count from the same open handle, as Node's stat uses on Windows.
+#[cfg(windows)]
+pub fn windows_file_identity(file: &std::fs::File) -> std::io::Result<(u64, u64, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    #[repr(C)]
+    #[derive(Default)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+    #[repr(C)]
+    #[derive(Default)]
+    struct Information {
+        attributes: u32,
+        creation: FileTime,
+        access: FileTime,
+        write: FileTime,
+        volume: u32,
+        size_high: u32,
+        size_low: u32,
+        links: u32,
+        index_high: u32,
+        index_low: u32,
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetFileInformationByHandle(handle: *mut std::ffi::c_void, information: *mut Information) -> i32;
+    }
+    let mut information = Information::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut information) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        u64::from(information.volume),
+        (u64::from(information.index_high) << 32) | u64::from(information.index_low),
+        u64::from(information.links),
+    ))
+}

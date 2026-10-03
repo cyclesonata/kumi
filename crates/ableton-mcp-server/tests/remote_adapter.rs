@@ -698,3 +698,71 @@ async fn refusal_classification_and_terminal_retirement_removes_cleanup() {
         })
         .await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn delivery_probe_preserves_fake_real_and_missing_discovery_evidence() {
+    use ableton_mcp_server::delivery::*;
+    LocalSet::new()
+        .run_until(async {
+            for (provenance, empty_scenes, expected_authenticated, expected_live) in
+                [("fake-live", false, true, false), ("real-live", false, true, true), ("real-live", true, false, false)]
+            {
+                let server = Server::configured(
+                    vec![],
+                    move |request, _| {
+                        if request["method"] == "discover" {
+                            let kind = request["args"]["kind"].clone();
+                            if kind == "session_playback" { return Reply::Value(json!({"ref":"live:1:set:1","epoch":1,"revision":"1","transport":{"playing":false,"arrangementRecord":false,"sessionRecord":false,"position":0,"launchQuantization":{"raw":0,"normalized":"none"},"loop":{"enabled":false,"start":0,"length":4},"punchIn":false,"punchOut":false,"metronome":false,"countIn":0},"firedTargets":[],"playingTargets":[]})); }
+                            let items = if kind == "scene" && !empty_scenes {
+                                json!([{"ref":"live:1:scene:1"}])
+                            } else if kind == "track" {
+                                json!([{"ref":"live:1:track:1"}])
+                            } else {
+                                json!([])
+                            };
+                            Reply::Value(json!({"epoch":1,"kind":kind,"items":items,"truncated":false,"revision":"1"}))
+                        } else {
+                            Reply::Value(json!({}))
+                        }
+                    },
+                    |_| hello(EPOCH),
+                    move |_, mut status| {
+                        status["provenance"] = provenance.into();
+                        status
+                    },
+                )
+                .await;
+                let folder = tempfile::tempdir().unwrap();
+                let secret = folder.path().join("secret");
+                write_secret_file(&secret, Some(SECRET)).unwrap();
+                let path = folder.path().join("config.json");
+                let entry = native_entrypoint(folder.path());
+                let config = config_for_bridge(
+                    &entry,
+                    &json!({"host":"127.0.0.1","port":server.endpoint.port,"secretFile":secret,"timeoutMs":1000}),
+                    None,
+                    Some(&path),
+                    true,
+                )
+                .unwrap();
+                write_config(&path, &config, false).unwrap();
+                let report = diagnostics_async(Some(folder.path()), Some(&path)).await;
+                assert_eq!(report["authenticatedReachable"], expected_authenticated, "{report}");
+                assert_eq!(report["liveConnected"], expected_live, "{report}");
+                assert_eq!(report["ready"], false, "missing package must never be ready");
+                if expected_authenticated {
+                    assert_eq!(report["provenance"], provenance);
+                    assert_eq!(report["discoveryKinds"], json!(["set", "scene", "track", "session-playback", "clip-slot"]));
+                    assert_eq!(report["readiness"]["releaseCertified"], false);
+                } else {
+                    assert_eq!(report["diagnosticErrors"], json!(["authenticated-bridge-probe-failed"]));
+                }
+                let requests = server.seen.borrow();
+                let discoveries: Vec<_> = requests.iter().filter(|r| r["method"] == "discover").collect();
+                assert_eq!(discoveries.len(), 5);
+                assert!(discoveries.iter().all(|r| r["args"]["limit"] == 16 && r["args"]["traversalBudget"] == 256));
+                assert_eq!(discoveries[4]["args"]["parent"], "live:1:track:1");
+            }
+        })
+        .await;
+}

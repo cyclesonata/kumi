@@ -12,6 +12,12 @@ use std::{
 };
 #[path = "delivery_acl.rs"]
 mod acl;
+#[path = "delivery_diagnostics.rs"]
+mod diagnostics;
+#[path = "delivery_install.rs"]
+mod install;
+pub use diagnostics::{default_package_root, diagnostics, diagnostics_async, native_entrypoint, DiagnosticReport};
+pub use install::{install_remote_script, registry_digest, reject_symlink_tree, InstallOptions, InstallResult};
 pub const CONFIG_VERSION: u8 = 1;
 pub const BRIDGE_CONFIG_VERSION: u8 = 2;
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -172,7 +178,16 @@ fn validate_diagnostics_file(path: &Path) -> Result<(), LiveError> {
     if !safe_absolute(path) {
         return Err(fail("diagnostics file must be an absolute safe path"));
     }
-    let mut cursor = path.to_path_buf();
+    let mut cursor = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                cursor.pop();
+            }
+            component => cursor.push(component.as_os_str()),
+        }
+    }
     while cursor.parent().is_some_and(|parent| parent != cursor) {
         if cursor.exists() {
             let entry = lstat(&cursor)?;
@@ -194,8 +209,13 @@ fn validate_diagnostics_file(path: &Path) -> Result<(), LiveError> {
         use std::os::unix::fs::MetadataExt;
         entry.nlink()
     };
-    #[cfg(not(unix))]
-    let links = 1;
+    #[cfg(windows)]
+    let links = {
+        let file = fs::File::open(path).map_err(|e| io_error(&e, "open", &[path]))?;
+        crate::platform::windows_file_identity(&file).map_err(|e| io_error(&e, "fstat", &[path]))?.2
+    };
+    #[cfg(not(any(unix, windows)))]
+    let links = 0;
     if !entry.is_file() || entry.file_type().is_symlink() || links != 1 || secret_permissions(path) != SecretPermissions::OwnerOnly {
         return Err(fail("diagnostics file must be an owner-only single-link regular file"));
     }

@@ -180,3 +180,141 @@ fn legacy_bridge_validation_matches_typescript_oracle() {
     }
     assert!(cases.len() > 100);
 }
+
+fn install_source(root: &Path) -> std::path::PathBuf {
+    let folder = root.join("source");
+    std::fs::create_dir_all(folder.join(REMOTE_SCRIPT_PACKAGE)).unwrap();
+    std::fs::write(folder.join(REMOTE_SCRIPT_PACKAGE).join("__init__.py"), "# production package\n").unwrap();
+    let source = folder.join("source.py");
+    std::fs::write(&source, "production-remote-script").unwrap();
+    source
+}
+#[test]
+fn script_install_is_atomic_and_keeps_backup_configuration_and_cache_blocker() {
+    use sha2::{Digest, Sha256};
+    let folder = tempfile::tempdir().unwrap();
+    let source = install_source(folder.path());
+    let destination = folder.path().join(REMOTE_SCRIPT_PACKAGE);
+    let preview = install_remote_script(&source, &destination, &InstallOptions { dry_run: true, ..Default::default() }).unwrap();
+    assert_eq!(preview, InstallResult { installed: destination.clone(), backup: None, reference: None, dry_run: true });
+    assert!(!destination.exists());
+    let config = folder.path().join("config.json");
+    std::fs::write(&config, "{}").unwrap();
+    let first =
+        install_remote_script(&source, &destination, &InstallOptions { config_path: Some(config.clone()), ..Default::default() }).unwrap();
+    assert!(first.backup.is_none());
+    assert_eq!(std::fs::read_to_string(first.reference.unwrap()).unwrap(), format!("{}\n", json!({"config":config})));
+    assert_eq!(std::fs::read_to_string(destination.join(REMOTE_SCRIPT_ASSET)).unwrap(), "production-remote-script");
+    assert!(install_remote_script(&source, &destination, &InstallOptions::default())
+        .unwrap_err()
+        .message()
+        .contains("refusing to overwrite"));
+    let willington = destination.join("willington.json");
+    std::fs::write(&willington, r#"{"version":1,"followActions":true,"enableWrites":false}"#).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&willington, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    std::fs::write(&source, "replacement").unwrap();
+    let second = install_remote_script(&source, &destination, &InstallOptions { force: true, ..Default::default() }).unwrap();
+    let backup = second.backup.unwrap();
+    assert_eq!(std::fs::read_to_string(backup.join(REMOTE_SCRIPT_ASSET)).unwrap(), "production-remote-script");
+    assert_eq!(std::fs::read_to_string(destination.join(REMOTE_SCRIPT_ASSET)).unwrap(), "replacement");
+    assert_eq!(std::fs::read(&willington).unwrap(), std::fs::read(backup.join("willington.json")).unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&willington).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(destination.join(REMOTE_SCRIPT_ASSET)).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let blocker = destination.join("__pycache__");
+    assert!(blocker.is_file());
+    assert_eq!(std::fs::metadata(&blocker).unwrap().len(), 0);
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(destination.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["registryHash"], ableton_mcp_server::registry::live_registry_hash());
+    for name in ["__init__.py", REMOTE_SCRIPT_ASSET, OPERATION_REGISTRY_ASSET] {
+        assert_eq!(manifest["files"][name], hex::encode(Sha256::digest(std::fs::read(destination.join(name)).unwrap())));
+    }
+    let python = if cfg!(windows) { "python.exe" } else { "python3" };
+    let imported =
+        std::process::Command::new(python).args(["-c", "import AbletonMcpBridge"]).env("PYTHONPATH", folder.path()).output().unwrap();
+    assert!(imported.status.success(), "{}", String::from_utf8_lossy(&imported.stderr));
+    assert!(blocker.is_file());
+    assert!(folder.path().read_dir().unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".ableton-mcp-install")));
+}
+#[test]
+fn failed_install_keeps_existing_generation_and_cleans_staging() {
+    let folder = tempfile::tempdir().unwrap();
+    let source = install_source(folder.path());
+    let destination = folder.path().join(REMOTE_SCRIPT_PACKAGE);
+    install_remote_script(&source, &destination, &InstallOptions::default()).unwrap();
+    std::fs::write(destination.join("willington.json"), vec![b'x'; 4097]).unwrap();
+    let force = InstallOptions { force: true, ..Default::default() };
+    assert_eq!(
+        install_remote_script(&source, &destination, &force).unwrap_err().message(),
+        "Willington configuration must be a bounded regular file"
+    );
+    assert_eq!(std::fs::read_to_string(destination.join(REMOTE_SCRIPT_ASSET)).unwrap(), "production-remote-script");
+    std::fs::remove_file(source.parent().unwrap().join(REMOTE_SCRIPT_PACKAGE).join("__init__.py")).unwrap();
+    assert_eq!(install_remote_script(&source, &destination, &force).unwrap_err().message(), "Remote Script package is missing __init__.py");
+    assert_eq!(folder.path().read_dir().unwrap().count(), 2);
+}
+#[cfg(unix)]
+#[test]
+fn linked_install_destination_and_source_are_rejected() {
+    let folder = tempfile::tempdir().unwrap();
+    let source = install_source(folder.path());
+    let destination = folder.path().join(REMOTE_SCRIPT_PACKAGE);
+    std::fs::create_dir(&destination).unwrap();
+    let link = destination.join("linked-file");
+    std::os::unix::fs::symlink(&source, &link).unwrap();
+    let force = InstallOptions { force: true, ..Default::default() };
+    assert!(install_remote_script(&source, &destination, &force).unwrap_err().message().contains("symbolic-link destination"));
+    assert_eq!(install_remote_script(&link, &destination, &force).unwrap_err().message(), "Remote Script source must be a regular file");
+    assert_eq!(std::fs::read_to_string(source).unwrap(), "production-remote-script");
+}
+#[test]
+fn diagnostic_package_and_config_evidence_stays_distinct_from_live_readiness() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path();
+    let empty = diagnostics(Some(root), None);
+    assert_eq!(empty["hostReady"], false);
+    assert_eq!(empty["ready"], false);
+    assert_eq!(empty["runtime"], "rust-native");
+    let source = install_source(root);
+    let remote = root.join("remote-script");
+    std::fs::create_dir(&remote).unwrap();
+    install_remote_script(&source, &remote.join(REMOTE_SCRIPT_PACKAGE), &InstallOptions::default()).unwrap();
+    std::fs::write(native_entrypoint(root), "native binary fixture").unwrap();
+    let secret = root.join("secret");
+    write_secret_file(&secret, None).unwrap();
+    let path = root.join("config.json");
+    let config = config_for_bridge(
+        &native_entrypoint(root),
+        &json!({"host":"127.0.0.1","port":43567,"secretFile":secret,"timeoutMs":100}),
+        None,
+        Some(&path),
+        true,
+    )
+    .unwrap();
+    write_config(&path, &config, false).unwrap();
+    let local = diagnostics(Some(root), Some(&path));
+    assert_eq!(
+        local["readiness"],
+        json!({"package":true,"configured":true,"authenticatedBridge":false,"realLiveOperational":false,"releaseCertified":false})
+    );
+    assert_eq!(local["evidence"], "local-contract");
+    assert_eq!(local["ready"], false);
+    std::fs::write(remote.join(REMOTE_SCRIPT_PACKAGE).join(REMOTE_SCRIPT_ASSET), "changed").unwrap();
+    assert_eq!(diagnostics(Some(root), Some(&path))["packageAssetsValid"], false);
+    std::fs::remove_file(&secret).unwrap();
+    let missing = diagnostics(Some(root), Some(&path));
+    assert_eq!(missing["config"]["valid"], false);
+    assert_eq!(missing["secretPermissions"], "unavailable");
+    assert_eq!(missing["bridgeConfigured"], false);
+}
