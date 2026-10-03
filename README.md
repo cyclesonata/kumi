@@ -14,7 +14,7 @@
   English · <a href="README.zh-CN.md">简体中文</a> · <a href="README.ja.md">日本語</a>
 </p>
 
-**A studio producer agent for Ableton Live that learns how you work.** Tell Kumi what you want in plain words and it works directly in your Set, from the tedious jobs to the ones you never have time for: rebuilding a sound from a YouTube tutorial, matching your mix to a reference, writing a Max for Live device you describe, or reworking the rack you point at. Every change shows up in HISTORY, most with their own undo, and a whole plan is one undo in Live (Cmd-Z, or Ctrl-Z on Windows). Kumi remembers the techniques you keep, so it fits you better with every session. Support for other DAWs is planned.
+**A studio producer agent for Ableton Live that learns how you work.** Kumi will literally do anything in your set that Ableton exposes via Extensions/LOM... and even some things it doesn't intentionally expose via the API. From the tedious jobs to the ones you never have time for: rebuilding a sound from a YouTube tutorial, matching your mix to a reference, writing a Max for Live device you describe, or reworking the rack you point at. Every change shows up in HISTORY, most with their own undo, and a whole plan is one undo in Live (Cmd-Z, or Ctrl-Z on Windows). Kumi remembers the techniques you keep, so it fits you better with every session. Support for other DAWs is planned.
 
 <p align="center">
   <img src="docs/assets/kumi-screenshot.png" alt="Kumi rebuilding a Drift bass from a video tutorial: the conversation with each step it took, FOCUS showing the new track's device chain, and HISTORY with an undo for every change" width="760">
