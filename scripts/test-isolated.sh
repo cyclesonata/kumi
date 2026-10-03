@@ -6,8 +6,8 @@
 # Cargo and rustup keep their own folders, named before HOME moves. The arguments are `cargo test`'s.
 set -eu
 export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}" RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
-home="$(mktemp -d "${TMPDIR:-/tmp}/kumi-test-home-XXXXXX")"
-trap 'rm -rf "$home"' EXIT INT TERM
-export HOME="$home" USERPROFILE="$home" APPDATA="$home/AppData/Roaming" LOCALAPPDATA="$home/AppData/Local" XDG_CONFIG_HOME="$home/.config" KUMI_HOME="$home/.kumi"
+test_home="$(mktemp -d "${TMPDIR:-/tmp}/kumi-test-home-XXXXXX")"
+trap 'rm -rf "$test_home"' EXIT INT TERM
+export HOME="$test_home" USERPROFILE="$test_home" APPDATA="$test_home/AppData/Roaming" LOCALAPPDATA="$test_home/AppData/Local" XDG_CONFIG_HOME="$test_home/.config" KUMI_HOME="$test_home/.kumi"
 unset KUMI_REMOTE_SCRIPTS_DIR KUMI_LIVE_EXTENSIONS_DIR
 cargo test --workspace --locked "$@"
