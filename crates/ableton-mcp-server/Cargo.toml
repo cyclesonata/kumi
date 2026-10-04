@@ -41,6 +41,10 @@ path = "src/bin/ableton-mcp-lifecycle.rs"
 name = "ableton-mcp-analysis-worker"
 path = "src/bin/ableton-mcp-analysis-worker.rs"
 
+[[bin]]
+name = "ableton-mcp-benchmark"
+path = "src/bin/ableton-mcp-benchmark.rs"
+
 [dependencies]
 kumi-common.workspace = true
 async-trait.workspace = true
