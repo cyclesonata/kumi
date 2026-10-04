@@ -1094,9 +1094,65 @@ impl Clip {
     }
 }
 
+/// Typed access to an observed JSON object, retaining its original property order and explicit nulls.
+/// Audio diagnosis binds the complete mixer/routing evidence with JavaScript JSON.stringify.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObservedObject<T> {
+    value: T,
+    original: Map<String, Value>,
+    preserved_nulls: HashSet<String>,
+}
+impl<T> std::ops::Deref for ObservedObject<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+impl<T> std::ops::DerefMut for ObservedObject<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.value
+    }
+}
+impl<'de, T: serde::de::DeserializeOwned + Serialize> Deserialize<'de> for ObservedObject<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let original = Map::<String, Value>::deserialize(deserializer)?;
+        let value: T = serde_json::from_value(Value::Object(original.clone())).map_err(serde::de::Error::custom)?;
+        let represented = serde_json::to_value(&value).map_err(serde::de::Error::custom)?;
+        let preserved_nulls =
+            original.iter().filter(|(key, value)| value.is_null() && represented.get(*key).is_none()).map(|(key, _)| key.clone()).collect();
+        Ok(Self { value, original, preserved_nulls })
+    }
+}
+impl<T: Serialize> Serialize for ObservedObject<T> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let Value::Object(mut current) = serde_json::to_value(&self.value).map_err(serde::ser::Error::custom)? else {
+            return Err(serde::ser::Error::custom("observed evidence must be an object"));
+        };
+        let mut map = serializer.serialize_map(None)?;
+        for (key, original) in &self.original {
+            if let Some(value) = current.shift_remove(key) {
+                map.serialize_entry(key, &value)?;
+            } else if original.is_null() && self.preserved_nulls.contains(key) {
+                map.serialize_entry(key, original)?;
+            }
+        }
+        for (key, value) in current {
+            // An absent optional field deserializes to None, which must not invent a null field.
+            if !value.is_null() {
+                map.serialize_entry(&key, &value)?;
+            }
+        }
+        map.end()
+    }
+}
+
+pub type RoutingState = ObservedObject<RoutingStateFields>;
+pub type MixerState = ObservedObject<MixerStateFields>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RoutingState {
+pub struct RoutingStateFields {
     pub input_type: Option<String>,
     pub input_sub_routing: Option<String>,
     pub output_type: Option<String>,
@@ -1115,7 +1171,7 @@ pub struct RoutingState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MixerState {
+pub struct MixerStateFields {
     pub volume: Option<f64>,
     pub pan: Option<f64>,
     pub cue_volume: Option<f64>,
