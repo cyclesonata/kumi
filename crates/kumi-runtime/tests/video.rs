@@ -356,3 +356,37 @@ if [ -f "$(dirname "$0")/sleep" ]; then exec sleep 10; fi
     ));
     assert_eq!(leftovers(), 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn youtube_uses_the_retained_installer_runtime_with_a_restricted_path() {
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+    let folder = tempfile::tempdir().unwrap();
+    let kumi = folder.path().join("existing Kumi home");
+    let node = kumi.join("node/bin/node");
+    fs::create_dir_all(node.parent().unwrap()).unwrap();
+    fs::write(&node, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+    let ytdlp = folder.path().join("yt-dlp fixture");
+    fs::write(&ytdlp, "#!/bin/sh\nprintf '2025.11.12\\n'\n").unwrap();
+    fs::set_permissions(&ytdlp, fs::Permissions::from_mode(0o755)).unwrap();
+    let result = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "youtube_javascript_runtime_child", "--nocapture"])
+        .env("KUMI_TEST_YTDLP", &ytdlp)
+        .env("KUMI_HOME", &kumi)
+        .env("PATH", "/nonexistent")
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn youtube_javascript_runtime_child() {
+    let Ok(ytdlp) = std::env::var("KUMI_TEST_YTDLP") else { return };
+    let expected = format!("node:{}/node/bin/node", std::env::var("KUMI_HOME").unwrap());
+    assert_eq!(programs::yt_dlp_extras(&ytdlp, None).await, vec!["--js-runtimes".to_string(), expected]);
+    // The source memoizes each executable probe, including the selected runtime.
+    std::fs::remove_file(&ytdlp).unwrap();
+    assert_eq!(programs::yt_dlp_extras(&ytdlp, None).await.len(), 2);
+}

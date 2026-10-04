@@ -585,6 +585,8 @@ pub async fn find_yt_dlp(options: &ProgramOptions) -> Result<String, VideoFailur
     }
 }
 
+mod node_runtime;
+
 type Extras = Shared<BoxFuture<'static, Vec<String>>>;
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Extras>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -599,8 +601,8 @@ async fn probe_runtimes(ytdlp: String, signal: Option<Signal>) -> Vec<String> {
     if !(year > 2025.0 || (year == 2025.0 && month >= 11.0)) {
         return Vec::new();
     }
-    // TS: `node:${process.execPath}`, the Node Kumi ran on; Kumi has none of its own now, so a node on the PATH, or nothing.
-    match on_path(if platform() == "win32" { "node.exe" } else { "node" }, &process_env()) {
+    // Preserve the old installed app’s process.execPath before considering a system runtime.
+    match node_runtime::find_node(&process_env(), &home::home_dir().unwrap_or_default(), platform()) {
         Some(node) => vec!["--js-runtimes".to_string(), format!("node:{node}")],
         None => Vec::new(),
     }
