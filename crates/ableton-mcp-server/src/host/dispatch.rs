@@ -99,7 +99,7 @@ impl McpHost {
                 "live_change" => return owner.live_change(&call.id, args, signal.as_ref()).await,
                 "live_undo" => {
                     return owner
-                        .with_undo_watch(&call.id, args, owner.undo_dispatch_async(&call.id, args, signal.as_ref()))
+                        .with_undo_watch(&call.id, args, owner.undo_dispatch_async(&call.id, args, signal.as_ref()).boxed_local())
                         .await
                         .map(Some)
                 }
@@ -108,16 +108,18 @@ impl McpHost {
                 "live_unsubscribe" => return Ok(Some(owner.live_unsubscribe_async(&call.id, args).await)),
                 _ => {}
             }
+            // Keep each tool family on the heap: one dispatcher must not embed every family
+            // state machine in the caller's stack frame. The same applies to compound undo below.
             macro_rules! family {
                 ($method:ident) => {
-                    if let Some(outcome) = owner.$method(&call, signal.as_ref()).await {
+                    if let Some(outcome) = owner.$method(&call, signal.as_ref()).boxed_local().await {
                         return outcome.map(Some);
                     }
                 };
             }
             macro_rules! optional {
                 ($method:ident) => {
-                    if let Some(outcome) = owner.$method(&call, signal.as_ref()).await {
+                    if let Some(outcome) = owner.$method(&call, signal.as_ref()).boxed_local().await {
                         return outcome;
                     }
                 };
@@ -186,9 +188,8 @@ impl McpHost {
             optional!(dispatch_arrangement_midi_tool);
             optional!(dispatch_recording_tool);
             optional!(dispatch_realtime_tool);
-            // Kept explicit until every source family has landed: a missing port is never reported
-            // as a successful operation or silently routed to another mutation.
-            Err(LiveError::error(format!("MCP tool implementation is not ported yet: {}", call.name)))
+            // The source falls through to its guarded undo handler after its named routes.
+            owner.with_undo_watch(&call.id, args, owner.undo_dispatch_async(&call.id, args, signal.as_ref()).boxed_local()).await.map(Some)
         }
         .boxed_local()
     }
@@ -336,151 +337,151 @@ impl McpHost {
                     .map(|v| success_text(id, &v));
             }
             if tx.starts_with("transport_") {
-                return Ok(self.undo_transport_async(id, params, signal).await);
+                return Ok(self.undo_transport_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("noteupdate_") || tx.starts_with("notedelete_") {
-                return Ok(self.undo_note_edit_async(id, params, signal).await);
+                return Ok(self.undo_note_edit_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("capturemidi_") || tx.starts_with("scenecapture_") {
-                return Ok(self.undo_session_capture_async(id, params, signal).await);
+                return Ok(self.undo_session_capture_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("routing_") {
-                return Ok(self.undo_routing_async(id, params, signal).await);
+                return Ok(self.undo_routing_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("arrmidi_") {
-                return Ok(self.undo_arrangement_midi_async(id, params, signal).await);
+                return Ok(self.undo_arrangement_midi_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("arrclip_") {
-                return Ok(self.undo_arrangement_clip_async(id, params, signal).await);
+                return Ok(self.undo_arrangement_clip_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("recording_") {
                 return Ok(self.undo_recording_async(id, params).await);
             }
             if tx.starts_with("clipmove_") {
-                return Ok(self.undo_clip_move_async(id, params, signal).await);
+                return Ok(self.undo_clip_move_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("audioimport_") {
-                return Ok(self.undo_audio_import_async(id, params, signal).await);
+                return Ok(self.undo_audio_import_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("audioclip_") {
-                return Ok(self.undo_audio_clip_async(id, params, signal).await);
+                return Ok(self.undo_audio_clip_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("noteedit_") {
-                return Ok(self.undo_note_target_async(id, params, signal).await);
+                return Ok(self.undo_note_target_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("mixer_") {
-                return Ok(self.undo_mixer_async(id, params, signal).await);
+                return Ok(self.undo_mixer_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("clipset_") {
-                return Ok(self.undo_clip_properties_async(id, params, signal).await);
+                return Ok(self.undo_clip_properties_async(id, params, signal).boxed_local().await);
             }
             if ["mixerext_", "chainmix_", "devio_"].iter().any(|prefix| tx.starts_with(prefix)) {
-                return Ok(self.undo_extended_mixer_async(id, params, signal).await);
+                return Ok(self.undo_extended_mixer_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("miditransform_") {
-                return Ok(self.undo_midi_transform_async(id, params, signal).await);
+                return Ok(self.undo_midi_transform_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("devadv_") {
-                return Ok(self.undo_device_advanced_async(id, params, signal).await);
+                return Ok(self.undo_device_advanced_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("chainset_") {
-                return Ok(self.undo_chain_async(id, params, signal).await);
+                return Ok(self.undo_chain_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("willington_") {
-                return Ok(self.undo_willington_async(id, params, signal).await);
+                return Ok(self.undo_willington_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("devedit_") {
-                return Ok(self.undo_device_edit_async(id, params, signal).await);
+                return Ok(self.undo_device_edit_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("rack_") {
-                return Ok(self.undo_rack_async(id, params, signal).await);
+                return Ok(self.undo_rack_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("rackview_") {
-                return Ok(self.undo_rack_async(id, params, signal).await);
+                return Ok(self.undo_rack_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("sceneset_") {
-                return Ok(self.undo_scene_async(id, params, signal).await);
+                return Ok(self.undo_scene_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("trackview_") {
-                return Ok(self.undo_track_view_async(id, params, signal).await);
+                return Ok(self.undo_track_view_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("trackset_") {
-                return Ok(self.undo_track_properties_async(id, params, signal).await);
+                return Ok(self.undo_track_properties_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("songset_") {
-                return Ok(self.undo_song_settings_async(id, params, signal).await);
+                return Ok(self.undo_song_settings_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("trackstruct_") {
-                return Ok(self.undo_track_structure_async(id, params, signal).await);
+                return Ok(self.undo_track_structure_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("clipview_") {
-                return Ok(self.undo_clip_view_async(id, params, signal).await);
+                return Ok(self.undo_clip_view_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("devview_") {
-                return Ok(self.undo_device_view_async(id, params, signal).await);
+                return Ok(self.undo_device_view_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("selection_") {
-                return Ok(self.undo_selection_async(id, params, signal).await);
+                return Ok(self.undo_selection_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("warp_") {
-                return Ok(self.undo_warp_marker_async(id, params, signal).await);
+                return Ok(self.undo_warp_marker_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("drumpad_") {
-                return Ok(self.undo_drum_pad_async(id, params, signal).await);
+                return Ok(self.undo_drum_pad_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("automation_") {
-                return Ok(self.undo_automation_async(id, params, signal).await);
+                return Ok(self.undo_automation_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("firebutton_") {
                 return Ok(self.undo_fire_button(id));
             }
             if tx.starts_with("devspec_") {
-                return Ok(self.undo_specialized_device_async(id, params, signal).await);
+                return Ok(self.undo_specialized_device_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("looper_") {
-                return Ok(self.undo_looper_async(id, params, signal).await);
+                return Ok(self.undo_looper_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("groove_") {
-                return Ok(self.undo_groove_async(id, params, signal).await);
+                return Ok(self.undo_groove_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("tuning_") {
-                return Ok(self.undo_tuning_async(id, params, signal).await);
+                return Ok(self.undo_tuning_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("simpler_") {
-                return Ok(self.undo_simpler_async(id, params, signal).await);
+                return Ok(self.undo_simpler_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("data_") {
-                return Ok(self.undo_data_async(id, params, signal).await);
+                return Ok(self.undo_data_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("follow_") {
-                return Ok(self.undo_follow_actions_async(id, params, signal).await);
+                return Ok(self.undo_follow_actions_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("device_") {
-                return Ok(self.undo_device_basic_async(id, params, signal).await);
+                return Ok(self.undo_device_basic_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("devdup_") {
-                return Ok(self.undo_device_copy_async(id, params, signal).await);
+                return Ok(self.undo_device_copy_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("browserload_") {
-                return Ok(self.undo_browser_load_async(id, params, signal).await);
+                return Ok(self.undo_browser_load_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("clipdup_") {
-                return Ok(self.undo_clip_duplicate_async(id, params, signal).await);
+                return Ok(self.undo_clip_duplicate_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("parameter_") {
-                return Ok(self.undo_device_parameter_async(id, params, signal).await);
+                return Ok(self.undo_device_parameter_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("parameters_") {
-                return Ok(self.undo_device_parameters_async(id, params, signal).await);
+                return Ok(self.undo_device_parameters_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("structure_") {
-                return self.undo_structure_async(id, params, signal).await;
+                return self.undo_structure_async(id, params, signal).boxed_local().await;
             }
             if tx.starts_with("arrangement_") {
-                return Ok(self.undo_arrangement_async(id, params, signal).await);
+                return Ok(self.undo_arrangement_async(id, params, signal).boxed_local().await);
             }
             if tx.starts_with("rename_") {
-                return Ok(self.undo_rename_async(id, params, signal).await);
+                return Ok(self.undo_rename_async(id, params, signal).boxed_local().await);
             }
             if kind.as_deref().is_some_and(|k| {
                 ["device-delete", "clip-delete", "scene-delete", "track-delete", "locator-delete", "clip-clear-range"].contains(&k)
@@ -492,7 +493,7 @@ impl McpHost {
                 ));
             }
         }
-        Ok(self.undo_tempo_async(id, params, signal).await)
+        Ok(self.undo_tempo_async(id, params, signal).boxed_local().await)
     }
     async fn live_subscribe_async(&self, id: &Value, params: &Value) -> Value {
         let names: Vec<_> = REMOTE_SCRIPT_EVENT_TYPES.iter().map(LiveEventType::as_str).collect();
