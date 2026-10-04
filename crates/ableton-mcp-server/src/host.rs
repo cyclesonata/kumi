@@ -23,6 +23,7 @@ pub mod json_diagnostics;
 mod managed;
 pub mod mutations;
 mod note_edit;
+mod note_target;
 mod probe_library;
 mod probes;
 mod project;

@@ -33,7 +33,7 @@ fn selected(note: &Value, names: &[&str]) -> Value {
     }
     out
 }
-fn normalized_note(note: &Value, content: bool, include_id: bool, include_channel: bool) -> Value {
+pub(super) fn normalized_note(note: &Value, content: bool, include_id: bool, include_channel: bool) -> Value {
     let mut out = json!({});
     if include_id {
         out["id"] = note.get("id").cloned().unwrap_or(Value::Null);
