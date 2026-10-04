@@ -152,6 +152,8 @@ impl McpHost {
             optional!(dispatch_midi_transform_tool);
             optional!(dispatch_advanced_device_tool);
             optional!(dispatch_willington_tool);
+            optional!(dispatch_tuning_tool);
+            optional!(dispatch_simpler_tool);
             optional!(dispatch_clip_properties_tool);
             optional!(dispatch_extended_mixer_tool);
             optional!(dispatch_audio_clip_tool);
@@ -361,6 +363,12 @@ impl McpHost {
             }
             if tx.starts_with("willington_") {
                 return Ok(self.undo_willington_async(id, params, signal).await);
+            }
+            if tx.starts_with("tuning_") {
+                return Ok(self.undo_tuning_async(id, params, signal).await);
+            }
+            if tx.starts_with("simpler_") {
+                return Ok(self.undo_simpler_async(id, params, signal).await);
             }
             if tx.starts_with("data_") {
                 return Ok(self.undo_data_async(id, params, signal).await);
