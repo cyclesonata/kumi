@@ -17,6 +17,7 @@ mod probes;
 mod project;
 mod protocol;
 mod reads;
+mod record_operation;
 mod recovery;
 mod rename;
 mod resources;
@@ -67,6 +68,7 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    record_operations: RefCell<Vec<record_operation::RecordOperation>>,
     undo_recovery_plans: RefCell<Vec<recovery::RecoveryPlan>>,
     undo_refusals: RefCell<std::collections::HashMap<String, recovery::UndoRefusal>>,
     undo_watches: RefCell<Vec<Rc<Cell<usize>>>>,
@@ -140,6 +142,7 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            record_operations: RefCell::new(Vec::new()),
             undo_recovery_plans: RefCell::new(Vec::new()),
             undo_refusals: RefCell::new(Default::default()),
             undo_watches: RefCell::new(Vec::new()),
