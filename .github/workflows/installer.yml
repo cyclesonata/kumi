@@ -213,15 +213,26 @@ jobs:
           $workerProcess.StartInfo.RedirectStandardInput = $true
           $workerProcess.StartInfo.RedirectStandardOutput = $true
           $workerProcess.StartInfo.RedirectStandardError = $true
+          $savedInputEncoding = [Console]::InputEncoding
           try {
+            # .NET Framework creates and flushes its stdin writer during Start(), before BaseStream.Write.
+            # Its encoding comes from Console.InputEncoding; suppress that writer's automatic BOM too.
+            [Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
+            if ([Console]::InputEncoding.GetPreamble().Length -ne 0) { throw 'console stdin encoding must not emit a preamble' }
             [void]$workerProcess.Start()
+            $preambleBytes = $workerProcess.StandardInput.Encoding.GetPreamble().Length
+            Write-Host "Worker stdin writer preamble bytes: $preambleBytes"
+            if ($preambleBytes -ne 0) { throw 'worker stdin writer must not prepend an encoding preamble' }
             $workerProcess.StandardInput.BaseStream.Write($workerInput, 0, $workerInput.Length)
             $workerProcess.StandardInput.BaseStream.Close()
             $worker = $workerProcess.StandardOutput.ReadToEnd()
             $workerError = $workerProcess.StandardError.ReadToEnd()
             $workerProcess.WaitForExit()
             $workerExit = $workerProcess.ExitCode
-          } finally { $workerProcess.Dispose() }
+          } finally {
+            [Console]::InputEncoding = $savedInputEncoding
+            $workerProcess.Dispose()
+          }
           if ($workerExit -ne 0) { throw "native worker failed ($workerExit): $worker $workerError" }
           $analysis = $worker | ConvertFrom-Json
           if (-not $analysis.ok -or $analysis.result.sampleCount -ne 4 -or $analysis.result.peak -ne 0.5) { throw 'native worker returned unexpected analysis' }
