@@ -195,8 +195,7 @@ impl McpHost {
             }
             let parameter =
                 self.parameter_row(&snapshot, params["parameterRef"].as_str().unwrap())?;
-            let read = self
-                .adapter
+            let read = self.async_adapter()
                 .invoke_async(
                     &LiveInvocation::new(
                         "arrangement.automation.read",
@@ -272,8 +271,7 @@ impl McpHost {
                 "take-lane read is unavailable",
             )?;
             let context = LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS));
-            let read = self
-                .adapter
+            let read = self.async_adapter()
                 .invoke_async(
                     &LiveInvocation::new("audio.take-lane.read", fields(params, &["trackRef"])),
                     Some(&context),
@@ -354,12 +352,13 @@ impl McpHost {
    let status=self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
 capability(&status,"takes","comp read capability is unavailable")?;
 operation(&status,"audio.comp.read","comp read is unavailable on this Live shape (the public LOM exposes no comp-region API)")?;
+   let adapter=self.async_adapter();
    let context=LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS));
 let snapshot=self.views.view_for(Some(&context),&[params["clipRef"].clone()],None,&[]).await?;
 let located=self.clip_row(&snapshot,params["clipRef"].as_str().unwrap())?;
 if !is_non_empty_string(&located.clip["objectIdentity"],256){return Err(LiveError::error("comp read requires exact clip identity"));
 }
-   let read=self.adapter.invoke_async(&LiveInvocation::new("audio.comp.read",fields(params,&["clipRef"])),Some(&context)).await?;
+   let read=adapter.invoke_async(&LiveInvocation::new("audio.comp.read",fields(params,&["clipRef"])),Some(&context)).await?;
 let raw=collection(&read,"segments","comp read returned an unbounded or malformed result")?;
 let track=located.track.as_ref().unwrap_or(&Value::Null);
 let mut segments:Vec<_>=raw.iter().filter(|v|v.is_object()).map(|v|{let lane=rows(&track["takeLanes"]).find(|l|l["ref"]==v["laneRef"]).unwrap_or(&Value::Null);
@@ -406,8 +405,7 @@ clip["ref"]=params["clipRef"].clone();
             if located.clip["kind"] != "audio" && located.clip["isAudio"] != true {
                 return Err(LiveError::error("warp markers require an audio clip"));
             }
-            let read = self
-                .adapter
+            let read = self.async_adapter()
                 .invoke_async(
                     &LiveInvocation::new("audio.warp-marker.read", json!({"ref":params["clipRef"]})),
                     Some(&context),
@@ -479,8 +477,7 @@ clip["ref"]=params["clipRef"].clone();
                 "browser.inspect",
                 "browser item inspection is unavailable",
             )?;
-            let item = self
-                .adapter
+            let item = self.async_adapter()
                 .invoke_async(
                     &LiveInvocation::new("browser.inspect", fields(params, &["itemId"])),
                     Some(&LiveOperationContext::with_deadline(

@@ -340,7 +340,7 @@ impl McpHost {
         let result = async {
             self.require_operation("undo.step.begin").await?;
             let opened = self
-                .adapter
+                .async_adapter()
                 .invoke_async(
                     &LiveInvocation::new("undo.step.begin", params.clone()),
                     Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS))),
@@ -373,7 +373,7 @@ impl McpHost {
     }
     pub async fn end_undo_step_async(&self, step_id: Option<&str>, deadline_ms: f64) -> Result<Value, LiveError> {
         let ended = self
-            .adapter
+            .async_adapter()
             .invoke_async(
                 &LiveInvocation::new("undo.step.end", step_id.filter(|s| !s.is_empty()).map(|s| json!({"stepId":s})).unwrap_or(json!({}))),
                 Some(&LiveOperationContext::with_deadline(deadline_ms)),
@@ -417,7 +417,7 @@ impl McpHost {
             self.require_operation(operation).await?;
             let digest = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(idempotency_key.as_bytes()));
             let transaction_id = format!("{}_{}",if redo {"song-redo"}else{"song-undo"},&digest[..32]);
-            let result = self.adapter.invoke_async(&LiveInvocation::new(operation,json!({})),Some(&LiveOperationContext{signal:signal.cloned(),deadline_ms:Some(self.deadline(reads::AUDITION_DEADLINE_MS)),idempotency_key:Some(idempotency_key.into()),transaction_id:Some(transaction_id),..Default::default()})).await?;
+            let result = self.async_adapter().invoke_async(&LiveInvocation::new(operation,json!({})),Some(&LiveOperationContext{signal:signal.cloned(),deadline_ms:Some(self.deadline(reads::AUDITION_DEADLINE_MS)),idempotency_key:Some(idempotency_key.into()),transaction_id:Some(transaction_id),..Default::default()})).await?;
             if result["done"] == true { *self.open_undo_step.borrow_mut() = None; }
             let mut answer = json!({"operation":operation,"done":result["done"]==true,"canUndo":result.get("canUndo").unwrap_or(&Value::Null),"canRedo":result.get("canRedo").unwrap_or(&Value::Null)});
             { let mut history = self.song_history_calls.borrow_mut(); while history.len() >= 4096 { history.pop_front(); } history.push_back((key,answer.clone())); }

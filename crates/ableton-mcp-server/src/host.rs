@@ -5,9 +5,8 @@
 #![allow(dead_code)]
 mod arrangement;
 pub mod audio;
-pub mod device_state;
 mod device_parameter;
-mod rename;
+pub mod device_state;
 mod events;
 pub mod helpers;
 pub mod json_diagnostics;
@@ -19,6 +18,7 @@ mod project;
 mod protocol;
 mod reads;
 mod recovery;
+mod rename;
 mod resources;
 pub mod retention;
 mod structure;

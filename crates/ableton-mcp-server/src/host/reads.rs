@@ -174,7 +174,7 @@ impl McpHost {
                     return Ok(success_text(
                         id,
                         &self
-                            .adapter
+                            .async_adapter()
                             .invoke_async(&LiveInvocation::new("note.read-selected", json!({"ref":params["clipRef"]})), Some(&context))
                             .await?,
                     ));
@@ -189,7 +189,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("note.read-by-id", json!({"ref":params["clipRef"],"noteIds":params["noteIds"]})),
                             Some(&context),
@@ -220,18 +220,17 @@ impl McpHost {
                 let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
                 session_read(&status)?;
                 has_operation(&status, "song.read", "song state reads are unavailable")?;
+                let adapter = self.async_adapter();
                 let snapshot = self.views.view(None, LiveViewScope::Indices(vec![]), Some(&[LiveSnapshotPart::Set])).await?;
                 let context = LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS));
-                let mut state = self
-                    .adapter
-                    .invoke_async(&LiveInvocation::new("song.read", json!({"setRef":set_ref(&snapshot)?})), Some(&context))
-                    .await?;
+                let mut state =
+                    adapter.invoke_async(&LiveInvocation::new("song.read", json!({"setRef":set_ref(&snapshot)?})), Some(&context)).await?;
                 if params.get("conversion").is_some() && status.has_operation("song.time-convert") {
                     let mut args = json!({"setRef":set_ref(&snapshot)?,"query":params["conversion"]});
                     if let Some(format) = params.get("smpteFormat") {
                         args["smpteFormat"] = format.clone();
                     }
-                    let conversions = self.adapter.invoke_async(&LiveInvocation::new("song.time-convert", args), Some(&context)).await?;
+                    let conversions = adapter.invoke_async(&LiveInvocation::new("song.time-convert", args), Some(&context)).await?;
                     if let Some(target) = state.as_object_mut() {
                         target.insert("conversions".into(), conversions);
                     } else if !state.is_array() {
@@ -272,7 +271,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("performance.read", json!({"setRef":set_ref(&snapshot)?})),
                             Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -300,7 +299,7 @@ impl McpHost {
                     set_ref(&self.views.view(None, LiveViewScope::Indices(vec![]), Some(&[LiveSnapshotPart::Set])).await?)?.to_string()
                 };
                 let result = self
-                    .adapter
+                    .async_adapter()
                     .invoke_async(
                         &LiveInvocation::new("data.get", json!({"ref":owner,"key":params["key"]})),
                         Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -327,9 +326,10 @@ impl McpHost {
             let status=self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
             has_operation(&status,"automation.envelope.read","reading envelopes is unavailable on this Live shape")?;
             if params.get("time").is_some() {has_operation(&status,"automation.value-at","reading an envelope's value is unavailable on this Live shape")?;}
+            let adapter=self.async_adapter();
             let context=LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS));
-            let envelope=self.adapter.invoke_async(&LiveInvocation::new("automation.envelope.read",json!({"clipRef":params["clipRef"],"parameterRef":params["parameterRef"]})),Some(&context)).await?;
-            let at=if params.get("time").is_some() {Some(self.adapter.invoke_async(&LiveInvocation::new("automation.value-at",params.clone()),Some(&context)).await?)}else{None};
+            let envelope=adapter.invoke_async(&LiveInvocation::new("automation.envelope.read",json!({"clipRef":params["clipRef"],"parameterRef":params["parameterRef"]})),Some(&context)).await?;
+            let at=if params.get("time").is_some() {Some(adapter.invoke_async(&LiveInvocation::new("automation.value-at",params.clone()),Some(&context)).await?)}else{None};
             let exists=property(&envelope,"exists")?==true;
             let points=property(&envelope,"points")?;
             let mut result=json!({"clipRef":params["clipRef"],"parameterRef":params["parameterRef"],"exists":exists,"points":if points.is_array(){points.clone()}else{json!([])},"revision":property(&envelope,"revision")?});
@@ -369,7 +369,7 @@ impl McpHost {
                     }
                 }
                 let result = self
-                    .adapter
+                    .async_adapter()
                     .invoke_async(
                         &LiveInvocation::new(operation, args),
                         Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -407,7 +407,7 @@ impl McpHost {
                 let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
                 has_operation(&status, "clip.time-convert", "converting a clip's time is unavailable on this Live shape")?;
                 let result = self
-                    .adapter
+                    .async_adapter()
                     .invoke_async(
                         &LiveInvocation::new(
                             "clip.time-convert",
@@ -440,7 +440,7 @@ impl McpHost {
                 let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
                 has_operation(&status, "application.message", "messages in Live are unavailable on this Live shape")?;
                 let result = self
-                    .adapter
+                    .async_adapter()
                     .invoke_async(
                         &LiveInvocation::new("application.message", params.clone()),
                         Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -479,7 +479,7 @@ impl McpHost {
                     deadline_ms: Some(self.deadline(AUDITION_DEADLINE_MS.max(timeout + 5000.0))),
                     ..Default::default()
                 };
-                Ok(success_text(id, &self.adapter.invoke_async(&LiveInvocation::new("python.run", args), Some(&context)).await?))
+                Ok(success_text(id, &self.async_adapter().invoke_async(&LiveInvocation::new("python.run", args), Some(&context)).await?))
             }
             .await,
             "Read the Set again before continuing; a dispatched script may have changed it.",
@@ -496,9 +496,9 @@ impl McpHost {
                 if !status.has_operation("browser.inspect") || !status.has_operation("browser.preview.start") {
                     return Err(LiveError::error("browser previews are unavailable on this Live shape"));
                 }
+                let adapter = self.async_adapter();
                 let context = LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS));
-                let item = self
-                    .adapter
+                let item = adapter
                     .invoke_async(&LiveInvocation::new("browser.inspect", json!({"itemId":params["itemId"]})), Some(&context))
                     .await?;
                 if property(&item, "id")? != &params["itemId"]
@@ -507,8 +507,7 @@ impl McpHost {
                 {
                     return Err(LiveError::error("browser item lacks exact authoritative identity"));
                 }
-                let started = self
-                    .adapter
+                let started = adapter
                     .invoke_async(
                         &LiveInvocation::new(
                             "browser.preview.start",
@@ -538,7 +537,7 @@ impl McpHost {
                 let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
                 has_operation(&status, "browser.preview.stop", "browser previews are unavailable on this Live shape")?;
                 let result = self
-                    .adapter
+                    .async_adapter()
                     .invoke_async(
                         &LiveInvocation::new("browser.preview.stop", params.clone()),
                         Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -581,7 +580,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("observe.subscribe", params.clone()),
                             Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -606,7 +605,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("observe.poll", params.clone()),
                             Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -631,7 +630,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("observe.unsubscribe", params.clone()),
                             Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
@@ -656,7 +655,7 @@ impl McpHost {
                 Ok(success_text(
                     id,
                     &self
-                        .adapter
+                        .async_adapter()
                         .invoke_async(
                             &LiveInvocation::new("browser.roots", json!({})),
                             Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS))),
