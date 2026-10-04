@@ -19,7 +19,7 @@ SPEC = importlib.util.spec_from_file_location("migration_release", Path(__file__
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
 
-# Exact installer launchers from the last JavaScript release (b83bbea, Kumi 1.7.4).
+# Exact installer launchers from the last JavaScript release (08f6807, Kumi 1.7.5).
 LEGACY_WINDOWS_LAUNCHER = '''@echo off
 rem Kumi's launcher, written by its installer: Kumi runs on its own Node, whatever Node this computer has.
 setlocal
@@ -287,7 +287,7 @@ class MigrationRelease(unittest.TestCase):
         old_cli = home / "app/apps/kumi/dist/src/cli.js"
         old_cli.parent.mkdir(parents=True)
         old_cli.write_text("await import(" + json.dumps((reference_root / "apps/kumi/dist/src/cli.js").as_uri()) + ");\n", encoding="utf-8")
-        (home / "app/package.json").write_text('{"version":"1.7.4","type":"module"}', encoding="utf-8")
+        (home / "app/package.json").write_text('{"version":"1.7.5","type":"module"}', encoding="utf-8")
         original_entry = old_entry.read_bytes()
         node = home / "node" / ("node.exe" if os.name == "nt" else "bin/node")
         node.parent.mkdir(parents=True)
@@ -317,7 +317,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(installed.returncode, 0, installed.stderr)
         old = json.loads(installed.stdout)["receipt"]
         env = self.production_environment(home, Path(old["remoteScriptsDirectory"]))
-        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.4\n")
+        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.5\n")
         return markers, old, original_entry, env
 
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
@@ -416,7 +416,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual((home / "app/apps/kumi/bin/kumi.mjs").read_bytes(), original_entry)
         self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(secret.read_bytes(), secret_before)
-        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.4\n")
+        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.5\n")
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
         self.check_legacy_windows_launcher(launcher, original_launcher)
@@ -432,9 +432,9 @@ class MigrationRelease(unittest.TestCase):
     def test_actual_built_release_with_authoritative_old_updater(self):
         artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
         manifest = json.loads((artifacts / "kumi-release.json").read_text(encoding="utf-8"))
-        # A current 1.7.4 updater ignores a same-version application release. Keep this gate strict.
-        self.assertGreater(tuple(map(int, manifest["kumi"].split("-")[0].split("."))), (1, 7, 4),
-                           "the native transition must publish a newer application version than legacy 1.7.4")
+        # A current 1.7.5 updater ignores a same-version application release. Keep this gate strict.
+        self.assertGreater(tuple(map(int, manifest["kumi"].split("-")[0].split("."))), (1, 7, 5),
+                           "the native transition must publish a newer application version than legacy 1.7.5")
         home = self.root / "production home"
         markers, old, original_entry, env = self.legacy_installation(home, windows_crlf=True)
         old_entry = home / "app/apps/kumi/bin/kumi.mjs"
@@ -470,7 +470,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(old_entry.read_bytes(), original_entry)
         self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(secret.read_bytes(), secret_before)
-        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.4\n")
+        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.5\n")
         self.assertIn("anthropic/claude-sonnet-5-5", self.launched(launcher, env, "model"))
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
@@ -493,7 +493,7 @@ class MigrationRelease(unittest.TestCase):
         entry = home / "app/apps/kumi/bin/kumi.mjs"
         entry.parent.mkdir(parents=True)
         entry.write_text("console.log('legacy Kumi')", encoding="utf-8")
-        (home / "app/package.json").write_text('{"version":"1.7.4"}', encoding="utf-8")
+        (home / "app/package.json").write_text('{"version":"1.7.5"}', encoding="utf-8")
         markers = ["settings.json", "auth.json", "history.json", "library/catalog.json", "conversations/session.json", "memory/producer.json"]
         for name in markers:
             file = home / name

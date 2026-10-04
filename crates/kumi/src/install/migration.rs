@@ -25,7 +25,7 @@ pub fn write_launcher(home: &str) -> std::io::Result<()> {
     write_launcher_for(home, cfg!(windows))
 }
 
-// The 1.7.4 installer launcher remains usable through the retained Node and the
+// The 1.7.4 and 1.7.5 installer launcher remains usable through the retained Node and the
 // compatibility entry shipped in every native bundle, including after rollback.
 const LEGACY_WINDOWS_LAUNCHER: &str = "@echo off\nrem Kumi's launcher, written by its installer: Kumi runs on its own Node, whatever Node this computer has.\nsetlocal\nfor %%I in (\"%~dp0..\") do set \"KUMI_HOME=%%~fI\"\nset \"KUMI_INSTALLED=1\"\n\"%KUMI_HOME%\\node\\node.exe\" \"%KUMI_HOME%\\app\\apps\\kumi\\bin\\kumi.mjs\" %*\n";
 

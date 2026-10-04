@@ -67,7 +67,7 @@ Extract the archive into a permanent directory. Keep `ableton-mcp-server` and
 For example, on macOS:
 
 ```sh
-ARTIFACT=/absolute/path/to/ableton-mcp-server-1.0.73-aarch64-apple-darwin.tar.gz
+ARTIFACT=/absolute/path/to/ableton-mcp-server-1.0.74-aarch64-apple-darwin.tar.gz
 ARTIFACT_SHA="$(shasum -a 256 "$ARTIFACT" | awk '{print $1}')"
 INSTALL_ROOT="$HOME/Library/Application Support/AbletonMcp/package"
 STATE="$HOME/Library/Application Support/AbletonMcp/state"

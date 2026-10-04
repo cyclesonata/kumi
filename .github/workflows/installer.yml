@@ -287,7 +287,7 @@ jobs:
           npm ci --prefix apps/mcp-server --ignore-scripts
           npm run build --prefix apps/mcp-server
           # Retain the last JavaScript release identity; all updater implementation remains the source build.
-          python3 -c 'from pathlib import Path; import re; p=Path("packages/runtime/dist/src/version.js"); p.write_text(re.sub(r"KUMI_VERSION = [^;]+", "KUMI_VERSION = \"1.7.4\"", p.read_text()))'
+          python3 -c 'from pathlib import Path; import re; p=Path("packages/runtime/dist/src/version.js"); p.write_text(re.sub(r"KUMI_VERSION = [^;]+", "KUMI_VERSION = \"1.7.5\"", p.read_text()))'
       - name: Verify old updater, native probes, data preservation and rollback
         env:
           KUMI_NATIVE_RELEASES: ${{ github.workspace }}/release

@@ -532,11 +532,11 @@ copy of the repository, `update` moves the checkout forward instead
 Inside Kumi, `/update` asks first, then closes Kumi, updates it and opens it
 again with the same conversation.
 
-For the current 1.7.4 installer (bundled Node 24):
+For the current 1.7.5 installer (bundled Node 24):
 
 1. Close Live and run `kumi update` (or `/update` inside Kumi).
 2. Open Kumi as usual. Its first native startup upgrades the existing bridge, even when both
-   bridge versions are 1.0.73. Reopen Live when Kumi asks.
+   bridge versions are 1.0.74. Reopen Live when Kumi asks.
 3. Continue with the same settings, sign-ins, conversations and library. They stay in `~/.kumi`,
    or your existing `KUMI_HOME`; no new login or data move is needed.
 

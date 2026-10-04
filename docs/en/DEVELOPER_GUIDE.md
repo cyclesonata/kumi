@@ -260,8 +260,8 @@ KUMI_NATIVE_RELEASES="$PWD/release/installer" python3 -m unittest discover -s sc
 
 Use the actual Node 24 version selected by the release workflow. Migration
 proof also needs the built TypeScript app and bridge reference; for the
-1.7.4-to-native transition, its compiled `packages/runtime/dist/src/version.js`
-must retain `KUMI_VERSION = "1.7.4"` as the workflow does. Run this proof with
+1.7.5-to-native transition, its compiled `packages/runtime/dist/src/version.js`
+must retain `KUMI_VERSION = "1.7.5"` as the workflow does. Run this proof with
 Node 24 and require all artifact tests to run. Fresh installs select a native
 target and do not download Node. Existing Node 24 installations unpack the native
 bundle through a compatibility bootstrap during `kumi update`. The managed Node
