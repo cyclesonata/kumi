@@ -433,3 +433,29 @@ async fn same_version_legacy_bridge_uses_native_lifecycle_upgrade() {
     assert!(calls[1].args.contains(&"--apply".into()));
     assert!(!w.out.0.borrow().contains("same as Kumi's"));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn discoverable_owner_receipt_preserves_custom_config_secret_and_state_paths() {
+    let w = World::new(Some("1.0.33"));
+    let config = w.root.path().join("custom/connection.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::rename(w.state.join("bridge-config.json"), &config).unwrap();
+    fs::write(w.scripts.join("AbletonMcpBridge/bridge-reference.json"), json!({"config":config}).to_string()).unwrap();
+    let state = w.root.path().join("kumi/bridge/state");
+    fs::create_dir_all(&state).unwrap();
+    let secret = w.root.path().join("custom/token");
+    let receipt = state.join("install-receipt.json");
+    fs::write(&receipt, json!({"version":1,"stateDirectory":state,"configPath":config,"secretPath":secret,"remoteScriptsDirectory":w.scripts,"packageRoot":w.root.path().join("installed")}).to_string()).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    assert_eq!(setup_bridge(w.io()).await.unwrap(), 0);
+    for call in w.calls.borrow().iter() {
+        assert_eq!(flag(call, "--state-dir"), state.to_str().unwrap());
+        assert_eq!(flag(call, "--config"), config.to_str().unwrap());
+        assert_eq!(flag(call, "--secret"), secret.to_str().unwrap());
+        assert_eq!(flag(call, "--remote-scripts-dir"), w.scripts.to_str().unwrap());
+    }
+}

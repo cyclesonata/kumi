@@ -379,11 +379,46 @@ async fn live_open(io: &BridgeSetupIo, run: Run) -> bool {
     )
     .await
 }
+/// Locate existing ownership without inventing paths for custom configurations.
+/// The lifecycle executable performs complete receipt/hash validation before applying anything.
+fn owner_paths(config: &str, package: &str, home: &str) -> Option<(String, String, String)> {
+    let candidates = [join(&dirname(config), "install-receipt.json"), join(home, "bridge/state/install-receipt.json")];
+    for file in candidates {
+        let Ok(metadata) = fs::symlink_metadata(&file) else { continue };
+        if !metadata.is_file() || metadata.is_symlink() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                continue;
+            }
+        }
+        let Some(receipt) = fs::read(&file).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) else { continue };
+        let field = |name: &str| receipt.get(name).and_then(Value::as_str);
+        if receipt.get("version").and_then(Value::as_u64) != Some(1)
+            || field("configPath") != Some(config)
+            || field("packageRoot") != Some(package)
+        {
+            continue;
+        }
+        let (Some(state), Some(secret), Some(scripts)) = (field("stateDirectory"), field("secretPath"), field("remoteScriptsDirectory"))
+        else {
+            continue;
+        };
+        if [state, secret, scripts].iter().any(|path| !Path::new(path).is_absolute()) || join(state, "install-receipt.json") != file {
+            continue;
+        }
+        return Some((state.into(), secret.into(), scripts.into()));
+    }
+    None
+}
 pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     let say = |line: &str| io.out.write(&format!("{line}\n"));
     let run = io.run.clone().unwrap_or_else(default_run);
     let bridge_dir = io.bridge_dir.clone().unwrap_or_else(bundled_bridge_dir);
-    let scripts = remote_scripts_dir(&io.env);
+    let mut scripts = remote_scripts_dir(&io.env);
     let Some(bundled) = bridge_version(&bridge_dir) else {
         say(&format!("Kumi's copy of the bridge is missing. Run {}.", *KUMI_REPAIR));
         return Ok(1);
@@ -395,9 +430,19 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         return Ok(1);
     }
     let config = find_bridge_config(&io.env);
-    let state =
-        config.as_ref().map(|c| dirname(c)).unwrap_or_else(|| join(io.home.as_deref().unwrap_or(&kumi_dir(&io.env)), "bridge/state"));
+    let home = io.home.clone().unwrap_or_else(|| kumi_dir(&io.env));
     let installed = config.as_ref().and_then(|c| read_bridge_server(c).ok());
+    let owner = config
+        .as_deref()
+        .zip(installed.as_ref().and_then(|s| s.package_root()))
+        .and_then(|(config, package)| owner_paths(config, &package, &home));
+    let mut state = config.as_ref().map(|c| dirname(c)).unwrap_or_else(|| join(&home, "bridge/state"));
+    let mut secret = None;
+    if let Some((owned_state, owned_secret, owned_scripts)) = owner {
+        state = owned_state;
+        secret = Some(owned_secret);
+        scripts = owned_scripts;
+    }
     if installed.as_ref().is_some_and(|s| s.native() && s.version.as_ref() == Some(&bundled)) {
         say(&format!("The Ableton bridge {bundled} is installed, the same as Kumi's."));
         let mut roots: Vec<_> = installed.as_ref().and_then(|s| s.package_root()).into_iter().collect();
@@ -518,6 +563,12 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
             "--package-root".into(),
             root.clone(),
         ];
+        if let Some(config) = &config {
+            args.extend(["--config".into(), config.clone()]);
+        }
+        if let Some(secret) = &secret {
+            args.extend(["--secret".into(), secret.clone()]);
+        }
         args.extend(extra);
         if io.allow_dirty {
             args.push("--allow-dirty-private-build".into())
