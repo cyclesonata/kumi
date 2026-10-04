@@ -377,3 +377,188 @@ impl McpHost {
         success_text(id, &result)
     }
 }
+
+fn finalization_error(id: &Value, reason: &str) -> Value {
+    reason_error(id,reason,"Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence.")
+}
+impl McpHost {
+    pub(super) async fn capture_mapper_status(&self, adapter: &dyn AsyncLiveAdapter) -> Result<Value, LiveError> {
+        adapter
+            .invoke_async(
+                &LiveInvocation::new("audio.capture.status", json!({})),
+                Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS))),
+            )
+            .await
+    }
+    async fn retire_recovery_authority(&self, transaction_id: &str) -> bool {
+        if !self.adapter.has_retire_transaction_async() {
+            return true;
+        }
+        self.adapter
+            .retire_transaction_async(
+                transaction_id,
+                Some(&LiveOperationContext::with_deadline(kumi_common::time::now_ms_f64() + 5000.0)),
+                true,
+            )
+            .await
+            .is_ok()
+    }
+    pub async fn live_recovery_finalize_async(&self, id: &Value, params: &Value) -> Result<Value, LiveError> {
+        if !has_only(params, &["transactionId", "resolution", "confirmation", "evidence"])
+            || !is_non_empty_string(&params["transactionId"], 128)
+            || !["manually-restored", "accepted-current-state"].contains(&js_string(&params["resolution"])?.as_str())
+            || params["confirmation"] != "finalize-recovery-record"
+            || !has_only(&params["evidence"], &["provenance", "observedAt", "scope"])
+            || !is_non_empty_string(&params["evidence"]["provenance"], 512)
+            || !is_non_empty_string(&params["evidence"]["scope"], 256)
+            || params["evidence"].get("observedAt").is_some_and(|v| !is_non_empty_string(v, 64))
+        {
+            return Ok(finalization_error(id, "Invalid recovery-finalization arguments."));
+        }
+        let transaction_id = params["transactionId"].as_str().unwrap();
+        if self.recovery_finalization_in_flight.get() {
+            return Ok(finalization_error(id, "Another recovery finalization safety barrier is in progress."));
+        }
+        if self.active_async_operations.get() > 0 || retention::any_in_flight() {
+            return Ok(finalization_error(
+                id,
+                "Another asynchronous operation, mutation, or reconciliation is in flight; global safety finalization refused.",
+            ));
+        }
+        self.recovery_finalization_in_flight.set(true);
+        retention::mark_in_flight(transaction_id);
+        struct Barrier<'a> {
+            flag: &'a Cell<bool>,
+            id: &'a str,
+        }
+        impl Drop for Barrier<'_> {
+            fn drop(&mut self) {
+                retention::clear_in_flight(self.id);
+                self.flag.set(false);
+            }
+        }
+        let _barrier = Barrier { flag: &self.recovery_finalization_in_flight, id: transaction_id };
+        let maps = [
+            &self.transactions,
+            &self.arrangement_transactions,
+            &self.session_structure_transactions,
+            &self.device_parameter_transactions,
+            &self.device_parameters_transactions,
+            &self.audition_transactions,
+            &self.transport_transactions,
+            &self.clip_launch_transactions,
+            &self.note_edit_transactions,
+            &self.clip_lifecycle_transactions,
+            &self.audio_capture_transactions,
+        ];
+        let owner = maps.iter().copied().find(|map| map.get(transaction_id).is_some());
+        let midi_finalizable = owner.is_none() && self.midi_transactions.is_finalizable(transaction_id);
+        let batch_finalizable = owner.is_none() && !midi_finalizable && self.batch_transactions.is_finalizable(transaction_id);
+        let device_finalizable =
+            owner.is_none() && !midi_finalizable && !batch_finalizable && self.device_state_transactions.is_finalizable(transaction_id);
+        if owner.is_none() && !midi_finalizable && !batch_finalizable && !device_finalizable {
+            return Ok(finalization_error(id, "Recovery transaction was not found or is not finalizable."));
+        }
+        let adapter = self.async_adapter();
+        let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS)))).await?;
+        let playback = self.views.playback(Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS)))).await?;
+        let safety = serde_json::to_value(playback).unwrap();
+        let transport = &safety["transport"];
+        if !transport.is_object()
+            || transport["playing"] != false
+            || transport["arrangementRecord"] != false
+            || transport["sessionRecord"] != false
+            || safety["playingTargets"].as_array().is_some_and(|v| !v.is_empty())
+            || safety["firedTargets"].as_array().is_some_and(|v| !v.is_empty())
+        {
+            return Ok(finalization_error(
+                id,
+                "Recovery finalization requires authoritative stopped playback and recording with no active Session targets.",
+            ));
+        }
+        if status.has_operation("realtime.stats") {
+            let realtime = adapter
+                .invoke_async(
+                    &LiveInvocation::new("realtime.stats", json!({})),
+                    Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS))),
+                )
+                .await?;
+            if realtime.is_null() {
+                return Err(LiveError::type_error("Cannot read properties of null (reading 'armed')"));
+            }
+            if realtime["armed"] != false || realtime["pending"].as_f64() != Some(0.0) {
+                return Ok(finalization_error(
+                    id,
+                    "Recovery finalization requires realtime authority to be disarmed with no pending writes.",
+                ));
+            }
+        }
+        if midi_finalizable || batch_finalizable || device_finalizable {
+            if !self.retire_recovery_authority(transaction_id).await {
+                return Ok(finalization_error(id, "Remote replay authority could not be retired; finalization refused."));
+            }
+            let mut finalized = if midi_finalizable {
+                self.midi_transactions.finalize(transaction_id)?
+            } else if batch_finalizable {
+                self.batch_transactions.finalize(transaction_id)?
+            } else {
+                self.device_state_transactions.finalize(transaction_id)?
+            };
+            finalized["resolution"] = params["resolution"].clone();
+            finalized["evidence"] = params["evidence"].clone();
+            finalized["liveMutated"] = json!(false);
+            finalized["recoveryAuthorityRetired"] = json!(true);
+            return Ok(success_text(id, &finalized));
+        }
+        let owner = owner.unwrap();
+        let record = owner.get(transaction_id).unwrap();
+        let held = record.borrow().clone();
+        let audio_owner = std::ptr::eq(owner, &self.audio_capture_transactions);
+        if if audio_owner {
+            held["state"] != "uncertain"
+        } else {
+            !matches!(held["state"].as_str(), Some("uncertain" | "applied" | "undone"))
+                || retention::ACTIVE_TRANSACTION_STATES.contains(&held["state"].as_str().unwrap_or(""))
+        } {
+            return Ok(finalization_error(id, "Active or unresolved transaction work cannot be finalized."));
+        }
+        if audio_owner {
+            let observed = self.capture_mapper_status(&*adapter).await?;
+            if observed.is_null() {
+                return Err(LiveError::type_error("Cannot read properties of null (reading 'captureId')"));
+            }
+            if observed.get("captureId") != held.get("captureId")
+                || observed.get("sourceSlotRef") != held.get("sourceSlotRef")
+                || observed.get("destinationSlotRef") != held.get("destinationSlotRef")
+                || observed["state"] != "cleaned"
+                || observed["active"] != false
+                || observed["playbackStopped"] != true
+                || observed["clip"].is_object()
+                || observed["residual"].as_array().is_some_and(|v| !v.is_empty())
+            {
+                return Ok(finalization_error(
+                    id,
+                    "Audio-capture finalization requires exact mapper-cleaned identity and no residual clip.",
+                ));
+            }
+        }
+        if held["kind"] == "realtime-arm" && held["state"] != "undone" && json!(status.epoch) == held["epoch"] {
+            return Ok(finalization_error(
+                id,
+                "Realtime recovery must be reconciled or disarmed while the original Live epoch remains active.",
+            ));
+        }
+        if !self.retire_recovery_authority(transaction_id).await {
+            return Ok(finalization_error(id, "Remote replay authority could not be retired; finalization refused."));
+        }
+        owner.delete(transaction_id);
+        Ok(success_text(
+            id,
+            &json!({"transactionId":transaction_id,"finalized":true,"priorState":held["state"],"resolution":params["resolution"],"evidence":params["evidence"],"liveMutated":false,"recoveryAuthorityRetired":true}),
+        ))
+    }
+}
+
+#[cfg(test)]
+#[path = "recovery_tests.rs"]
+mod tests;

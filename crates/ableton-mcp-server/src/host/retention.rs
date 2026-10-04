@@ -28,6 +28,9 @@ pub fn clear_in_flight(id: &str) {
         ids.borrow_mut().remove(id);
     });
 }
+pub fn any_in_flight() -> bool {
+    IN_FLIGHT_TRANSACTION_IDS.with(|ids| !ids.borrow().is_empty())
+}
 pub fn is_in_flight(id: &str) -> bool {
     IN_FLIGHT_TRANSACTION_IDS.with(|ids| ids.borrow().contains(id))
 }
