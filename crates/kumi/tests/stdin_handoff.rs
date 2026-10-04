@@ -91,16 +91,21 @@ fn stdin_fixture_process() {
             marker("parent-ready");
             assert_eq!(received.await.unwrap(), initial);
             if terminal {
-                // Restore changes mode before pause, just as Tty::restore does.
+                // Exercise a mode change before pause too: readiness from raw mode
+                // must not admit a blocking read after canonical mode is restored.
                 input.set_raw_mode(false).unwrap();
                 #[cfg(unix)]
                 {
                     let mut after: libc::termios = unsafe { std::mem::zeroed() };
                     assert_eq!(unsafe { libc::tcgetattr(0, &mut after) }, 0);
                     let before = before.as_ref().unwrap();
+                    // Darwin sets PENDIN when ICANON is restored, even for a direct
+                    // crossterm toggle with no reader. It is pending-input state,
+                    // cleared by the next poll/read, rather than a configured mode.
+                    let configured = |flags| flags & !libc::PENDIN;
                     assert_eq!(
-                        (after.c_iflag, after.c_oflag, after.c_cflag, after.c_lflag, after.c_cc),
-                        (before.c_iflag, before.c_oflag, before.c_cflag, before.c_lflag, before.c_cc)
+                        (after.c_iflag, after.c_oflag, after.c_cflag, configured(after.c_lflag), after.c_cc),
+                        (before.c_iflag, before.c_oflag, before.c_cflag, configured(before.c_lflag), before.c_cc)
                     );
                 }
             }
