@@ -1,4 +1,6 @@
 //! The initial sample of an inserted Simpler follows the verified import lifecycle.
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use ableton_mcp_server::{
     host::{mutations::result_body, McpHost, McpHostOptions},
     live::*,
@@ -30,7 +32,7 @@ fn body(result: &Value) -> Value {
 async fn initial_sample_uses_verified_copy_and_undo_cleans_only_owned_media() {
     for change in ["none", "source-edit", "staged-edit", "track-replaced"] {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = fixture_paths::native_path(&temp.path().canonicalize().unwrap());
         let original = root.join("original.wav");
         let managed = root.join("managed");
         let wave = wave();

@@ -86,7 +86,10 @@ async fn plan_reads_bounded_project_records_remembers_folders_and_excludes_pack_
     let home = tmp.path();
     let dir = home.join("library");
     let projects = home.join("projects");
-    let song = home.join("Songs").join("Song Project").join("Night \"Drive\".als");
+    // Windows forbids double quotes in filenames; its path separators still exercise
+    // JSON escaping. Retain the quoted filename case on supporting filesystems.
+    let name = if cfg!(windows) { "Night 'Drive'.als" } else { "Night \"Drive\".als" };
+    let song = home.join("Songs").join("Song Project").join(name);
     let pack_demo = home.join("Splice").join("sounds").join("Demo.als");
     for file in [&song, &pack_demo] {
         put(file, "content");
