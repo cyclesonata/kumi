@@ -148,3 +148,20 @@ fn canonical_boundaries_keep_source_validation_order() {
         assert_eq!(json!(validate_semantic_project_artifact(&artifact).unwrap_err().to_string()), row["error"], "{row}");
     }
 }
+
+#[test]
+fn source_platform_path_classification_and_locators() {
+    let f = fixture();
+    let paths: Value = serde_json::from_str(include_str!("support/project_semantic_paths_oracle.json")).unwrap();
+    let platform = if cfg!(windows) { "win32" } else { "posix" };
+    let options: CreateSemanticProjectOptions = serde_json::from_value(f["cases"][0]["options"].clone()).unwrap();
+    for row in paths[platform].as_array().unwrap() {
+        let mut snapshot = f["cases"][0]["snapshot"].clone();
+        snapshot["tracks"][0]["clips"][0]["filePath"] = row["path"].clone();
+        let actual = create_semantic_project_snapshot(&snapshot, &options).unwrap();
+        let dependencies: Vec<_> = actual["records"].as_array().unwrap().iter().filter(|row| row["kind"] == "dependency").collect();
+        let label = row["path"].as_str().unwrap();
+        equal(&json!(dependencies), &row["dependencies"], label);
+        equal(&actual["artifact"], &row["identity"], label);
+    }
+}

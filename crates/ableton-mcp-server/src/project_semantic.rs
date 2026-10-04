@@ -529,6 +529,14 @@ fn path_locator(profile: &str, raw: &str, resolved: Option<&str>, project: Optio
         return Ok(format!("path-{}", short_digest(&json!([raw, resolved]))?));
     }
     let normalized = raw.replace('\\', "/");
+    // Node's Windows basename omits a drive prefix, including drive-relative
+    // names such as C:Beat.wav. Its POSIX implementation keeps that prefix.
+    let bytes = normalized.as_bytes();
+    let normalized = if cfg!(windows) && bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        &normalized[2..]
+    } else {
+        &normalized
+    };
     let base = normalized.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("unnamed");
     if profile == "local" {
         if let (Some(resolved), Some(project)) = (resolved, project) {
@@ -573,7 +581,10 @@ fn add_clip(
     )?);
     if let Some(raw) = clip["filePath"].as_str().filter(|s| !s.is_empty() && string::utf16_len(s) <= 4096) {
         let network = network_path(raw);
-        let absolute = !network && Path::new(raw).is_absolute();
+        // Node path.isAbsolute accepts a Windows rooted path without a drive
+        // (\Samples\Beat.wav or /Samples/Beat.wav). Rust is_absolute requires
+        // both; has_root matches the source for this lexical classification.
+        let absolute = !network && Path::new(raw).has_root();
         let mut row =
             json!({"raw":raw,"resolution":if network{"network"}else if absolute{"absolute"}else{"unresolved"},"evidence":"live-clip"});
         if absolute {
