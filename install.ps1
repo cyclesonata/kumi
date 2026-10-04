@@ -133,7 +133,10 @@ exit /b %errorlevel%
 "%KUMI_HOME%\app\kumi.exe" %*
 exit /b %errorlevel%
 '@
-    Set-Content -LiteralPath (Join-Path $bin 'kumi.cmd') -Value $launcher -Encoding Ascii
+    # Keep the bytes identical to the native launcher's template, independent of
+    # the installer script's checkout/download line endings.
+    $launcher = ($launcher -replace '\r?\n', "`r`n") + "`r`n"
+    [IO.File]::WriteAllText((Join-Path $bin 'kumi.cmd'), $launcher, [Text.Encoding]::ASCII)
 
     # ── PATH ─────────────────────────────────────────────────────────────
     $added = $false

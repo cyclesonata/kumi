@@ -22,11 +22,38 @@ pub fn ensure_native_launcher(env: &Env, executable: &Path) -> std::io::Result<b
     Ok(true)
 }
 pub fn write_launcher(home: &str) -> std::io::Result<()> {
+    write_launcher_for(home, cfg!(windows))
+}
+
+// The 1.7.4 installer launcher remains usable through the retained Node and the
+// compatibility entry shipped in every native bundle, including after rollback.
+const LEGACY_WINDOWS_LAUNCHER: &str = "@echo off\nrem Kumi's launcher, written by its installer: Kumi runs on its own Node, whatever Node this computer has.\nsetlocal\nfor %%I in (\"%~dp0..\") do set \"KUMI_HOME=%%~fI\"\nset \"KUMI_INSTALLED=1\"\n\"%KUMI_HOME%\\node\\node.exe\" \"%KUMI_HOME%\\app\\apps\\kumi\\bin\\kumi.mjs\" %*\n";
+
+fn compatible_windows_launcher(current: &str, legacy_available: bool) -> bool {
+    let current = current.replace("\r\n", "\n");
+    let native = launcher(true).replace("\r\n", "\n");
+    let current = current.trim_end_matches('\n');
+    current == native.trim_end_matches('\n') || (legacy_available && current == LEGACY_WINDOWS_LAUNCHER.trim_end_matches('\n'))
+}
+
+fn write_launcher_for(home: &str, windows: bool) -> std::io::Result<()> {
     use std::io::Write;
-    let path = Path::new(home).join("bin").join(if cfg!(windows) { "kumi.cmd" } else { "kumi" });
-    let contents = launcher(cfg!(windows));
-    if fs::read_to_string(&path).ok().as_deref() == Some(contents) {
-        return Ok(());
+    let home = Path::new(home);
+    let path = home.join("bin").join(if windows { "kumi.cmd" } else { "kumi" });
+    let contents = launcher(windows);
+    if let Ok(current) = fs::read_to_string(&path) {
+        if current == contents {
+            return Ok(());
+        }
+        // cmd.exe resumes a batch file at its old byte offset when the child exits.
+        // Replacing a working launcher, even just LF with CRLF, can execute a suffix
+        // of the new file. Preserve both native line endings and the legacy entry.
+        if windows {
+            let legacy_available = home.join("node/node.exe").is_file() && home.join("app/apps/kumi/bin/kumi.mjs").is_file();
+            if compatible_windows_launcher(&current, legacy_available) {
+                return Ok(());
+            }
+        }
     }
     fs::create_dir_all(path.parent().unwrap())?;
     let temporary = path.with_extension(format!("new-{}", std::process::id()));
@@ -48,6 +75,57 @@ pub fn write_launcher(home: &str) -> std::io::Result<()> {
         let _ = fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn powershell_installer_and_native_windows_launcher_have_the_same_template() {
+        let script = include_str!("../../../../install.ps1").replace("\r\n", "\n");
+        let template = script.split_once("$launcher = @'\n").unwrap().1.split_once("\n'@").unwrap().0;
+        assert_eq!(template.replace('\n', "\r\n") + "\r\n", launcher(true));
+    }
+
+    #[test]
+    fn native_windows_launcher_keeps_its_bytes_with_each_installer_line_ending() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin/kumi.cmd");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for contents in [launcher(true).into(), launcher(true).replace("\r\n", "\n"), launcher(true).replace("\r\n", "\n") + "\r\n"] {
+            fs::write(&path, &contents).unwrap();
+            write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        }
+    }
+
+    #[test]
+    fn legacy_windows_launcher_survives_first_start_update_and_rollback_while_its_entry_is_available() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bin/kumi.cmd");
+        let node = dir.path().join("node/node.exe");
+        let entry = dir.path().join("app/apps/kumi/bin/kumi.mjs");
+        for file in [&path, &node, &entry] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+        }
+        fs::write(&node, "retained node").unwrap();
+        for contents in [
+            LEGACY_WINDOWS_LAUNCHER.into(),
+            LEGACY_WINDOWS_LAUNCHER.replace('\n', "\r\n"),
+            LEGACY_WINDOWS_LAUNCHER.trim_end_matches('\n').to_string() + "\r\n",
+        ] {
+            fs::write(&path, &contents).unwrap();
+            for app in ["native bootstrap", "updated native bootstrap", "legacy app after rollback"] {
+                fs::write(&entry, app).unwrap();
+                write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
+                assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+            }
+        }
+        fs::remove_file(&node).unwrap();
+        write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), launcher(true));
+    }
 }
 /// Legacy probes require this file; native updates retain it so old rollback can return here.
 pub fn legacy_entry(app: &str) -> String {
