@@ -89,6 +89,9 @@ pub struct History {
     on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
 }
 impl History {
+    pub fn change_signal(&self) -> Signal {
+        abort::any([self.connection.lifetime.clone(), abort::timeout(self.timeout_ms)])
+    }
     pub fn new(
         connection: Rc<LiveConnection>,
         remember: Rc<Remember>,
