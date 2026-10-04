@@ -11,6 +11,7 @@ mod audition;
 mod capture;
 mod clip_duplicate;
 mod clip_launch;
+mod clip_move;
 mod device_parameter;
 pub mod device_state;
 mod dispatch;

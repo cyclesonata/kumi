@@ -12,14 +12,14 @@ fn rows(value: &Value) -> &[Value] {
 fn string_field(value: &Value, name: &str) -> Result<String, LiveError> {
     value.get(name).map(helpers::js_string).unwrap_or_else(|| Ok("undefined".into()))
 }
-fn target_rows(snapshot: &Value, track: &Value, index: &Value) -> (Value, Value, Value) {
+pub(super) fn target_rows(snapshot: &Value, track: &Value, index: &Value) -> (Value, Value, Value) {
     let track = rows(&snapshot["tracks"]).iter().find(|t| t["ref"] == *track).cloned().unwrap_or(Value::Null);
     let slot = rows(&track["clipSlots"]).iter().find(|s| s["sceneIndex"].as_f64() == index.as_f64()).cloned().unwrap_or(Value::Null);
     let scene = rows(&snapshot["scenes"]).iter().find(|s| s["index"].as_f64() == index.as_f64()).cloned().unwrap_or(Value::Null);
     (track, slot, scene)
 }
 
-fn target_fence(authority: &Value, fingerprint: &str, track: &Value, target: &Value, scene: &Value) -> String {
+pub(super) fn target_fence(authority: &Value, fingerprint: &str, track: &Value, target: &Value, scene: &Value) -> String {
     js_json::stringify(&json!({
     "sourceAuthority":authority,
     "sourceFingerprint":fingerprint,

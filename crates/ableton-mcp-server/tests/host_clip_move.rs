@@ -9,7 +9,7 @@ use std::{
     rc::Rc,
 };
 fn fixture() -> Value {
-    serde_json::from_str(include_str!("fixtures/host-clip-duplicate-oracle.json")).unwrap()
+    serde_json::from_str(include_str!("fixtures/host-clip-move-oracle.json")).unwrap()
 }
 fn same(a: &Value, b: &Value, label: &str) {
     assert_eq!(canonical_mutation_identity(a).unwrap(), canonical_mutation_identity(b).unwrap(), "{label}");
@@ -24,7 +24,7 @@ fn clean(mut v: Value) -> Value {
         match v {
             Value::Object(o) => {
                 for (k, v) in o {
-                    if v.as_str().is_some_and(|v| v.starts_with("clipdup_")) {
+                    if v.as_str().is_some_and(|v| v.starts_with("clipmove_")) {
                         *v = json!("$transaction");
                     } else if k == "expiresAt" {
                         *v = json!("$time");
@@ -38,7 +38,7 @@ fn clean(mut v: Value) -> Value {
                     walk(v)
                 }
             }
-            Value::String(s) if s.starts_with("clipdup_") => *v = json!("$transaction"),
+            Value::String(s) if s.starts_with("clipmove_") => *v = json!("$transaction"),
             _ => {}
         }
     }
@@ -225,16 +225,23 @@ fn setup(sim: &DeterministicLiveSimulator, kind: &str) {
         clip["notes"] = json!([]);
         clip["filePath"] = json!("/mock/sample.wav");
     }
+    if kind.starts_with("arrangement") {
+        let mut clip = s["tracks"][0]["clips"][0].clone();
+        clip["ref"] = json!("arrangement-clip:track-1:4");
+        clip["objectIdentity"] = json!("simulator:arrangement-clip:0");
+        clip["start"] = json!(4);
+        s["arrangementClips"].as_array_mut().unwrap().push(json!({"trackRef":"track:track-1","clip":clip}));
+    }
 }
 #[tokio::test]
-async fn clip_duplicate_validation_matches_source() {
+async fn clip_move_validation_matches_source() {
     for (index, row) in fixture()["rows"].as_array().unwrap().iter().enumerate() {
         let sim = Rc::new(DeterministicLiveSimulator::new());
-        setup(&sim, "session-midi");
+        setup(&sim, if row["args"]["clipRef"] == "arrangement-clip:track-1:4" { "arrangement-midi" } else { "session-midi" });
         let host = McpHost::new(sim, McpHostOptions::default()).unwrap();
-        let name = format!("live_clip_duplicate_{}", row["action"].as_str().unwrap());
+        let name = format!("live_clip_move_{}", row["action"].as_str().unwrap());
         let got = host
-            .dispatch_clip_duplicate_tool(&ToolCall { id: json!(1), name, arguments: Some(row["args"].clone()), asynchronous: true }, None)
+            .dispatch_clip_move_tool(&ToolCall { id: json!(1), name, arguments: Some(row["args"].clone()), asynchronous: true }, None)
             .await
             .unwrap()
             .unwrap()
@@ -259,30 +266,35 @@ async fn perform(
         signal.cancel();
     }
     let result = if action == "apply" {
-        host.live_clip_duplicate_apply_async(&id, &args, Some(&signal)).await.unwrap_or(Value::Null)
+        host.live_clip_move_apply_async(&id, &args, Some(&signal)).await.unwrap_or(Value::Null)
     } else {
-        host.with_undo_watch(&id, &args, async { Ok(host.undo_clip_duplicate_async(&id, &args, None).await) }).await.unwrap()
+        host.with_undo_watch(&id, &args, async { Ok(host.undo_clip_move_async(&id, &args, None).await) }).await.unwrap()
     };
     results.push(clean(result));
     states.push(clean(record.borrow().clone()));
 }
 #[tokio::test]
-async fn clip_duplicate_apply_and_exact_key_undo_match_source() {
+async fn clip_move_apply_and_exact_key_undo_match_source() {
     for row in fixture()["workflows"].as_array().unwrap() {
         let kind = row["kind"].as_str().unwrap();
         let scenario = row["scenario"].as_str().unwrap();
         let adapter = Rc::new(Adapter::new());
         setup(&adapter.sim, kind);
         if scenario == "missing-identity" {
-            adapter.sim.state.borrow_mut()["tracks"][0]["clips"][0].as_object_mut().unwrap().remove("objectIdentity");
+            {
+                let mut s = adapter.sim.state.borrow_mut();
+                let source =
+                    if kind.starts_with("arrangement") { &mut s["arrangementClips"][0]["clip"] } else { &mut s["tracks"][0]["clips"][0] };
+                source.as_object_mut().unwrap().remove("objectIdentity");
+            }
         }
         let host = McpHost::new(adapter.clone(), McpHostOptions::default()).unwrap();
         let args = if kind.starts_with("arrangement") {
-            json!({"clipRef":"clip:clip-1","arrangementPosition":8})
+            json!({"clipRef":"arrangement-clip:track-1:4","position":8})
         } else {
             json!({"clipRef":"clip:clip-1","targetTrackRef":"track:track-1","targetSceneIndex":1})
         };
-        let preview = host.live_clip_duplicate_preview_async(&json!(1), &args).await;
+        let preview = host.live_clip_move_preview_async(&json!(1), &args).await;
         let body: Value = serde_json::from_str(preview["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         let mut results = vec![clean(preview)];
         let mut states = vec![];
@@ -296,9 +308,13 @@ async fn clip_duplicate_apply_and_exact_key_undo_match_source() {
             }
             {
                 let mut s = adapter.sim.state.borrow_mut();
+                let source =
+                    if kind.starts_with("arrangement") { &mut s["arrangementClips"][0]["clip"] } else { &mut s["tracks"][0]["clips"][0] };
                 match scenario {
-                    "identity-edit" => s["tracks"][0]["clips"][0]["objectIdentity"] = json!("other"),
-                    "source-content" => s["tracks"][0]["clips"][0]["name"] = json!("Manual"),
+                    "identity-edit" => source["objectIdentity"] = json!("other"),
+                    "source-content" => source["name"] = json!("Manual"),
+                    "position-edit" => source["start"] = json!(9),
+                    "target-scene-identity" => s["scenes"][1]["objectIdentity"] = json!("other"),
                     "target-identity" => s["tracks"][0]["clipSlots"][1]["objectIdentity"] = json!("other"),
                     "target-occupied" => s["tracks"][0]["clipSlots"][1]["clipRef"] = json!("clip:external"),
                     _ => {}
@@ -329,10 +345,16 @@ async fn clip_duplicate_apply_and_exact_key_undo_match_source() {
                     if scenario == "undo-other-identity" {
                         created["objectIdentity"] = json!("other");
                     }
+                    if scenario == "undo-position-edit" {
+                        created["start"] = json!(12);
+                    }
                     if scenario == "undo-other-content" {
                         created["name"] = json!("Manual");
                     }
                 }
+            }
+            if scenario == "undo-target-occupied" {
+                adapter.sim.state.borrow_mut()["tracks"][0]["clipSlots"][0]["clipRef"] = json!("clip:other");
             }
             if scenario == "undo-epoch" {
                 adapter.sim.reconnect().unwrap();
