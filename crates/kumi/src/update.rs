@@ -117,6 +117,7 @@ pub async fn newer_kumi(io: CheckIo) -> Option<String> {
     if let Ok(mut file) = file.open(&io.cache_file).await {
         use tokio::io::AsyncWriteExt;
         let _ = file.write_all(stringify(&json!({"checkedAt":now,"latest":latest})).as_bytes()).await;
+        let _ = file.flush().await;
     }
     newer(&latest, current).then_some(latest)
 }
