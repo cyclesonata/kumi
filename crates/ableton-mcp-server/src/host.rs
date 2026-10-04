@@ -24,6 +24,7 @@ mod dispatch;
 mod events;
 mod extended_mixer;
 mod import_files;
+mod follow;
 pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
