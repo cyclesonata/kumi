@@ -124,8 +124,19 @@
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
     $launcher = @'
 @echo off
-if not defined KUMI_HOME set "KUMI_HOME=%~dp0.."
-set KUMI_INSTALLED=1
+goto start
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+exit /b %errorlevel%
+:start
+rem Kumi's launcher, written by its installer. cmd reads a running batch file from where it stopped:
+rem one replaced while it runs resumes in the colons above (labels) and exits.
+setlocal
+if not defined KUMI_HOME for %%I in ("%~dp0..") do set "KUMI_HOME=%%~fI"
+set "KUMI_INSTALLED=1"
 if exist "%KUMI_HOME%\app\kumi.exe" goto native
 "%KUMI_HOME%\node\node.exe" "%KUMI_HOME%\app\apps\kumi\bin\kumi.mjs" %*
 exit /b %errorlevel%

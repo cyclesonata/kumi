@@ -3,7 +3,7 @@ use super::*;
 /// The fallback is used only when the user explicitly rolls back to a JavaScript release.
 pub fn launcher(windows: bool) -> &'static str {
     if windows {
-        "@echo off\r\nif not defined KUMI_HOME set \"KUMI_HOME=%~dp0..\"\r\nset KUMI_INSTALLED=1\r\nif exist \"%KUMI_HOME%\\app\\kumi.exe\" goto native\r\n\"%KUMI_HOME%\\node\\node.exe\" \"%KUMI_HOME%\\app\\apps\\kumi\\bin\\kumi.mjs\" %*\r\nexit /b %errorlevel%\r\n:native\r\n\"%KUMI_HOME%\\app\\kumi.exe\" %*\r\nexit /b %errorlevel%\r\n"
+        "@echo off\r\ngoto start\r\n::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\r\n::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\r\n::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\r\n::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\r\n::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::\r\nexit /b %errorlevel%\r\n:start\r\nrem Kumi's launcher, written by its installer. cmd reads a running batch file from where it stopped:\r\nrem one replaced while it runs resumes in the colons above (labels) and exits.\r\nsetlocal\r\nif not defined KUMI_HOME for %%I in (\"%~dp0..\") do set \"KUMI_HOME=%%~fI\"\r\nset \"KUMI_INSTALLED=1\"\r\nif exist \"%KUMI_HOME%\\app\\kumi.exe\" goto native\r\n\"%KUMI_HOME%\\node\\node.exe\" \"%KUMI_HOME%\\app\\apps\\kumi\\bin\\kumi.mjs\" %*\r\nexit /b %errorlevel%\r\n:native\r\n\"%KUMI_HOME%\\app\\kumi.exe\" %*\r\nexit /b %errorlevel%\r\n"
     } else {
         "#!/bin/sh\nKUMI_HOME=\"${KUMI_HOME:-$(cd \"$(dirname \"$0\")/..\" && pwd)}\"\nexport KUMI_HOME KUMI_INSTALLED=1\nif [ -x \"$KUMI_HOME/app/kumi\" ]; then\n  exec \"$KUMI_HOME/app/kumi\" \"$@\"\nfi\nexec \"$KUMI_HOME/node/bin/node\" \"$KUMI_HOME/app/apps/kumi/bin/kumi.mjs\" \"$@\"\n"
     }
@@ -25,15 +25,14 @@ pub fn write_launcher(home: &str) -> std::io::Result<()> {
     write_launcher_for(home, cfg!(windows))
 }
 
-// The 1.7.4 and 1.7.5 installer launcher remains usable through the retained Node and the
-// compatibility entry shipped in every native bundle, including after rollback.
+// The 1.7.4 and 1.7.5 installers' launcher, which the first native start replaces.
+#[cfg(test)]
 const LEGACY_WINDOWS_LAUNCHER: &str = "@echo off\nrem Kumi's launcher, written by its installer: Kumi runs on its own Node, whatever Node this computer has.\nsetlocal\nfor %%I in (\"%~dp0..\") do set \"KUMI_HOME=%%~fI\"\nset \"KUMI_INSTALLED=1\"\n\"%KUMI_HOME%\\node\\node.exe\" \"%KUMI_HOME%\\app\\apps\\kumi\\bin\\kumi.mjs\" %*\n";
 
-fn compatible_windows_launcher(current: &str, legacy_available: bool) -> bool {
-    let current = current.replace("\r\n", "\n");
-    let native = launcher(true).replace("\r\n", "\n");
-    let current = current.trim_end_matches('\n');
-    current == native.trim_end_matches('\n') || (legacy_available && current == LEGACY_WINDOWS_LAUNCHER.trim_end_matches('\n'))
+/// The native template, with either line ending the installer may have written. Any other content (the
+/// legacy Node launcher among them) is replaced: a cmd still running it resumes in the colons and exits.
+fn compatible_windows_launcher(current: &str) -> bool {
+    current.replace("\r\n", "\n").trim_end_matches('\n') == launcher(true).replace("\r\n", "\n").trim_end_matches('\n')
 }
 
 fn write_launcher_for(home: &str, windows: bool) -> std::io::Result<()> {
@@ -45,14 +44,11 @@ fn write_launcher_for(home: &str, windows: bool) -> std::io::Result<()> {
         if current == contents {
             return Ok(());
         }
-        // cmd.exe resumes a batch file at its old byte offset when the child exits.
-        // Replacing a working launcher, even just LF with CRLF, can execute a suffix
-        // of the new file. Preserve both native line endings and the legacy entry.
-        if windows {
-            let legacy_available = home.join("node/node.exe").is_file() && home.join("app/apps/kumi/bin/kumi.mjs").is_file();
-            if compatible_windows_launcher(&current, legacy_available) {
-                return Ok(());
-            }
+        // cmd.exe resumes a batch file at its old byte offset when the child exits. A native
+        // launcher is left as it is (even LF for CRLF would move its offsets); the template puts
+        // the legacy launcher's resume offsets in its padding, so that one is replaced.
+        if windows && compatible_windows_launcher(&current) {
+            return Ok(());
         }
     }
     fs::create_dir_all(path.parent().unwrap())?;
@@ -101,30 +97,58 @@ mod tests {
     }
 
     #[test]
-    fn legacy_windows_launcher_survives_first_start_update_and_rollback_while_its_entry_is_available() {
+    fn the_first_native_start_replaces_the_legacy_windows_launcher() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bin/kumi.cmd");
-        let node = dir.path().join("node/node.exe");
-        let entry = dir.path().join("app/apps/kumi/bin/kumi.mjs");
-        for file in [&path, &node, &entry] {
-            fs::create_dir_all(file.parent().unwrap()).unwrap();
-        }
-        fs::write(&node, "retained node").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         for contents in [
             LEGACY_WINDOWS_LAUNCHER.into(),
             LEGACY_WINDOWS_LAUNCHER.replace('\n', "\r\n"),
             LEGACY_WINDOWS_LAUNCHER.trim_end_matches('\n').to_string() + "\r\n",
         ] {
             fs::write(&path, &contents).unwrap();
-            for app in ["native bootstrap", "updated native bootstrap", "legacy app after rollback"] {
-                fs::write(&entry, app).unwrap();
-                write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
-                assert_eq!(fs::read_to_string(&path).unwrap(), contents);
-            }
+            write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), launcher(true));
         }
-        fs::remove_file(&node).unwrap();
-        write_launcher_for(dir.path().to_str().unwrap(), true).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), launcher(true));
+    }
+
+    /// What cmd.exe runs next when it resumes a batch file at `offset`: lines read from there, labels
+    /// (a first non-blank `:`) and empty lines skipped.
+    fn resumed_at(file: &str, offset: usize) -> &str {
+        let mut rest = &file[offset..];
+        loop {
+            let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+            let line = line.trim_end_matches('\r').trim_start();
+            if !(line.is_empty() || line.starts_with(':')) || after.is_empty() {
+                return line;
+            }
+            rest = after;
+        }
+    }
+
+    #[test]
+    fn a_cmd_still_running_a_replaced_launcher_resumes_onto_exit() {
+        let native = launcher(true);
+        // The legacy launcher, in each line ending its installers wrote, resumes after its Node line.
+        for legacy in [
+            LEGACY_WINDOWS_LAUNCHER.to_string(),
+            LEGACY_WINDOWS_LAUNCHER.replace('\n', "\r\n"),
+            LEGACY_WINDOWS_LAUNCHER.trim_end_matches('\n').to_string() + "\r\n",
+        ] {
+            assert_eq!(resumed_at(native, legacy.len()), "exit /b %errorlevel%", "{} bytes", legacy.len());
+        }
+        // So does any offset in the padding, with room for a longer old launcher.
+        let start = native.find("goto start\r\n").unwrap() + "goto start\r\n".len();
+        let end = native.find("exit /b %errorlevel%").unwrap();
+        assert!(end - start >= 300, "{start}..{end}");
+        for offset in start..end {
+            assert_eq!(resumed_at(native, offset), "exit /b %errorlevel%", "offset {offset}");
+        }
+        // Run from the top, it jumps over the padding; KUMI_HOME is normalized and stays local.
+        assert!(native.starts_with("@echo off\r\ngoto start\r\n"));
+        assert!(native.contains("\r\n:start\r\n"));
+        assert!(native.contains("\r\nsetlocal\r\n"));
+        assert!(native.contains("for %%I in (\"%~dp0..\") do set \"KUMI_HOME=%%~fI\""));
     }
 }
 /// Legacy probes require this file; native updates retain it so old rollback can return here.

@@ -308,10 +308,17 @@ class MigrationRelease(unittest.TestCase):
             server.server_close()
             thread.join()
 
-    def check_legacy_windows_launcher(self, launcher, original):
+    def check_windows_launcher(self, launcher, expected):
         if os.name == "nt":
-            self.assertEqual(launcher.read_bytes(), original,
-                             "an active legacy .cmd must retain its byte offsets until installer repair")
+            self.assertEqual(launcher.read_bytes(), expected)
+
+    @staticmethod
+    def native_windows_launcher():
+        # The first native start replaces the legacy .cmd with the installer's template; cmd, still
+        # running the old one, resumes in its padding and exits (the launches below check its output).
+        script = (release.native.ROOT / "install.ps1").read_text(encoding="utf-8").replace("\r\n", "\n")
+        template = script.split("$launcher = @'\n", 1)[1].split("\n'@", 1)[0]
+        return (template.replace("\n", "\r\n") + "\r\n").encode("ascii")
 
     def legacy_installation(self, home, windows_crlf=False):
         reference_root = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT))
@@ -437,7 +444,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(rejected.returncode, 1, rejected.stdout + rejected.stderr)
         self.assertEqual(rejected.stdout, "")
         self.assertEqual(rejected.stderr, "Kumi: Use: kumi [--bridge-config /absolute/path.json | --inference-only], or doctor, auth, login, logout, model; --help must be used alone.\n")
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.assertEqual(config.read_bytes(), config_before)
         self.assertEqual(self.launched(launcher, env, "--version"), f"Kumi {manifest['kumi']}\n")
         # No new flags or sign-in: the existing bridge reference leads to its original receipt.
@@ -448,7 +455,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(current["config"]["server"]["args"], ["--config", str(config)], opened)
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.launched(launcher, env, "update", "--rollback")
         self.assertEqual((home / "app/apps/kumi/bin/kumi.mjs").read_bytes(), original_entry)
         self.assertEqual(config.read_bytes(), config_before)
@@ -456,14 +463,14 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.5\n")
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.launched(launcher, env, "update", "--rollback")
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
         self.launched(launcher, env, input="/quit\n")
         self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["config"]["server"]["args"], ["--config", str(config)])
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
 
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
     def test_actual_built_release_with_authoritative_old_updater(self):
@@ -487,9 +494,9 @@ class MigrationRelease(unittest.TestCase):
         self.assertIn(f"Kumi is now {manifest['kumi']}", updated)
         self.assertTrue((home / "app" / self.binary).is_file())
         self.assertEqual(config.read_bytes(), config_before, "the old version-only updater leaves the same-version bridge for native startup")
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, original_launcher)
         self.assertEqual(self.launched(launcher, env, "--version"), f"Kumi {manifest['kumi']}\n")
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.assertIn("anthropic/claude-sonnet-5-5", self.launched(launcher, env, "model"))
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
@@ -501,7 +508,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(current["config"]["server"]["args"], ["--config", str(config)])
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         # Native rollback restores both the app and the exact legacy bridge configuration.
         self.launched(launcher, env, "update", "--rollback")
         self.assertEqual(old_entry.read_bytes(), original_entry)
@@ -511,7 +518,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertIn("anthropic/claude-sonnet-5-5", self.launched(launcher, env, "model"))
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
         # The unchanged old rollback command can return to the retained native generation.
         self.launched(launcher, env, "update", "--rollback")
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
@@ -520,7 +527,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["config"]["server"]["args"], ["--config", str(config)])
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
-        self.check_legacy_windows_launcher(launcher, original_launcher)
+        self.check_windows_launcher(launcher, self.native_windows_launcher())
 
     def test_actual_source_installed_updater_swaps_after_native_probe_and_retains_user_data(self):
         reference = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT)) / "apps/kumi/dist/src/install.js"

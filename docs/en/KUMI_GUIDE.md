@@ -540,8 +540,8 @@ For the current 1.7.5 installer (bundled Node 24):
 3. Continue with the same settings, sign-ins, conversations and library. They stay in `~/.kumi`,
    or your existing `KUMI_HOME`; no new login or data move is needed.
 
-The previous app and its Node runtime stay available for rollback. Existing Windows launchers
-also use that Node to start native Kumi until the installer is rerun; ordinary updates need no
+The previous app and its Node runtime stay available for rollback. On Windows, the first native
+start replaces the old launcher, so later starts don't go through Node; ordinary updates need no
 extra step. `kumi update --rollback`
 restores the JavaScript app together with its retained bridge configuration and secret. Live must
 be closed, and the bridge's previous generation must still be available. Repeating the rollback

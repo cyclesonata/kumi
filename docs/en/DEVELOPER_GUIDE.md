@@ -265,8 +265,8 @@ must retain `KUMI_VERSION = "1.7.5"` as the workflow does. Run this proof with
 Node 24 and require all artifact tests to run. Fresh installs select a native
 target and do not download Node. Existing Node 24 installations get a small compatibility
 bootstrap during `kumi update`, which downloads and unpacks only their platform's native bundle. The managed Node
-remains for rollback, optional YouTube challenges and the existing Windows
-launcher, which forwards commands to native Kumi until the installer is rerun. Older Node majors may require rerunning the
+remains for rollback and optional YouTube challenges. On Windows, the first native start
+replaces the old launcher; cmd, still running it, resumes in the new one's padding and exits. Older Node majors may require rerunning the
 installer with the same `KUMI_HOME`.
 
 **The bridge** has no release of its own: it ships inside each Kumi release, and

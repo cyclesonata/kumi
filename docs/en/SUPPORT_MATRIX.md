@@ -15,7 +15,7 @@ lists the evidence behind each "tested".
 | Linux | glibc distributions (not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux |
 
 - Kumi and the standalone bridge run as native Rust programs. Fresh installs do not download or require Node.
-- Existing Kumi 1.7.4 and 1.7.5 installations using Node 24 move to native through `kumi update`, keeping the same settings, sign-in and data. The retained Node supports rollback and optional YouTube challenges. Existing Windows launchers also use it to start native Kumi until the installer is rerun. Older Node majors may need the installer rerun with the same `KUMI_HOME`; see [updating](KUMI_GUIDE.md).
+- Existing Kumi 1.7.4 and 1.7.5 installations using Node 24 move to native through `kumi update`, keeping the same settings, sign-in and data. The retained Node supports rollback and optional YouTube challenges. On Windows, the first native start replaces the old launcher, so later starts don't go through Node. Older Node majors may need the installer rerun with the same `KUMI_HOME`; see [updating](KUMI_GUIDE.md).
 - YouTube challenges use retained Node or Node on PATH; Kumi does not fetch Node for them. Live runs its extension in Live's own JavaScript host.
 
 Real-Live results below describe the earlier TypeScript releases. Native CI and migration checks are separate from acceptance on actual Live hardware.
