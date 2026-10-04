@@ -3,6 +3,7 @@
 //! Host helpers are shared by the exact request and transaction families.
 
 #![allow(dead_code)]
+mod advanced_devices;
 mod arrangement;
 mod arrangement_clip;
 mod browser_render;
