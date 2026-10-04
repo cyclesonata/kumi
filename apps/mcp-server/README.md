@@ -37,7 +37,7 @@ cargo build --release --locked -p ableton-mcp-server --bins
 ./target/release/ableton-mcp-server  # offline MCP tools; no Live connection
 ```
 
-For a configured connection, follow [delivery](../../docs/en/DELIVERY.md), then run:
+For a configured connection, follow [delivery](https://github.com/user1303836/kumi/blob/main/docs/en/DELIVERY.md), then run:
 
 ```sh
 ./target/release/ableton-mcp-server --config /absolute/path/bridge-config.json
