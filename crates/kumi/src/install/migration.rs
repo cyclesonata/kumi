@@ -176,15 +176,23 @@ pub async fn finish_legacy_transition(io: &InstalledIo) {
     if server.version.as_deref().is_none_or(|version| version != bundled && !newer_version(&bundled, version)) {
         return;
     }
-    // Live has the existing Remote Script loaded: switching needs Live closed, so wait, quietly (the
-    // session says how to switch). A connect is instant; asking the system about Live is not (Windows).
-    if crate::bridge_setup::remote_script_answers(&config).await {
+    // The Remote Script this Kumi brings, against the one Live loads. Byte for byte the same (1.7.5's
+    // 1.0.74 for this release's), only the host and its receipt change: Live may stay open, and the
+    // switch is quiet. Otherwise the new Remote Script needs Live closed.
+    let scripts = server
+        .package_root()
+        .and_then(|package| crate::bridge_setup::owner_paths(&config, &package, &home))
+        .map_or_else(|| crate::config::remote_scripts_dir(&io.env), |(_, _, scripts)| scripts);
+    let unchanged = crate::bridge_setup::remote_script_unchanged(&join(&app, "bridge/package"), &scripts);
+    // Live has the existing Remote Script loaded: wait, quietly (the session says how to switch). A
+    // connect is instant; asking the system about Live is not (Windows).
+    if !unchanged
+        && (crate::bridge_setup::remote_script_answers(&config).await || live_open(io, io.run.clone().unwrap_or_else(default_run)).await)
+    {
         return;
     }
-    if live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
-        return;
-    }
-    let mut setup = crate::bridge_setup::BridgeSetupIo::new(io.out.clone(), io.env.clone());
+    let said = Rc::new(Said::default());
+    let mut setup = crate::bridge_setup::BridgeSetupIo::new(if unchanged { said.clone() } else { io.out.clone() }, io.env.clone());
     setup.input = io.input.clone();
     setup.bridge_dir = Some(app.clone());
     setup.prepared = Some(join(&app, "bridge"));
@@ -192,12 +200,39 @@ pub async fn finish_legacy_transition(io: &InstalledIo) {
     setup.wait_ms = Some(0);
     setup.run = io.run.clone();
     setup.live_running = io.live_running.clone();
+    setup.live_may_stay_open = unchanged;
+    let because = || said.last().map(|line| format!(" ({line})")).unwrap_or_default();
     match crate::bridge_setup::setup_bridge(setup).await {
         Ok(0) => {}
-        Ok(_) => io.out.write("Kumi can still open. To finish switching the bridge, close Live and run: kumi bridge\n"),
+        Ok(_) => {
+            io.out.write(&format!("Kumi can still open{}. To finish switching the bridge, close Live and run: kumi bridge\n", because()))
+        }
         Err(reason) => io.out.write(&format!(
             "Kumi can still open; the bridge couldn't switch ({reason}). To finish switching it, close Live and run: kumi bridge\n"
         )),
+    }
+}
+
+/// What a quiet bridge switch said, kept for when it fails.
+#[derive(Default)]
+struct Said(std::cell::RefCell<String>);
+impl Said {
+    fn last(&self) -> Option<String> {
+        self.0.borrow().lines().map(str::trim).filter(|line| !line.is_empty()).last().map(str::to_string)
+    }
+}
+impl crate::tui::tty::TtyOutput for Said {
+    fn is_tty(&self) -> bool {
+        false
+    }
+    fn columns(&self) -> Option<i32> {
+        None
+    }
+    fn rows(&self) -> Option<i32> {
+        None
+    }
+    fn write(&self, data: &str) {
+        self.0.borrow_mut().push_str(data);
     }
 }
 

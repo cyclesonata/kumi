@@ -187,6 +187,9 @@ pub struct BridgeSetupIo {
     pub bridge_dir: Option<String>,
     pub home: Option<String>,
     pub prepared: Option<String>,
+    /// The Remote Script Live has loaded is byte for byte the one this install writes, so the
+    /// switch may run with Live open (only the host and its receipt change).
+    pub live_may_stay_open: bool,
 }
 impl BridgeSetupIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
@@ -205,6 +208,7 @@ impl BridgeSetupIo {
             bridge_dir: None,
             home: None,
             prepared: None,
+            live_may_stay_open: false,
         }
     }
 }
@@ -422,6 +426,31 @@ pub(crate) fn owner_paths(config: &str, package: &str, home: &str) -> Option<(St
     }
     None
 }
+/// Whether every file of the Remote Script in a bridge package (`<package>/remote-script/AbletonMcpBridge`)
+/// is, byte for byte, in the installed one (`<scripts>/AbletonMcpBridge`). Files the install adds
+/// (manifest, bridge reference) don't count: Live runs what it loaded, which these files are.
+pub fn remote_script_unchanged(package: &str, scripts: &str) -> bool {
+    fn same(source: &Path, installed: &Path) -> bool {
+        let Ok(entries) = fs::read_dir(source) else { return false };
+        let mut any = false;
+        for entry in entries.flatten() {
+            let (from, to) = (entry.path(), installed.join(entry.file_name()));
+            let matches = match entry.file_type() {
+                Ok(kind) if kind.is_dir() => same(&from, &to),
+                Ok(kind) if kind.is_file() => {
+                    fs::read(&from).ok().is_some_and(|ours| fs::read(&to).ok().is_some_and(|theirs| ours == theirs))
+                }
+                _ => false,
+            };
+            if !matches {
+                return false;
+            }
+            any = true;
+        }
+        any
+    }
+    same(&Path::new(package).join("remote-script/AbletonMcpBridge"), &Path::new(scripts).join("AbletonMcpBridge"))
+}
 /// A bridge folder made for an install that hasn't finished: removed when the install stops early.
 struct Unfinished(Option<String>);
 impl Unfinished {
@@ -481,7 +510,7 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     } else {
         format!("Kumi will install the Ableton bridge {bundled}: the Remote Script Live loads, and the local server Kumi talks to.")
     });
-    if live_open(&io, run.clone()).await {
+    if !io.live_may_stay_open && live_open(&io, run.clone()).await {
         say(&format!("Live is open. Save your work, quit Live, then run this again: {} bridge", *KUMI));
         return Ok(1);
     }

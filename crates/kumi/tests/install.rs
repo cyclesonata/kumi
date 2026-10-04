@@ -601,3 +601,42 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
     assert!(left.is_empty(), "{left:?}");
     assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
 }
+#[tokio::test]
+async fn startup_switch_with_the_same_remote_script_runs_quietly_with_live_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (env, _) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
+    // The app's prepared bridge, whose Remote Script is byte for byte the one Live has loaded.
+    let prepared = dir.path().join("home/app/bridge");
+    let artifact = b"native bridge artifact";
+    put(prepared.join("bridge.tar.gz"), artifact);
+    put(prepared.join("prepared.json"), json!({"artifact":"bridge.tar.gz","sha256":hex::encode(Sha256::digest(artifact))}).to_string());
+    put(prepared.join("package").join(executable_name("ableton-mcp-server")), "native bridge");
+    for (name, text) in
+        [("__init__.py", "from .ableton_mcp_remote_script import *\n"), ("ableton_mcp_remote_script.py", "BRIDGE = '1.0.74'\n")]
+    {
+        put(prepared.join("package/remote-script/AbletonMcpBridge").join(name), text);
+        put(dir.path().join("Remote Scripts/AbletonMcpBridge").join(name), text);
+    }
+    put(dir.path().join("Remote Scripts/AbletonMcpBridge/manifest.json"), "{}");
+    let calls = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
+    let seen = calls.clone();
+    let (mut installed, out) = io(&env);
+    installed.live_running = Some(Rc::new(|| async { panic!("an unchanged Remote Script doesn't need Live closed") }.boxed_local()));
+    installed.run = Some(Rc::new(move |_, args, _| {
+        let apply = args.iter().any(|a| a == "--apply");
+        seen.borrow_mut().push(args);
+        async move { Ran { code: 0, stdout: json!({"state": if apply { "completed" } else { "planned" }}).to_string(), stderr: String::new() } }.boxed_local()
+    }));
+    finish_legacy_transition(&installed).await;
+    assert_eq!(*out.0.borrow(), "", "the switch is quiet");
+    let calls = calls.borrow();
+    assert_eq!(calls.iter().map(|args| args[..2].join(" ")).collect::<Vec<_>>(), ["lifecycle upgrade", "lifecycle upgrade"]);
+    assert!(calls[1].contains(&"--confirm-live-stopped".to_string()));
+    // A different Remote Script still waits for Live to close.
+    put(dir.path().join("Remote Scripts/AbletonMcpBridge/ableton_mcp_remote_script.py"), "BRIDGE = '1.0.73'\n");
+    let (mut waiting, out) = io(&env);
+    waiting.run = Some(Rc::new(|command, _, _| async move { panic!("nothing runs while Live is open: {command}") }.boxed_local()));
+    finish_legacy_transition(&waiting).await;
+    assert_eq!(*out.0.borrow(), "");
+}
