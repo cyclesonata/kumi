@@ -17,6 +17,7 @@ mod clip_move;
 mod device_parameter;
 mod device_lifecycle;
 mod device_copy;
+mod device_basic;
 pub mod device_state;
 mod dispatch;
 mod events;
