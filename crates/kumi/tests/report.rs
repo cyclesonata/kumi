@@ -112,7 +112,7 @@ async fn report_contains_versions_doctor_latest_conversation_gaps_live_log_witho
     for heading in
         ["## Versions", "## Doctor", "## Settings", "## Last conversation", "## What Kumi couldn't do (gap log)", "## Live's log"]
     {
-        assert!(text.contains(heading), "{heading}")
+        assert!(text.contains(heading), "{heading}; report had {} bytes", text.len())
     }
     for expected in [
         "Runtime: native Rust",

@@ -419,5 +419,7 @@ async fn compose(io: &ReportIo, redact: &dyn Fn(&str) -> String, home: &str, now
     use tokio::io::AsyncWriteExt;
     let mut output = open.open(Path::new(&file)).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
     output.write_all(text.as_bytes()).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
+    // Tokio queues file writes; finish the write before announcing the report is ready.
+    output.flush().await.map_err(|e| RuntimeError::plain(e.to_string()))?;
     Ok(file)
 }
