@@ -56,6 +56,10 @@ uuid = { version = "1", features = ["v4"] }
 [profile.dev]
 debug = "line-tables-only"
 
+# Keep JSON byte scanning optimized for large protocol pages in development and tests.
+[profile.dev.package.serde_json]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
