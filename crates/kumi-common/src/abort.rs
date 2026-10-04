@@ -1,12 +1,53 @@
 //! Cancellation in the shape the TypeScript used: an `AbortSignal` that work checks and awaits.
 //!
-//! A [`Signal`] is a `tokio_util` `CancellationToken`. `Signal::timeout(ms)` is `AbortSignal.timeout`,
-//! `Signal::any` is `AbortSignal.any`, [`Signal::check`] is `signal.throwIfAborted()`, and a
+//! A [`Signal`] uses `tokio_util` cancellation with synchronous parent checks. [`timeout`] is
+//! `AbortSignal.timeout`, [`any`] is `AbortSignal.any`, [`Signal::check`] is `signal.throwIfAborted()`, and a
 //! [`Controller`] is an `AbortController`.
 
-use std::time::Duration;
+use std::{
+    future::{poll_fn, Future},
+    pin::Pin,
+    sync::Arc,
+    task::Poll,
+    time::Duration,
+};
 
-pub use tokio_util::sync::CancellationToken as Signal;
+/// A cancellation signal. A combined signal sees a parent abort immediately, including when a
+/// callback aborts between two awaits that both complete without yielding to the scheduler.
+#[derive(Debug, Clone, Default)]
+pub struct Signal {
+    token: tokio_util::sync::CancellationToken,
+    parents: Arc<[Signal]>,
+}
+impl Signal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    pub fn cancel(&self) {
+        self.token.cancel();
+    }
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled() || self.parents.iter().any(Self::is_cancelled)
+    }
+    pub fn cancelled(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            if self.is_cancelled() {
+                return;
+            }
+            let mut waits: Vec<_> = self.parents.iter().map(Self::cancelled).collect();
+            waits.push(Box::pin(self.token.cancelled()));
+            poll_fn(|cx| {
+                for wait in &mut waits {
+                    if wait.as_mut().poll(cx).is_ready() {
+                        return Poll::Ready(());
+                    }
+                }
+                Poll::Pending
+            })
+            .await;
+        })
+    }
+}
 
 /// `new Error("...")` thrown by `throwIfAborted`: the work was cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,21 +93,10 @@ pub fn timeout(ms: u64) -> Signal {
     signal
 }
 
-/// `AbortSignal.any([...])`: a signal that fires when any of `signals` does (needs a Tokio runtime).
+/// `AbortSignal.any([...])`: a signal that fires when any parent does. No scheduler turn is needed
+/// to observe cancellation and no background forwarding task outlives an unused combined signal.
 pub fn any<I: IntoIterator<Item = Signal>>(signals: I) -> Signal {
-    let combined = Signal::new();
-    for signal in signals {
-        if signal.is_cancelled() {
-            combined.cancel();
-            break;
-        }
-        let fire = combined.clone();
-        tokio::spawn(async move {
-            signal.cancelled().await;
-            fire.cancel();
-        });
-    }
-    combined
+    Signal { token: tokio_util::sync::CancellationToken::new(), parents: signals.into_iter().collect() }
 }
 
 /// A signal that never fires: `new AbortController().signal` left alone.
@@ -101,8 +131,38 @@ mod tests {
         let both = any([a.signal.clone(), b.signal.clone()]);
         assert!(!both.aborted());
         b.abort();
+        assert!(both.aborted());
+        assert!(both.check().is_err());
         both.cancelled().await;
         assert!(both.check().is_err());
+    }
+
+    #[test]
+    fn nested_any_observes_cancellation_without_a_runtime() {
+        let parent = Signal::new();
+        let peer = Signal::new();
+        let inner = any([parent.clone(), peer.clone()]);
+        let outer = any([Signal::new(), inner.clone()]);
+        parent.cancel();
+        assert!(inner.is_cancelled());
+        assert!(outer.is_cancelled());
+        assert!(!peer.is_cancelled());
+        let own = any([peer.clone()]);
+        own.cancel();
+        assert!(own.is_cancelled());
+        assert!(!peer.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_nested_any_wakes_when_a_parent_aborts() {
+        let parent = Signal::new();
+        let outer = any([any([parent.clone()]), Signal::new()]);
+        let waiting = tokio::spawn(async move {
+            outer.cancelled().await;
+        });
+        tokio::task::yield_now().await;
+        parent.cancel();
+        tokio::time::timeout(Duration::from_secs(1), waiting).await.unwrap().unwrap();
     }
 
     #[tokio::test(start_paused = true)]
