@@ -26,6 +26,7 @@ mod record_operation;
 mod recovery;
 mod rename;
 mod resources;
+mod routing;
 pub mod retention;
 mod structure;
 mod tempo;
