@@ -22,6 +22,7 @@ mod device_basic;
 pub mod device_state;
 mod dispatch;
 mod events;
+mod extended_mixer;
 mod import_files;
 pub mod helpers;
 pub mod json_diagnostics;
