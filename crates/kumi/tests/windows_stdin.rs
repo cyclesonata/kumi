@@ -252,6 +252,13 @@ fn cooked_console_pause_preserves_os_editing_and_partial_text() {
             async {
                 let input = Stdin::new();
                 for round in 0..3 {
+                    // An inherited VT flag is legal with cooked input and is restored
+                    // exactly by the mode owner; cancellation must work in both modes.
+                    let mode = ENABLE_LINE_INPUT
+                        | ENABLE_ECHO_INPUT
+                        | ENABLE_PROCESSED_INPUT
+                        | if round == 1 { ENABLE_VIRTUAL_TERMINAL_INPUT } else { 0 };
+                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), mode) }, 0);
                     let _waiting = receive(&input, 2, false);
                     write_text(&console, "ab\u{8}C");
                     queue_empty(&console);
