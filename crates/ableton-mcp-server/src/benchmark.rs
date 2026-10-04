@@ -8,8 +8,9 @@ use crate::analysis::{
     analyze_pcm, PcmAnalysisInput, MAX_ANALYSIS_CHANNELS, MAX_ANALYSIS_SAMPLES, MAX_TIME_FREQUENCY_BANDS, MAX_TIME_FREQUENCY_FRAMES,
     MAX_WAVEFORM_BINS,
 };
-use crate::host::{McpHost, McpHostOptions, PROTOCOL_VERSION};
+use crate::host::{McpHost, McpHostOptions};
 use crate::live::UnavailableLiveAdapter;
+use crate::mcp_protocol::LEGACY_PROTOCOL_VERSION;
 use kumi_common::js::json::stringify;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -135,7 +136,7 @@ fn elapsed(started: Instant) -> f64 {
     started.elapsed().as_secs_f64() * 1000.
 }
 fn initialize() -> Value {
-    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"benchmark","version":"1"}}})
+    json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":LEGACY_PROTOCOL_VERSION,"capabilities":{},"clientInfo":{"name":"benchmark","version":"1"}}})
 }
 fn initialized() -> Value {
     json!({"jsonrpc":"2.0","method":"notifications/initialized"})
