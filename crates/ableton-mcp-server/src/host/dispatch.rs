@@ -147,6 +147,7 @@ impl McpHost {
             optional!(dispatch_device_lifecycle_tool);
             optional!(dispatch_device_copy_tool);
             optional!(dispatch_audio_clip_tool);
+            optional!(dispatch_audio_import_tool);
             optional!(dispatch_note_target_tool);
             optional!(dispatch_mixer_tool);
             optional!(dispatch_ui_tool);
@@ -322,6 +323,9 @@ impl McpHost {
             }
             if tx.starts_with("clipmove_") {
                 return Ok(self.undo_clip_move_async(id, params, signal).await);
+            }
+            if tx.starts_with("audioimport_") {
+                return Ok(self.undo_audio_import_async(id, params, signal).await);
             }
             if tx.starts_with("audioclip_") {
                 return Ok(self.undo_audio_clip_async(id, params, signal).await);
