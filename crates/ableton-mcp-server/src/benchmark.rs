@@ -15,14 +15,17 @@ use kumi_common::js::json::stringify;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
     collections::BTreeSet,
     f64::consts::PI,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     rc::Rc,
+    task::{Context, Poll},
     time::Instant,
 };
-use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 
 pub mod memory;
 pub const ANALYSIS_MEASUREMENTS: usize = 3;
@@ -262,17 +265,34 @@ pub async fn measure_isolated_maximum_input_analysis(options: &IsolatedAnalysisO
     resources.elapsed_milliseconds = elapsed_milliseconds;
     isolated_measurements(&resources, options)
 }
+struct CollectedOutput(Rc<RefCell<Vec<u8>>>);
+impl AsyncWrite for CollectedOutput {
+    fn poll_write(self: Pin<&mut Self>, _: &mut Context<'_>, bytes: &[u8]) -> Poll<std::io::Result<usize>> {
+        self.0.borrow_mut().extend_from_slice(bytes);
+        Poll::Ready(Ok(bytes.len()))
+    }
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
 async fn run_wire_payload(payload: String) -> Result<Vec<Value>, String> {
-    let (writer, mut reader) = tokio::io::duplex(64 * 1024);
-    let receive = async {
-        let mut bytes = vec![];
-        reader.read_to_end(&mut bytes).await.map_err(|e| e.to_string())?;
-        Ok::<_, String>(bytes)
-    };
-    let serve = crate::serve::serve(std::io::Cursor::new(payload.into_bytes()), writer, tokio::io::sink(), None, McpHostOptions::default());
-    let (served, bytes) = tokio::join!(serve, receive);
-    served.map_err(|e| e.to_string())?;
-    String::from_utf8(bytes?)
+    let bytes = Rc::new(RefCell::new(Vec::new()));
+    // PassThrough in the source collects chunks until serve completes, independently of an
+    // output EOF. A notifier can still hold the writer after all input has been processed.
+    crate::serve::serve(
+        std::io::Cursor::new(payload.into_bytes()),
+        CollectedOutput(bytes.clone()),
+        tokio::io::sink(),
+        None,
+        McpHostOptions::default(),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    let bytes = bytes.borrow().clone();
+    String::from_utf8(bytes)
         .map_err(|e| e.to_string())?
         .lines()
         .filter(|v| !v.is_empty())
