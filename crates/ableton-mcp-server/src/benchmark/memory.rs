@@ -90,8 +90,11 @@ pub fn peak_rss_bytes() -> Result<u64, String> {
             fn GetProcessMemoryInfo(process: *mut c_void, counters: *mut Counters, size: u32) -> i32;
         }
         let mut counters = std::mem::MaybeUninit::<Counters>::zeroed();
+        let size = std::mem::size_of::<Counters>() as u32;
+        // SAFETY: the integer-only structure is zero-initialized; set its required byte count.
+        unsafe { (*counters.as_mut_ptr()).cb = size };
         // SAFETY: process is the current-process pseudo handle and the buffer has the declared size.
-        let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), counters.as_mut_ptr(), std::mem::size_of::<Counters>() as u32) };
+        let result = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), counters.as_mut_ptr(), size) };
         if result != 0 {
             return Ok(unsafe { counters.assume_init() }.peak_working_set as u64);
         }
