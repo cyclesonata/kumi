@@ -1,7 +1,7 @@
 //! Exercise the shipped stdio executable through an authenticated loopback peer.
 //! The peer is explicitly fake-live and delegates state/authority checks to the simulator.
 use ableton_mcp_server::{
-    delivery::{config_for_bridge, write_config, write_secret_file},
+    delivery::{config_for_bridge, read_any_config, write_config, write_secret_file},
     live::*,
     registry::{canonical_json, WIRE_CANONICAL_LIMITS},
 };
@@ -13,7 +13,7 @@ use std::{cell::RefCell, collections::HashMap, path::Path, process::Stdio, rc::R
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines},
     net::TcpListener,
-    process::{ChildStdin, ChildStdout, Command},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
 };
 
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
@@ -96,6 +96,8 @@ async fn answer(sim: &DeterministicLiveSimulator, request: &Value, ledger: &mut 
 struct Client {
     input: ChildStdin,
     output: Lines<BufReader<ChildStdout>>,
+    errors: Option<ChildStderr>,
+    process: Option<Child>,
     modern: bool,
     sequence: u64,
 }
@@ -113,11 +115,21 @@ impl Client {
         }
         self.send(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).await;
         loop {
-            let line = tokio::time::timeout(Duration::from_secs(15), self.output.next_line())
-                .await
-                .expect("native response deadline")
-                .unwrap()
-                .expect("native stdout ended before response");
+            let line =
+                tokio::time::timeout(Duration::from_secs(15), self.output.next_line()).await.expect("native response deadline").unwrap();
+            let Some(line) = line else {
+                let mut diagnostics = String::new();
+                tokio::time::timeout(Duration::from_secs(5), self.errors.as_mut().unwrap().read_to_string(&mut diagnostics))
+                    .await
+                    .expect("native diagnostic deadline")
+                    .unwrap();
+                let status = tokio::time::timeout(Duration::from_secs(5), self.process.as_mut().unwrap().wait())
+                    .await
+                    .expect("native exit deadline")
+                    .unwrap();
+                let tool = params.get("name").and_then(Value::as_str).unwrap_or("none");
+                panic!("native stdout ended before response to {method} request {id}, tool {tool} ({status}): {diagnostics}");
+            };
             let response: Value = serde_json::from_str(&line).expect("stdout must contain only MCP JSON");
             if response.get("id").is_none() {
                 assert!(response["method"].is_string(), "{response}");
@@ -174,13 +186,14 @@ async fn native_process_reads_mutates_replays_and_undoes_through_authenticated_t
             let config_path = folder.path().join("bridge.json");
             let config = config_for_bridge(Path::new(env!("CARGO_BIN_EXE_ableton-mcp-server")), &json!({"host":"127.0.0.1","port":port,"secretFile":secret,"timeoutMs":5000}), None, Some(&config_path), true).unwrap();
             write_config(&config_path, &config, false).unwrap();
+            read_any_config(&config_path).expect("the fixture must establish a readable owner-only bridge configuration");
             let mut process = Command::new(env!("CARGO_BIN_EXE_ableton-mcp-server"))
                 .args(["--config", config_path.to_str().unwrap()])
                 .current_dir(folder.path()).env("ABLETON_MCP_EXTENSION", "off")
                 .env_remove("ABLETON_MCP_TOOL_POLICY").env_remove("ABLETON_MCP_TOOL_ALLOW").env_remove("ABLETON_MCP_TOOL_DENY")
                 .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
                 .kill_on_drop(true).spawn().unwrap();
-            let mut client = Client { input:process.stdin.take().unwrap(), output:BufReader::new(process.stdout.take().unwrap()).lines(), modern, sequence:0 };
+            let mut client = Client { input:process.stdin.take().unwrap(), output:BufReader::new(process.stdout.take().unwrap()).lines(), errors:process.stderr.take(), process:Some(process), modern, sequence:0 };
             if !modern {
                 let initialized = client.call("initialize", json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"native-wire-test","version":"1"}})).await;
                 assert_eq!(initialized["protocolVersion"], "2025-11-25");
@@ -222,10 +235,12 @@ async fn native_process_reads_mutates_replays_and_undoes_through_authenticated_t
             let final_snapshot = client.tool("live_snapshot", json!({})).await;
             assert_eq!(final_snapshot["snapshot"]["set"]["tempo"], 120);
             assert_eq!(final_snapshot["snapshot"]["tracks"][0]["devices"][0]["parameters"][0]["value"], 0.5);
+            let mut errors = client.errors.take().unwrap();
+            let mut process = client.process.take().unwrap();
             drop(client);
             let output = tokio::time::timeout(Duration::from_secs(15), process.wait()).await.unwrap().unwrap();
             let mut diagnostics = String::new();
-            process.stderr.take().unwrap().read_to_string(&mut diagnostics).await.unwrap();
+            errors.read_to_string(&mut diagnostics).await.unwrap();
             assert!(output.success(), "{diagnostics}");
             assert!(diagnostics.is_empty(), "{diagnostics}");
             tokio::time::timeout(Duration::from_secs(5), peer).await.unwrap().unwrap();
