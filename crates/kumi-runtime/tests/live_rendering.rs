@@ -37,6 +37,11 @@ struct Fixture {
     cancelled: Cell<bool>,
     tag: RefCell<String>,
     releases: RefCell<Vec<Value>>,
+    held_apply: Option<Rc<HeldApply>>,
+}
+struct HeldApply {
+    dispatched: tokio::sync::Notify,
+    reply: RefCell<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 #[async_trait(?Send)]
 impl McpEndpoint for Fixture {
@@ -71,6 +76,11 @@ impl McpEndpoint for Fixture {
         eq(&actual, expected, &format!("{} dispatch {index}", self.case["label"]));
         self.calls.set(index + 1);
         if self.case["config"]["cancelOn"].as_str() == Some(name) && !self.cancelled.replace(true) {
+            if let Some(held) = &self.held_apply {
+                let reply = held.reply.borrow_mut().take().expect("one held apply");
+                held.dispatched.notify_one();
+                reply.await.expect("release the dispatched apply");
+            }
             self.original.borrow().cancel();
         }
         let response = &self.case["responses"][index];
@@ -183,6 +193,7 @@ async fn replay() {
             cancelled: Cell::new(false),
             tag: RefCell::new("tag".into()),
             releases: RefCell::new(vec![]),
+            held_apply: None,
         });
         let events = Rc::new(RefCell::new(vec![]));
         let actions = Rc::new(RefCell::new(vec![]));
@@ -397,4 +408,145 @@ impl EarsLink for EarsReplay {
     async fn close(&self) {
         self.next("close", json!([]));
     }
+}
+
+/// The source cleanup oracle, reached through the real kernel and public audition tool.
+#[tokio::test(flavor = "current_thread")]
+async fn cancelled_kernel_audition_restores_main_and_removes_scratch_tracks_after_close() {
+    use futures::StreamExt;
+    use kumi_runtime::{
+        ai::{
+            error::LanguageModelError,
+            types::{CallOptions, FinishReason, FinishReasonUnified, StreamPart, StreamParts, ToolCall},
+        },
+        integrations::ableton::{integration::Ableton, observation::ObservationHost},
+        kernel::agent::{create_agent_kernel, AgentKernelOptions, LanguageModel, ModelBinding},
+    };
+    use std::time::Duration;
+    struct Model {
+        input: String,
+    }
+    #[async_trait(?Send)]
+    impl LanguageModel for Model {
+        async fn do_stream(&self, _: CallOptions) -> Result<StreamParts, LanguageModelError> {
+            Ok(futures::stream::iter(vec![
+                StreamPart::ToolCall(ToolCall {
+                    tool_call_id: "audition-call".into(),
+                    tool_name: "audition".into(),
+                    input: self.input.clone(),
+                    provider_executed: None,
+                    dynamic: None,
+                    provider_metadata: None,
+                }),
+                StreamPart::Finish {
+                    usage: Default::default(),
+                    finish_reason: FinishReason { unified: FinishReasonUnified::ToolCalls, raw: None },
+                    provider_metadata: None,
+                },
+            ])
+            .boxed_local())
+        }
+    }
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let folder = tempfile::tempdir().unwrap();
+            wav(folder.path(), "square");
+            let source: Value = serde_json::from_str(include_str!("support/rendering-oracle.json")).unwrap();
+            let source_case = source["cases"].as_array().unwrap().iter().find(|case| case["label"] == "cancel-live_mixer_apply").unwrap();
+            let case = fixture_paths::map_strings(source_case, &|text| text.replace("$AUDIO", folder.path().to_str().unwrap()));
+            let (acknowledge, reply) = tokio::sync::oneshot::channel();
+            let held = Rc::new(HeldApply { dispatched: tokio::sync::Notify::new(), reply: RefCell::new(Some(reply)) });
+            let controller = Signal::new();
+            let endpoint = Rc::new(Fixture {
+                case: case.clone(),
+                calls: Cell::new(0),
+                original: RefCell::new(controller.clone()),
+                cancelled: Cell::new(false),
+                tag: RefCell::new("tag".into()),
+                releases: RefCell::new(vec![]),
+                held_apply: Some(held.clone()),
+            });
+            let finished = Rc::new(tokio::sync::Notify::new());
+            let completed = finished.clone();
+            let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+            let connect = endpoint.clone();
+            options.connect = Some(Rc::new(move |_| {
+                let connect = connect.clone();
+                async move { Ok(connect as Rc<dyn McpEndpoint>) }.boxed_local()
+            }));
+            options.ears = Some(EarsSetup::Disabled);
+            options.fast = Some(false);
+            options.low_disk = Some(Rc::new(|_, _, _| async { None }.boxed_local()));
+            let restore = folder.path().join("restore.json");
+            options.restore_file = Some(restore.to_string_lossy().into_owned());
+            options.on_action = Some(Rc::new(move |event| {
+                if event.title == "Auditioned" {
+                    completed.notify_one();
+                }
+            }));
+            let integration = Ableton::new(options);
+            integration.start(Signal::new()).await.unwrap();
+            integration.connection.tools().unwrap().refresh(Signal::new()).await.unwrap();
+            integration.connection.epoch.set(Some(7.0));
+            *integration.connection.set.borrow_mut() = Some("fixture".into());
+            *integration.history.remember.current.borrow_mut() =
+                Some(Rc::new(CurrentProject { identity: "fixture".into(), path: None, name: "Fixture Set".into() }));
+            integration.observer.tempo.set(Some(120.0));
+            let audition = integration.definitions().into_iter().find(|tool| tool.name() == "audition").unwrap();
+            let mut input = case["operations"][0]["request"].as_object().unwrap().clone();
+            let from = input.remove("fromBeat").unwrap();
+            input.insert("from_beat".into(), from);
+            let kernel = Rc::new(
+                create_agent_kernel(AgentKernelOptions {
+                    instructions: "fixture".into(),
+                    tools: vec![audition],
+                    signal: Signal::new(),
+                    checkpoint: None,
+                    max_steps: None,
+                    budget: None,
+                    binding: ModelBinding {
+                        id: "test/fixture".into(),
+                        model: Rc::new(Model { input: stringify(&json!(input)) }),
+                        budget: None,
+                        prepare: Box::new(|request| CallOptions {
+                            prompt: request.messages,
+                            tools: Some(request.tools),
+                            ..Default::default()
+                        }),
+                    },
+                })
+                .unwrap(),
+            );
+            let events = Rc::new(RefCell::new(vec![]));
+            let sink = events.clone();
+            let active_kernel = kernel.clone();
+            let run_signal = controller.clone();
+            let running = tokio::task::spawn_local(async move {
+                active_kernel
+                    .run(
+                        "audition",
+                        run_signal,
+                        Rc::new(move |event| {
+                            sink.borrow_mut().push(event);
+                            Ok(())
+                        }),
+                    )
+                    .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), held.dispatched.notified()).await.unwrap();
+            assert!(restore.is_file(), "Main restoration is journaled before muting it");
+            controller.cancel();
+            let result = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap().unwrap().unwrap();
+            assert_eq!(result.stop_reason, StopReason::Cancelled);
+            tokio::time::timeout(Duration::from_secs(1), kernel.close()).await.unwrap();
+            drop(kernel);
+            assert!(acknowledge.send(()).is_ok(), "cancelling the kernel dropped audition before its cleanup");
+            tokio::time::timeout(Duration::from_secs(2), finished.notified()).await.unwrap();
+            assert_eq!(endpoint.calls.get(), case["calls"].as_array().unwrap().len(), "all source restore/undo/transport calls finish");
+            assert!(!restore.exists(), "confirmed Main restoration clears the crash journal");
+            assert!(integration.history.entries.borrow().is_empty(), "scratch changes are removed after cleanup");
+            assert!(matches!(events.borrow().as_slice(), [KernelEvent::ToolStart { .. }]), "late cleanup must not deliver a model result");
+            integration.close().await.unwrap();
+        })
+        .await;
 }

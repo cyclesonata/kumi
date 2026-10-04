@@ -17,14 +17,19 @@ use kumi_runtime::ai::types::{
     ProviderMetadata, StreamPart, StreamParts, ToolCall, ToolPart, ToolResultContentItem, ToolResultOutput, Usage as ModelUsage,
 };
 use kumi_runtime::core::contracts::{
-    JsonObject, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, StopReason, StreamingCall, ToolImage, ToolResult, TranscriptLine,
-    TranscriptRole, Usage,
+    ChangeState, Integration, JsonObject, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, StopReason, StreamingCall, ToolImage,
+    ToolResult, TranscriptLine, TranscriptRole, Usage,
 };
 use kumi_runtime::core::errors::{FailureKind, RuntimeError};
+use kumi_runtime::integrations::ableton::{integration::Ableton, observation::ObservationHost, options::AbletonOptions};
 use kumi_runtime::kernel::agent::{
     create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, STOPPED_NOTE,
 };
 use kumi_runtime::kernel::budget::ContextBudget;
+use kumi_runtime::mcp::{
+    client::{McpEndpoint, StderrStatus},
+    types::{CallToolResult, Implementation, ListToolsResult},
+};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::task::{spawn_local, LocalSet};
@@ -425,13 +430,21 @@ async fn cancellation_mid_stream_returns_promptly_discards_the_turn_and_the_next
 async fn cancellation_during_an_uncooperative_tool_settles_without_waiting_for_it_late_results_are_ignored() {
     local(async {
         let (release, held) = tokio::sync::watch::channel(false);
+        let began = Rc::new(Cell::new(false));
+        let started = began.clone();
+        let settled = Rc::new(tokio::sync::Notify::new());
+        let finished = settled.clone();
         let h = harness(
             |_, _| Scripted::Parts(vec![call("slow", "{}"), tool_calls()]),
             Options {
                 tools: vec![tool("slow", move |_| {
                     let mut held = held.clone();
+                    let started = started.clone();
+                    let finished = finished.clone();
                     async move {
+                        started.set(true);
                         let _ = held.wait_for(|released| *released).await;
+                        finished.notify_one();
                         Ok(ToolResult::text("late"))
                     }
                 })],
@@ -458,8 +471,9 @@ async fn cancellation_during_an_uncooperative_tool_settles_without_waiting_for_i
             )
             .await
             .unwrap();
+        assert!(began.get(), "source calls execute before checking the cancellation raised by tool-start");
         release.send_replace(true);
-        sleep(Duration::from_millis(5)).await;
+        tokio::time::timeout(Duration::from_secs(1), settled.notified()).await.unwrap();
         assert_eq!(result.stop_reason, StopReason::Cancelled);
         assert_eq!(
             result.usage,
@@ -1619,4 +1633,221 @@ async fn a_stopped_turn_keeps_a_tools_words_not_its_images() {
         h.kernel.close().await;
     })
     .await
+}
+
+/// Hold the reply after a real public tool has sent its apply to Live.
+struct HeldTempoApply {
+    dispatched: tokio::sync::Notify,
+    acknowledgement: RefCell<Option<oneshot::Receiver<()>>>,
+    calls: RefCell<Vec<String>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for HeldTempoApply {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        Some(serde_json::from_value(json!({"name":"fixture","version":"1.0.73"})).unwrap())
+    }
+    async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
+        let tools = ["live_status", "live_tempo_preview", "live_tempo_apply", "live_undo"]
+            .map(|name| json!({"name":name,"inputSchema":{"type":"object"}}));
+        Ok(serde_json::from_value(json!({"tools":tools})).unwrap())
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
+        assert!(!signal.is_cancelled(), "the dispatched mutation has its own settlement signal");
+        self.calls.borrow_mut().push(name.into());
+        let result = match name {
+            "live_status" => json!({"connected":true,"adapter":"remote-script","epoch":7}),
+            "live_tempo_preview" => {
+                assert_eq!(args["tempo"], 126);
+                json!({"epoch":7,"transactionId":"tempo_held","confirmation":"apply","priorTempo":120,"proposedTempo":126})
+            }
+            "live_tempo_apply" => {
+                assert_eq!(args["transactionId"], "tempo_held");
+                let reply = self.acknowledgement.borrow_mut().take().expect("one apply");
+                self.dispatched.notify_one();
+                reply.await.expect("release the held Live acknowledgement");
+                assert!(!signal.is_cancelled(), "turn cancellation must not cancel a sent mutation");
+                json!({"state":"applied"})
+            }
+            "live_undo" => {
+                assert_eq!(args["transactionId"], "tempo_held");
+                json!({"state":"undone"})
+            }
+            _ => panic!("unexpected bridge call {name}"),
+        };
+        Ok(serde_json::from_value(json!({"content":[{"type":"text","text":stringify(&result)}]})).unwrap())
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn cancelled_dispatched_tempo_settles_into_history_and_remains_undoable_after_kernel_close() {
+    use futures::FutureExt;
+    local(async {
+        for close_turn in [false, true] {
+            let (acknowledge, reply) = oneshot::channel();
+            let endpoint = Rc::new(HeldTempoApply {
+                dispatched: tokio::sync::Notify::new(),
+                acknowledgement: RefCell::new(Some(reply)),
+                calls: RefCell::new(Vec::new()),
+            });
+            let connect = endpoint.clone();
+            let remembered = Rc::new(tokio::sync::Notify::new());
+            let changed = remembered.clone();
+            let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+            options.connect = Some(Rc::new(move |_| {
+                let endpoint = connect.clone();
+                async move { Ok(endpoint as Rc<dyn McpEndpoint>) }.boxed_local()
+            }));
+            options.on_change = Some(Rc::new(move |_| changed.notify_one()));
+            let integration = Ableton::new(options);
+            integration.start(signal()).await.unwrap();
+            integration.connection.tools().unwrap().refresh(signal()).await.unwrap();
+            integration.connection.epoch.set(Some(7.0));
+            let tempo = integration.definitions().into_iter().find(|tool| tool.name() == "set_tempo").unwrap();
+            let h = Rc::new(harness(
+                |_, _| Scripted::Parts(vec![call("set_tempo", "{\"tempo\":126}"), tool_calls()]),
+                Options { tools: vec![tempo], ..Options::default() },
+            ));
+            let (events, emit) = collect();
+            let controller = Controller::new();
+            let run_signal = controller.signal.clone();
+            let running = h.clone();
+            let run = spawn_local(async move { running.kernel.run("set the tempo", run_signal, emit).await });
+            tokio::time::timeout(Duration::from_secs(1), endpoint.dispatched.notified()).await.unwrap();
+            if close_turn {
+                tokio::time::timeout(Duration::from_secs(1), h.kernel.close()).await.unwrap();
+            } else {
+                controller.abort();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(1), run).await.unwrap().unwrap().unwrap();
+            assert_eq!(result.stop_reason, StopReason::Cancelled);
+            assert!(integration.history.entries.borrow().is_empty(), "Live has not acknowledged the sent mutation yet");
+            assert!(h.messages().is_empty(), "the unfinished tool round is not replayed to the model");
+            assert_eq!(types(&events.borrow()), ["tool-start"]);
+            tokio::time::timeout(Duration::from_secs(1), h.kernel.close()).await.unwrap();
+            drop(h);
+            assert!(acknowledge.send(()).is_ok(), "cancelling the wait dropped the already-dispatched mutation");
+            tokio::time::timeout(Duration::from_secs(1), remembered.notified()).await.unwrap();
+            let entry = integration.history.entries.borrow().values().next().unwrap().borrow().clone();
+            assert_eq!(entry.record.state, ChangeState::Applied);
+            assert_eq!(entry.record.title, "Tempo 120 → 126 BPM");
+            assert_eq!(entry.transaction_id, "tempo_held");
+            assert_eq!(types(&events.borrow()), ["tool-start"], "late settlement emits no kernel tool result");
+            let undone = integration.history.undo("last", signal(), false).await.unwrap();
+            assert!(!undone.is_error, "{}", undone.text);
+            assert_eq!(undone.record.unwrap().state, ChangeState::Undone);
+            assert_eq!(*endpoint.calls.borrow(), ["live_status", "live_tempo_preview", "live_tempo_apply", "live_undo"]);
+            integration.close().await.unwrap();
+        }
+    })
+    .await;
+}
+
+struct HeldStreamingCall {
+    abandoning: bool,
+    entered: Rc<tokio::sync::Notify>,
+    reply: Rc<RefCell<Option<oneshot::Receiver<()>>>>,
+    cleaned: Rc<tokio::sync::Notify>,
+    on_start: Rc<dyn Fn()>,
+}
+impl HeldStreamingCall {
+    async fn settle(&self) {
+        let reply = self.reply.borrow_mut().take().expect("one settlement");
+        self.entered.notify_one();
+        reply.await.expect("release streaming cleanup");
+        self.cleaned.notify_one();
+    }
+}
+#[async_trait(?Send)]
+impl StreamingCall for HeldStreamingCall {
+    fn push(&self, _: &str) {
+        (self.on_start)();
+    }
+    fn started(&self) -> bool {
+        true
+    }
+    async fn finish(&self, _: Option<JsonObject>) -> Result<ToolResult, RuntimeError> {
+        assert!(!self.abandoning);
+        self.settle().await;
+        Err(RuntimeError::plain("late streaming failure after cleanup"))
+    }
+    async fn abandon(&self) {
+        assert!(self.abandoning);
+        self.settle().await;
+    }
+}
+async fn cancelled_stream_cleanup(abandoning: bool) {
+    let (release, reply) = oneshot::channel();
+    let reply = Rc::new(RefCell::new(Some(reply)));
+    let entered = Rc::new(tokio::sync::Notify::new());
+    let cleaned = Rc::new(tokio::sync::Notify::new());
+    let started = entered.clone();
+    let settled = cleaned.clone();
+    let plan = Rc::new(FnTool {
+        name: "plan".into(),
+        description: "streamed cleanup fixture".into(),
+        input_schema: object(json!({"type":"object"})),
+        execute: Rc::new(|_, _| Box::pin(async { panic!("a streaming call must not execute twice") })),
+        stream: Some(Rc::new(move |_, on_start| {
+            Box::new(HeldStreamingCall { abandoning, entered: started.clone(), reply: reply.clone(), cleaned: settled.clone(), on_start })
+        })),
+    });
+    let h = Rc::new(harness(
+        move |_, _| {
+            let mut parts = plan_parts(true);
+            parts.extend(if abandoning {
+                vec![StreamPart::Error { error: overloaded() }]
+            } else {
+                vec![call("plan", PLAN_INPUT), tool_calls()]
+            });
+            Scripted::Parts(parts)
+        },
+        Options { tools: vec![plan], ..Default::default() },
+    ));
+    let (events, emit) = collect();
+    let controller = Controller::new();
+    let active = h.clone();
+    let run_signal = controller.signal.clone();
+    let running = spawn_local(async move { active.kernel.run("plan", run_signal, emit).await });
+    tokio::time::timeout(Duration::from_secs(1), entered.notified()).await.unwrap();
+    controller.abort();
+    let expected_events = types(&events.borrow());
+    if abandoning {
+        assert!(!running.is_finished(), "source waits for abandon cleanup already in progress");
+        release.send(()).expect("abandon retains its cleanup");
+        let result = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap().unwrap().unwrap();
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+        h.kernel.close().await;
+    } else {
+        let result = tokio::time::timeout(Duration::from_secs(1), running).await.unwrap().unwrap().unwrap();
+        assert_eq!(result.stop_reason, StopReason::Cancelled);
+        tokio::time::timeout(Duration::from_secs(1), h.kernel.close()).await.unwrap();
+        assert!(h.messages().is_empty());
+        drop(h);
+        assert!(release.send(()).is_ok(), "cancelled streamed finish lost its cleanup and owner");
+    }
+    tokio::time::timeout(Duration::from_secs(1), cleaned.notified()).await.unwrap();
+    assert_eq!(types(&events.borrow()), expected_events, "late streaming settlement must not reach the UI");
+}
+#[tokio::test]
+async fn cancelled_streamed_finish_keeps_cleanup_alive_and_ignores_late_failure() {
+    local(cancelled_stream_cleanup(false)).await;
+}
+#[tokio::test]
+async fn cancellation_during_streamed_abandon_preserves_source_cleanup_wait() {
+    local(cancelled_stream_cleanup(true)).await;
 }

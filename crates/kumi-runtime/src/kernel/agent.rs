@@ -795,10 +795,12 @@ impl Turn {
                     Outcome { text: "Tool arguments must be a JSON object.".to_string(), is_error: true, images: Vec::new() }
                 }
                 Some(tool) => {
-                    let work = async {
-                        match &streamed {
-                            Some(entry) => entry.call.finish(input.clone()).await,
-                            None => tool.execute(input.clone().unwrap_or_default(), self.abort.signal()).await,
+                    let input = input.clone();
+                    let signal = self.abort.signal();
+                    let work = async move {
+                        match streamed {
+                            Some(entry) => entry.call.finish(input).await,
+                            None => tool.execute(input.unwrap_or_default(), signal).await,
                         }
                     };
                     match until_aborted(work, &self.abort).await {
@@ -1191,14 +1193,26 @@ pub fn without_images(messages: &[Message]) -> Vec<Message> {
     [cleared[..first].to_vec(), without_reasoning(&cleared[first..])].concat()
 }
 
-/// Resolve with the work, or reject as soon as the signal aborts; a late settlement is ignored.
-async fn until_aborted<T>(work: impl Future<Output = Result<T, RuntimeError>>, signal: &Abort) -> Result<T, RuntimeError> {
-    if signal.is_cancelled() {
-        return Err(RuntimeError::Aborted);
+/// Stop waiting on abort without dropping the admitted execution: sent mutations still record
+/// their outcome, and tools still run cleanup. Like the source Promise, it owns its dependencies
+/// independently of the turn; late results never become kernel events or conversation history.
+async fn until_aborted<T: 'static>(
+    work: impl Future<Output = Result<T, RuntimeError>> + 'static,
+    signal: &Abort,
+) -> Result<T, RuntimeError> {
+    // JS calls execute/finish before untilAborted sees the signal, even if tool-start cancelled it.
+    let mut work = Box::pin(work);
+    if let std::task::Poll::Ready(result) = futures::poll!(work.as_mut()) {
+        return if signal.is_cancelled() { Err(RuntimeError::Aborted) } else { result };
     }
+    // Dropping a JoinHandle detaches the task; it does not abort its future.
+    let work = tokio::task::spawn_local(work);
     tokio::select! {
         biased;
         _ = signal.cancelled() => Err(RuntimeError::Aborted),
-        result = work => result,
+        result = work => match result {
+            Ok(result) => result,
+            Err(error) => std::panic::resume_unwind(error.into_panic()),
+        },
     }
 }
