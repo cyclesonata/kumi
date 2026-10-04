@@ -25,7 +25,7 @@ use kumi_runtime::{
     system::{self, Env, SystemProgram},
     KUMI, KUMI_VERSION,
 };
-pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, write_launcher};
+pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, only_the_host_differs, write_launcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};

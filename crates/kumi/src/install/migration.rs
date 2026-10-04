@@ -176,21 +176,16 @@ pub async fn finish_legacy_transition(io: &InstalledIo) {
     if server.version.as_deref().is_none_or(|version| version != bundled && !newer_version(&bundled, version)) {
         return;
     }
-    // The Remote Script this Kumi brings, against the one Live loads. Byte for byte the same (1.7.5's
-    // 1.0.74 for this release's), only the host and its receipt change: Live may stay open, and the
-    // switch is quiet. Otherwise the new Remote Script needs Live closed.
-    let scripts = server
-        .package_root()
-        .and_then(|package| crate::bridge_setup::owner_paths(&config, &package, &home))
-        .map_or_else(|| crate::config::remote_scripts_dir(&io.env), |(_, _, scripts)| scripts);
-    let unchanged = crate::bridge_setup::remote_script_unchanged(&join(&app, "bridge/package"), &scripts);
-    // Live has the existing Remote Script loaded: wait, quietly (the session says how to switch). A
-    // connect is instant; asking the system about Live is not (Windows).
-    if !unchanged
-        && (crate::bridge_setup::remote_script_answers(&config).await || live_open(io, io.run.clone().unwrap_or_else(default_run)).await)
-    {
+    let unchanged = remote_script_unchanged(&io.env, &app, &config, &server);
+    // Live has the existing Remote Script loaded: wait, quietly; the folder Live loaded is never moved
+    // under it. A connect is instant; asking the system about Live is not (Windows). With the same
+    // Remote Script nothing is missing meanwhile (Kumi runs its own native host), so the session
+    // doesn't mention it either.
+    if crate::bridge_setup::remote_script_answers(&config).await || live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
         return;
     }
+    // Byte for byte the same Remote Script (1.7.5's 1.0.74 for this release's): only the host and its
+    // receipt change, so the switch is quiet, failing included (a later start tries again).
     let said = Rc::new(Said::default());
     let mut setup = crate::bridge_setup::BridgeSetupIo::new(if unchanged { said.clone() } else { io.out.clone() }, io.env.clone());
     setup.input = io.input.clone();
@@ -200,27 +195,38 @@ pub async fn finish_legacy_transition(io: &InstalledIo) {
     setup.wait_ms = Some(0);
     setup.run = io.run.clone();
     setup.live_running = io.live_running.clone();
-    setup.live_may_stay_open = unchanged;
-    let because = || said.last().map(|line| format!(" ({line})")).unwrap_or_default();
     match crate::bridge_setup::setup_bridge(setup).await {
         Ok(0) => {}
-        Ok(_) => {
-            io.out.write(&format!("Kumi can still open{}. To finish switching the bridge, close Live and run: kumi bridge\n", because()))
-        }
+        _ if unchanged => {}
+        Ok(_) => io.out.write("Kumi can still open. To finish switching the bridge, close Live and run: kumi bridge\n"),
         Err(reason) => io.out.write(&format!(
             "Kumi can still open; the bridge couldn't switch ({reason}). To finish switching it, close Live and run: kumi bridge\n"
         )),
     }
 }
 
+/// Whether the Remote Script installed for a JavaScript bridge is, byte for byte, the one the app at
+/// `app` brings: then switching changes only the host, which native Kumi already runs.
+fn remote_script_unchanged(env: &Env, app: &str, config: &str, server: &crate::doctor::BridgeServer) -> bool {
+    let scripts = server
+        .package_root()
+        .and_then(|package| crate::bridge_setup::owner_paths(config, &package, &kumi_home(env)))
+        .map_or_else(|| crate::config::remote_scripts_dir(env), |(_, _, scripts)| scripts);
+    crate::bridge_setup::remote_script_unchanged(&join(app, "bridge/package"), &scripts)
+}
+
+/// Whether a pending switch from a JavaScript bridge would change only its host (the installed Remote
+/// Script is the app's own); the session then has nothing to ask of the producer.
+pub fn only_the_host_differs(env: &Env) -> bool {
+    let app = join(&kumi_home(env), "app");
+    let Some(config) = find_bridge_config(env) else { return false };
+    let Some(server) = read_bridge_server(&config).ok().filter(|s| !s.native()) else { return false };
+    remote_script_unchanged(env, &app, &config, &server)
+}
+
 /// What a quiet bridge switch said, kept for when it fails.
 #[derive(Default)]
 struct Said(std::cell::RefCell<String>);
-impl Said {
-    fn last(&self) -> Option<String> {
-        self.0.borrow().lines().map(str::trim).filter(|line| !line.is_empty()).last().map(str::to_string)
-    }
-}
 impl crate::tui::tty::TtyOutput for Said {
     fn is_tty(&self) -> bool {
         false

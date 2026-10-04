@@ -296,7 +296,12 @@ pub(super) async fn run_session(
             }
         })
     };
-    let stale = bridge_config.as_ref().and_then(|_| update::older_bridge(&io.env, bundled.as_deref()));
+    // A switch from a JavaScript bridge with the same Remote Script changes only the host, which Kumi
+    // already runs natively: nothing to ask of the producer (a start with Live closed finishes it).
+    let stale = bridge_config
+        .as_ref()
+        .and_then(|_| update::older_bridge(&io.env, bundled.as_deref()))
+        .filter(|stale| !(stale.runtime_migration && crate::install::only_the_host_differs(&io.env)));
     let notice = if bridge_missing {
         Some(format!("The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: {} bridge",io.command()))
     } else {

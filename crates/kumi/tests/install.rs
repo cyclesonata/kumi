@@ -602,10 +602,10 @@ async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() 
     assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
 }
 #[tokio::test]
-async fn startup_switch_with_the_same_remote_script_runs_quietly_with_live_open() {
+async fn startup_switch_with_the_same_remote_script_is_quiet_and_never_moves_a_loaded_one() {
     let dir = tempfile::tempdir().unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let (env, _) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
+    let (env, config) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
     // The app's prepared bridge, whose Remote Script is byte for byte the one Live has loaded.
     let prepared = dir.path().join("home/app/bridge");
     let artifact = b"native bridge artifact";
@@ -619,24 +619,37 @@ async fn startup_switch_with_the_same_remote_script_runs_quietly_with_live_open(
         put(dir.path().join("Remote Scripts/AbletonMcpBridge").join(name), text);
     }
     put(dir.path().join("Remote Scripts/AbletonMcpBridge/manifest.json"), "{}");
-    let calls = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
-    let seen = calls.clone();
-    let (mut installed, out) = io(&env);
-    installed.live_running = Some(Rc::new(|| async { panic!("an unchanged Remote Script doesn't need Live closed") }.boxed_local()));
-    installed.run = Some(Rc::new(move |_, args, _| {
-        let apply = args.iter().any(|a| a == "--apply");
-        seen.borrow_mut().push(args);
-        async move { Ran { code: 0, stdout: json!({"state": if apply { "completed" } else { "planned" }}).to_string(), stderr: String::new() } }.boxed_local()
-    }));
-    finish_legacy_transition(&installed).await;
-    assert_eq!(*out.0.borrow(), "", "the switch is quiet");
-    let calls = calls.borrow();
-    assert_eq!(calls.iter().map(|args| args[..2].join(" ")).collect::<Vec<_>>(), ["lifecycle upgrade", "lifecycle upgrade"]);
-    assert!(calls[1].contains(&"--confirm-live-stopped".to_string()));
-    // A different Remote Script still waits for Live to close.
-    put(dir.path().join("Remote Scripts/AbletonMcpBridge/ableton_mcp_remote_script.py"), "BRIDGE = '1.0.73'\n");
-    let (mut waiting, out) = io(&env);
-    waiting.run = Some(Rc::new(|command, _, _| async move { panic!("nothing runs while Live is open: {command}") }.boxed_local()));
-    finish_legacy_transition(&waiting).await;
+    assert!(only_the_host_differs(&env), "the session has nothing to ask");
+    // Live has it loaded (the port answers): its folder isn't touched, and nothing is said.
+    let (mut open, out) = io(&env);
+    open.live_running = Some(Rc::new(|| async { panic!("the port already says Live has it loaded") }.boxed_local()));
+    open.run = Some(Rc::new(|command, _, _| async move { panic!("nothing runs while Live has it loaded: {command}") }.boxed_local()));
+    finish_legacy_transition(&open).await;
     assert_eq!(*out.0.borrow(), "");
+    assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
+    // Live closed: the switch runs, quietly, and a failure is quiet too (a later start tries again).
+    drop(listener);
+    for code in [0, 1] {
+        let calls = Rc::new(RefCell::new(Vec::<Vec<String>>::new()));
+        let seen = calls.clone();
+        let (mut closed, out) = io(&env);
+        closed.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+        closed.run = Some(Rc::new(move |_, args, _| {
+            let apply = args.iter().any(|a| a == "--apply");
+            seen.borrow_mut().push(args);
+            let answer = if code == 0 {
+                json!({"state": if apply { "completed" } else { "planned" }})
+            } else {
+                json!({"version":"error","reason":"locked"})
+            };
+            async move { Ran { code, stdout: answer.to_string(), stderr: String::new() } }.boxed_local()
+        }));
+        finish_legacy_transition(&closed).await;
+        assert_eq!(*out.0.borrow(), "", "code {code}");
+        assert_eq!(calls.borrow()[0][..2].join(" "), "lifecycle upgrade");
+        assert_eq!(calls.borrow().len(), if code == 0 { 2 } else { 1 });
+    }
+    // A different Remote Script: the session says how to switch again.
+    put(dir.path().join("Remote Scripts/AbletonMcpBridge/ableton_mcp_remote_script.py"), "BRIDGE = '1.0.73'\n");
+    assert!(!only_the_host_differs(&env));
 }

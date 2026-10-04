@@ -187,9 +187,6 @@ pub struct BridgeSetupIo {
     pub bridge_dir: Option<String>,
     pub home: Option<String>,
     pub prepared: Option<String>,
-    /// The Remote Script Live has loaded is byte for byte the one this install writes, so the
-    /// switch may run with Live open (only the host and its receipt change).
-    pub live_may_stay_open: bool,
 }
 impl BridgeSetupIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
@@ -208,7 +205,6 @@ impl BridgeSetupIo {
             bridge_dir: None,
             home: None,
             prepared: None,
-            live_may_stay_open: false,
         }
     }
 }
@@ -510,7 +506,7 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     } else {
         format!("Kumi will install the Ableton bridge {bundled}: the Remote Script Live loads, and the local server Kumi talks to.")
     });
-    if !io.live_may_stay_open && live_open(&io, run.clone()).await {
+    if live_open(&io, run.clone()).await {
         say(&format!("Live is open. Save your work, quit Live, then run this again: {} bridge", *KUMI));
         return Ok(1);
     }
