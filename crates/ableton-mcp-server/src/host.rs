@@ -66,6 +66,8 @@ mod tempo;
 mod transport;
 mod tuning;
 mod ui;
+mod track_view;
+mod track_properties;
 mod willington;
 
 use crate::{
