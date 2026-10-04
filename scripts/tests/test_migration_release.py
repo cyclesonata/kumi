@@ -25,18 +25,18 @@ class MigrationRelease(unittest.TestCase):
         arch = {"arm64": "aarch64", "aarch64": "aarch64", "AMD64": "x86_64", "x86_64": "x86_64"}[platform.machine()]
         system = {"Darwin": "apple-darwin", "Linux": "unknown-linux-gnu", "Windows": "pc-windows-msvc"}[platform.system()]
         self.target = f"{arch}-{system}"
-        self.node = subprocess.check_output(["node", "-p", "process.versions.node"], text=True).strip()
+        self.node = subprocess.check_output(["node", "-p", "process.versions.node"], text=True, encoding="utf-8").strip()
         stage = self.root / "stage"
         stage.mkdir()
         self.binary = "kumi.exe" if os.name == "nt" else "kumi"
         source = self.root / "fixture.rs"
-        source.write_text('fn main() { let args: Vec<_> = std::env::args().skip(1).collect(); if args == ["--version"] {println!("Kumi 99.0.0")} else {println!("native fixture: {}", args.join("|"));} }')
+        source.write_text('fn main() { let args: Vec<_> = std::env::args().skip(1).collect(); if args == ["--version"] {println!("Kumi 99.0.0")} else {println!("native fixture: {}", args.join("|"));} }', encoding="utf-8")
         subprocess.run(["rustc", str(source), "-C", "debuginfo=0", "-o", str(stage / self.binary)], check=True)
-        (stage / "package.json").write_text(json.dumps({"version":"99.0.0", "bridge":"1.0.73", "runtime":"rust-native"}))
+        (stage / "package.json").write_text(json.dumps({"version":"99.0.0", "bridge":"1.0.73", "runtime":"rust-native"}), encoding="utf-8")
         bundle = f"kumi-{self.target}.tar.gz"
         digest = release.native.archive(stage, self.root / bundle, "", 0)
         self.manifest = self.root / "kumi-release.json"
-        self.manifest.write_text(json.dumps({"kumi":"99.0.0", "bridge":"1.0.73", "runtime":"rust-native", "target":self.target, "bundle":bundle, "sha256":digest}))
+        self.manifest.write_text(json.dumps({"kumi":"99.0.0", "bridge":"1.0.73", "runtime":"rust-native", "target":self.target, "bundle":bundle, "sha256":digest}), encoding="utf-8")
         self.out = self.root / "release"
         self.index = release.build([self.manifest], self.out, self.node)
 
@@ -52,15 +52,15 @@ class MigrationRelease(unittest.TestCase):
     def test_index_and_archive_are_bound_and_old_probe_materializes_native_once(self):
         self.assertEqual(release.native.digest(self.out / "kumi.tar.gz"), self.index["sha256"])
         self.assertEqual(self.index["node"], self.node)
-        self.assertEqual(json.loads((self.out / f"kumi-release-{self.target}.json").read_text()), self.index["targets"][self.target])
+        self.assertEqual(json.loads((self.out / f"kumi-release-{self.target}.json").read_text(encoding="utf-8")), self.index["targets"][self.target])
         app = self.root / "app.new"
         entry = self.unpack(app)
-        first = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True)
+        first = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(first.returncode, 0, first.stderr)
         self.assertEqual(first.stdout, "Kumi 99.0.0\n")
         self.assertTrue((app / self.binary).is_file())
         self.assertFalse((app / "native").exists())
-        again = subprocess.run(["node", str(entry), "argument with spaces", "--model=example"], capture_output=True, text=True)
+        again = subprocess.run(["node", str(entry), "argument with spaces", "--model=example"], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(again.stdout, "native fixture: argument with spaces|--model=example\n")
         self.assertEqual(again.returncode, 0, again.stderr)
 
@@ -69,11 +69,11 @@ class MigrationRelease(unittest.TestCase):
         entry = self.unpack(app)
         archive = next((app / "native").iterdir())
         archive.write_bytes(b"tampered")
-        result = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True)
+        result = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 1)
         self.assertIn("checksum", result.stderr)
         self.assertFalse((app / self.binary).exists())
-        original = json.loads(self.manifest.read_text())
+        original = json.loads(self.manifest.read_text(encoding="utf-8"))
         (self.manifest.parent / original["bundle"]).write_bytes(b"tampered")
         with self.assertRaisesRegex(ValueError, "checksum"):
             release.build([self.manifest], self.out, self.node)
@@ -91,10 +91,10 @@ class MigrationRelease(unittest.TestCase):
             env = dict(os.environ, KUMI_HOME=str(home), KUMI_RELEASES=f"http://127.0.0.1:{server.server_port}",
                        KUMI_NO_MODIFY_PATH="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin")
             for iteration in range(2):
-                run = subprocess.run(["sh", str(release.native.ROOT / "install.sh")], env=env, capture_output=True, text=True)
+                run = subprocess.run(["sh", str(release.native.ROOT / "install.sh")], env=env, capture_output=True, text=True, encoding="utf-8")
                 self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
                 self.assertFalse((home / "node").exists())
-                result = subprocess.run([str(home / "bin/kumi"), "--version"], env=env, capture_output=True, text=True)
+                result = subprocess.run([str(home / "bin/kumi"), "--version"], env=env, capture_output=True, text=True, encoding="utf-8")
                 self.assertEqual(result.stdout, "Kumi 99.0.0\n")
                 self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue((home / "app.previous" / self.binary).is_file())
@@ -107,16 +107,16 @@ class MigrationRelease(unittest.TestCase):
         tools = self.root / "tools"
         tools.mkdir()
         fixture = self.root / "cargo.rs"
-        fixture.write_text('''use std::{env,fs::OpenOptions,io::Write}; fn main() { let args: Vec<_> = env::args().skip(1).collect(); let mut file = OpenOptions::new().create(true).append(true).open(env::var("KUMI_SHIM_LOG").unwrap()).unwrap(); writeln!(file,"{}",args.join("|" )).unwrap(); if args.first().map(String::as_str)==Some("run") { println!("checkout native fixture"); assert!(env::var("KUMI_INSTALLED").is_err()); } }''')
+        fixture.write_text('''use std::{env,fs::OpenOptions,io::Write}; fn main() { let args: Vec<_> = env::args().skip(1).collect(); let mut file = OpenOptions::new().create(true).append(true).open(env::var("KUMI_SHIM_LOG").unwrap()).unwrap(); writeln!(file,"{}",args.join("|" )).unwrap(); if args.first().map(String::as_str)==Some("run") { println!("checkout native fixture"); assert!(env::var("KUMI_INSTALLED").is_err()); } }''', encoding="utf-8")
         cargo = tools / ("cargo.exe" if os.name == "nt" else "cargo")
         subprocess.run(["rustc", str(fixture), "-C", "debuginfo=0", "-o", str(cargo)], check=True)
         log = self.root / "cargo.log"
         env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], KUMI_SHIM_LOG=str(log), KUMI_INSTALLED="1")
         env.pop("KUMI_REFERENCE_RUNTIME", None)
-        result = subprocess.run(["node", str(release.native.ROOT / "scripts/native-kumi.mjs"), "--model", "a model with spaces"], env=env, cwd=self.root, capture_output=True, text=True)
+        result = subprocess.run(["node", str(release.native.ROOT / "scripts/native-kumi.mjs"), "--model", "a model with spaces"], env=env, cwd=self.root, capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("checkout native fixture", result.stdout)
-        self.assertEqual(log.read_text().splitlines(), ["--version", "build|--quiet|--release|--locked|--workspace|--bins", "run|--quiet|--release|--locked|-p|kumi|--|--model|a model with spaces"])
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["--version", "build|--quiet|--release|--locked|--workspace|--bins", "run|--quiet|--release|--locked|-p|kumi|--|--model|a model with spaces"])
 
     def test_reference_switch_is_confined_to_npm_shim_and_skips_native_acquisition(self):
         checkout = self.root / "reference checkout"
@@ -124,8 +124,8 @@ class MigrationRelease(unittest.TestCase):
         shutil.copyfile(release.native.ROOT / "scripts/native-kumi.mjs", checkout / "scripts/native-kumi.mjs")
         entry = checkout / "apps/kumi/bin/kumi.mjs"
         entry.parent.mkdir(parents=True)
-        entry.write_text("console.log('reference fixture: ' + process.argv.slice(2).join('|'))")
-        result = subprocess.run(["node", str(checkout / "scripts/native-kumi.mjs"), "--help"], env=dict(os.environ, KUMI_REFERENCE_RUNTIME="1"), capture_output=True, text=True)
+        entry.write_text("console.log('reference fixture: ' + process.argv.slice(2).join('|'))", encoding="utf-8")
+        result = subprocess.run(["node", str(checkout / "scripts/native-kumi.mjs"), "--help"], env=dict(os.environ, KUMI_REFERENCE_RUNTIME="1"), capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reference fixture: --help\n")
 
@@ -173,15 +173,15 @@ class MigrationRelease(unittest.TestCase):
         try:
             home = self.root / "npm-only home"
             home.mkdir()
-            (home / "auth.json").write_text('{"version":1,"credentials":{"fixture":"unchanged"}}')
+            (home / "auth.json").write_text('{"version":1,"credentials":{"fixture":"unchanged"}}', encoding="utf-8")
             env = dict(os.environ, KUMI_HOME=str(home), KUMI_RELEASES=f"http://127.0.0.1:{server.server_port}",
                        KUMI_NO_MODIFY_PATH="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin")
             env.pop("KUMI_REFERENCE_RUNTIME", None)
-            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "--setup"], env=env, capture_output=True, text=True)
+            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "--setup"], env=env, capture_output=True, text=True, encoding="utf-8")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("switching this npm installation to the native release", result.stdout)
-            self.assertEqual((home / "auth.json").read_text(), '{"version":1,"credentials":{"fixture":"unchanged"}}')
-            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "argument with spaces"], env=env, capture_output=True, text=True)
+            self.assertEqual((home / "auth.json").read_text(encoding="utf-8"), '{"version":1,"credentials":{"fixture":"unchanged"}}')
+            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "argument with spaces"], env=env, capture_output=True, text=True, encoding="utf-8")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "native fixture: argument with spaces\n")
         finally:
@@ -203,7 +203,7 @@ class MigrationRelease(unittest.TestCase):
             tools = home / "test-tools"
             tools.mkdir(parents=True, exist_ok=True)
             pgrep = tools / "pgrep"
-            pgrep.write_text('#!/bin/sh\n[ "$#" = 2 ] && [ "$1" = -x ] && [ "$2" = Live ] || exit 2\nexit 1\n')
+            pgrep.write_text('#!/bin/sh\n[ "$#" = 2 ] && [ "$1" = -x ] && [ "$2" = Live ] || exit 2\nexit 1\n', encoding="utf-8")
             pgrep.chmod(0o755)
             env["PATH"] = str(tools) + os.pathsep + env["PATH"]
         return env
@@ -225,7 +225,7 @@ class MigrationRelease(unittest.TestCase):
         for name, text in markers.items():
             file = home / name
             file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text(text)
+            file.write_text(text, encoding="utf-8")
         (home / "auth.json").chmod(0o600)
         return {name:(home / name).read_bytes() for name in markers}
 
@@ -234,7 +234,7 @@ class MigrationRelease(unittest.TestCase):
             self.assertEqual((home / name).read_bytes(), contents, name)
 
     def launched(self, command, env, *args, input=None):
-        result = subprocess.run([str(command), *args], env=env, input=input, capture_output=True, text=True, timeout=90)
+        result = subprocess.run([str(command), *args], env=env, input=input, capture_output=True, text=True, encoding="utf-8", timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
@@ -248,8 +248,8 @@ class MigrationRelease(unittest.TestCase):
         shutil.copyfile(reference_root / "apps/kumi/bin/kumi.mjs", old_entry)
         old_cli = home / "app/apps/kumi/dist/src/cli.js"
         old_cli.parent.mkdir(parents=True)
-        old_cli.write_text("await import(" + json.dumps((reference_root / "apps/kumi/dist/src/cli.js").as_uri()) + ");\n")
-        (home / "app/package.json").write_text('{"version":"1.7.4","type":"module"}')
+        old_cli.write_text("await import(" + json.dumps((reference_root / "apps/kumi/dist/src/cli.js").as_uri()) + ");\n", encoding="utf-8")
+        (home / "app/package.json").write_text('{"version":"1.7.4","type":"module"}', encoding="utf-8")
         original_entry = old_entry.read_bytes()
         node = home / "node" / ("node.exe" if os.name == "nt" else "bin/node")
         node.parent.mkdir(parents=True)
@@ -265,7 +265,7 @@ class MigrationRelease(unittest.TestCase):
         legacy_root.mkdir()
         installed = subprocess.run(["node", str(release.native.ROOT / "crates/ableton-mcp-server/tests/support/legacy_install.mjs"),
                                     json.dumps({"root":str(legacy_root),"version":"1.0.73","custom":False,"clean":True})],
-                                   cwd=reference_root, capture_output=True, text=True, timeout=60)
+                                   cwd=reference_root, capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         old = json.loads(installed.stdout)["receipt"]
         env = self.production_environment(home, Path(old["remoteScriptsDirectory"]))
@@ -275,7 +275,7 @@ class MigrationRelease(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
     def test_actual_built_bundle_launches_and_reads_existing_data(self):
         artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
-        manifest = json.loads((artifacts / "kumi-release.json").read_text())
+        manifest = json.loads((artifacts / "kumi-release.json").read_text(encoding="utf-8"))
         target = manifest["targets"][self.target]
         home = self.root / "native existing data"
         app = home / "app"
@@ -302,7 +302,7 @@ class MigrationRelease(unittest.TestCase):
             helper = app / "packages/runtime/hands" / ("kumi-hands-" + release.native.digest(source)[:12])
             self.assertTrue(helper.is_file(), "the signed helper retains its legacy installed path")
             subprocess.run(["codesign", "--verify", "--strict", str(helper)], check=True, capture_output=True)
-            self.assertEqual(set(subprocess.check_output(["lipo", "-archs", str(helper)], text=True).split()), {"arm64", "x86_64"})
+            self.assertEqual(set(subprocess.check_output(["lipo", "-archs", str(helper)], text=True, encoding="utf-8").split()), {"arm64", "x86_64"})
             replies = [json.loads(line) for line in self.launched(helper, env, input=
                 '{"id":1,"op":"version"}\n{"id":2,"op":"trusted","prompt":false}\n').splitlines()]
             self.assertEqual([(reply["id"], reply["ok"]) for reply in replies], [(1, True), (2, True)])
@@ -333,7 +333,7 @@ class MigrationRelease(unittest.TestCase):
     def test_actual_built_bundle_migrates_same_version_bridge_and_restores_legacy_launch(self):
         # Exercise bridge/launcher handoff independently of the separate newer-app updater gate.
         artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
-        manifest = json.loads((artifacts / "kumi-release.json").read_text())
+        manifest = json.loads((artifacts / "kumi-release.json").read_text(encoding="utf-8"))
         home = self.root / "bridge transition home"
         markers, old, original_entry, env = self.legacy_installation(home)
         config, secret = Path(old["configPath"]), Path(old["secretPath"])
@@ -349,7 +349,7 @@ class MigrationRelease(unittest.TestCase):
         launcher = home / "bin" / ("kumi.cmd" if os.name == "nt" else "kumi")
         # No new flags or sign-in: the existing bridge reference leads to its original receipt.
         opened = self.launched(launcher, env, input="/quit\n")
-        current = json.loads(receipt.read_text())
+        current = json.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual(current["packageVersion"], old["packageVersion"])
         self.assertEqual(current["config"]["bridge"], old["config"]["bridge"])
         self.assertEqual(current["config"]["server"]["args"], ["--config", str(config)], opened)
@@ -365,7 +365,7 @@ class MigrationRelease(unittest.TestCase):
         self.launched(launcher, env, "update", "--rollback")
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
         self.launched(launcher, env, input="/quit\n")
-        self.assertEqual(json.loads(receipt.read_text())["config"]["server"]["args"], ["--config", str(config)])
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["config"]["server"]["args"], ["--config", str(config)])
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
 
@@ -374,7 +374,7 @@ class MigrationRelease(unittest.TestCase):
         reference_root = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT))
         reference = reference_root / "apps/kumi/dist/src/install.js"
         artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
-        manifest = json.loads((artifacts / "kumi-release.json").read_text())
+        manifest = json.loads((artifacts / "kumi-release.json").read_text(encoding="utf-8"))
         # A current 1.7.4 updater ignores a same-version application release. Keep this gate strict.
         self.assertGreater(tuple(map(int, manifest["kumi"].split("-")[0].split("."))), (1, 7, 4),
                            "the native transition must publish a newer application version than legacy 1.7.4")
@@ -393,7 +393,7 @@ const release = JSON.parse(readFileSync(process.argv[3] + '/kumi-release.json'))
 const env = {...process.env, KUMI_RELEASES:'https://fixture.invalid'};
 const io = {env, out:process.stdout, fetcher: async url => new Response(url.endsWith('.json') ? JSON.stringify(release) : readFileSync(process.argv[3] + '/' + release.bundle))};
 if (await updateInstalled(io) !== 0) throw new Error('old updater failed');
-''')
+''', encoding="utf-8")
         self.launched(node, env, str(test), str(reference), str(artifacts))
         self.assertTrue((home / "app" / self.binary).is_file())
         self.assertEqual(config.read_bytes(), config_before, "the old version-only updater leaves the same-version bridge for native startup")
@@ -404,7 +404,7 @@ if (await updateInstalled(io) !== 0) throw new Error('old updater failed');
         self.check_existing_data(home, markers)
         # Opening as usual performs the receipt-bound bridge handoff before the conversation starts.
         self.launched(launcher, env, "--bridge-config", str(config), input="/quit\n")
-        current = json.loads(receipt.read_text())
+        current = json.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual(current["packageVersion"], old["packageVersion"])
         self.assertEqual(current["config"]["bridge"], old["config"]["bridge"])
         self.assertEqual(current["config"]["server"]["args"], ["--config", str(config)])
@@ -424,7 +424,7 @@ if (await updateInstalled(io) !== 0) throw new Error('old updater failed');
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
         self.assertTrue((home / "app" / self.binary).is_file())
         self.launched(launcher, env, "--bridge-config", str(config), input="/quit\n")
-        self.assertEqual(json.loads(receipt.read_text())["config"]["server"]["args"], ["--config", str(config)])
+        self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["config"]["server"]["args"], ["--config", str(config)])
         self.assertEqual(secret.read_bytes(), secret_before)
         self.check_existing_data(home, markers)
 
@@ -435,13 +435,13 @@ if (await updateInstalled(io) !== 0) throw new Error('old updater failed');
         home = self.root / "home"
         entry = home / "app/apps/kumi/bin/kumi.mjs"
         entry.parent.mkdir(parents=True)
-        entry.write_text("console.log('legacy Kumi')")
-        (home / "app/package.json").write_text('{"version":"1.7.4"}')
+        entry.write_text("console.log('legacy Kumi')", encoding="utf-8")
+        (home / "app/package.json").write_text('{"version":"1.7.4"}', encoding="utf-8")
         markers = ["settings.json", "auth.json", "history.json", "library/catalog.json", "conversations/session.json", "memory/producer.json"]
         for name in markers:
             file = home / name
             file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text(f"unchanged {name}")
+            file.write_text(f"unchanged {name}", encoding="utf-8")
         test = self.root / "old-updater.mjs"
         test.write_text('''import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
@@ -452,14 +452,14 @@ const io = {env, out:process.stdout, fetcher: async url => new Response(url.ends
 if (await updateInstalled(io) !== 0) throw new Error('old update failed');
 if (await rollbackInstalled(io) !== 0) throw new Error('old rollback failed');
 if (await rollbackInstalled(io) !== 0) throw new Error('old return-to-native failed');
-''')
-        completed = subprocess.run(["node", str(test), str(reference), str(self.out), str(home)], capture_output=True, text=True)
+''', encoding="utf-8")
+        completed = subprocess.run(["node", str(test), str(reference), str(self.out), str(home)], capture_output=True, text=True, encoding="utf-8")
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("Kumi is now 99.0.0", completed.stdout)
         self.assertTrue((home / "app" / self.binary).exists())
-        self.assertEqual((home / "app.previous/apps/kumi/bin/kumi.mjs").read_text(), "console.log('legacy Kumi')")
+        self.assertEqual((home / "app.previous/apps/kumi/bin/kumi.mjs").read_text(encoding="utf-8"), "console.log('legacy Kumi')")
         for name in markers:
-            self.assertEqual((home / name).read_text(), f"unchanged {name}")
+            self.assertEqual((home / name).read_text(encoding="utf-8"), f"unchanged {name}")
 
 if __name__ == '__main__':
     unittest.main()
