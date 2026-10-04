@@ -51,6 +51,7 @@ mod record_operation;
 mod recording;
 mod realtime;
 mod recovery;
+mod racks;
 mod rename;
 mod resources;
 pub mod retention;
