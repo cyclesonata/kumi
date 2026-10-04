@@ -333,7 +333,9 @@ pub struct ProgramOptions {
     pub free: Option<Free>,
 }
 
-static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| reqwest::Client::builder().build().expect("an HTTP client"));
+// GitHub's API answers 403 to a request without a User-Agent (Node's fetch sent "node").
+static CLIENT: LazyLock<reqwest::Client> =
+    LazyLock::new(|| reqwest::Client::builder().user_agent(format!("kumi/{}", crate::KUMI_VERSION)).build().expect("an HTTP client"));
 
 fn last_segment(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or(url)
@@ -1118,4 +1120,25 @@ async fn published_model(repo: &str, name: &str, options: &ProgramOptions) -> Re
     remove_file_force(&temporary).await;
     result?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn downloads_say_who_is_asking() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/repos/BtbN/FFmpeg-Builds/releases/latest", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 4096];
+            let read = socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await.unwrap();
+            String::from_utf8_lossy(&request[..read]).to_lowercase()
+        });
+        super::CLIENT.get(&url).send().await.unwrap();
+        let request = server.await.unwrap();
+        assert!(request.contains(&format!("user-agent: kumi/{}\r\n", crate::KUMI_VERSION)), "{request}");
+    }
 }
