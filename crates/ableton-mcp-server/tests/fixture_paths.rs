@@ -16,6 +16,8 @@ fn fixture_paths_preserve_json_escapes_and_normalize_only_known_paths() {
         assert_eq!(map_strings(&expanded, &|text| normalize_root(text, root, "$root")), fixture);
     }
     assert_eq!(normalize_root(r"C:\fixture\Nested\file.wav", r"C:\fixture", "$root"), "$root/Nested/file.wav");
+    assert_eq!(normalize_root(r"\\?\C:\fixture\Nested\file.wav", r"C:\fixture", "$root"), "$root/Nested/file.wav");
+    assert_eq!(normalize_root(r"\\?\UNC\server\share\fixture\file.wav", r"\\server\share\fixture", "$root"), "$root/file.wav");
     assert_eq!(
         normalize_root(r"literal \n, open 'C:\fixture\Nested\file.wav', keep \t", r"C:\fixture", "$root"),
         r"literal \n, open '$root/Nested/file.wav', keep \t"

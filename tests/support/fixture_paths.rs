@@ -42,7 +42,15 @@ pub fn normalize_root(text: &str, root: &str, marker: &str) -> String {
     }
     let plain = without_verbatim(root);
     let windows = plain.contains('\\') || (plain.as_bytes().get(1) == Some(&b':') && plain.as_bytes()[0].is_ascii_alphabetic());
-    let mut output = text.replace(root, marker);
+    let mut output = text.to_owned();
+    // A caller may use Node's plain root while a Rust result carries canonicalize's prefix.
+    if windows {
+        let backslashes = plain.replace('/', "\\");
+        let verbatim =
+            if let Some(unc) = backslashes.strip_prefix(r"\\") { format!(r"\\?\UNC\{unc}") } else { format!(r"\\?\{backslashes}") };
+        output = output.replace(&verbatim, marker);
+    }
+    output = output.replace(root, marker);
     if plain != root {
         output = output.replace(&plain, marker);
     }
