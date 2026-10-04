@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use ableton_mcp_server::{
     host::{McpHost, McpHostOptions, ToolCall},
     live::*,
@@ -159,17 +161,19 @@ async fn probe_host_matches_source_replies_dispatch_and_pagination() {
     }
 }
 fn replace(v: Value, root: &str, to: &str) -> Value {
-    match v {
-        Value::String(s) => json!(s.replace(root, to)),
-        Value::Array(a) => Value::Array(a.into_iter().map(|v| replace(v, root, to)).collect()),
-        Value::Object(o) => Value::Object(o.into_iter().map(|(k, v)| (k, replace(v, root, to))).collect()),
-        v => v,
-    }
+    fixture_paths::map_strings(&v, &|text| {
+        if to == "ROOT" {
+            fixture_paths::normalize_root(text, root, to)
+        } else {
+            text.replace(root, to)
+        }
+    })
 }
+
 #[tokio::test(flavor = "current_thread")]
 async fn library_host_matches_source_allowlists_wal_queries_and_coercion() {
     let root = tempfile::tempdir().unwrap();
-    let root = root.path().canonicalize().unwrap();
+    let root = fixture_paths::native_path(&root.path().canonicalize().unwrap());
     let db = root.join("files.db");
     std::fs::write(&db, library_fixtures::files_db()).unwrap();
     std::fs::write(root.join("plugins.db"), library_fixtures::plugins_db()).unwrap();

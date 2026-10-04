@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use kumi_common::{abort::Signal, js::string::locale_compare_numeric_base};
 use kumi_runtime::{integrations::ableton::samples::*, library::sources::join};
 use serde_json::Value;
@@ -55,7 +57,9 @@ async fn ranked_queries_skip_metadata_hidden_files_and_links_and_describe_only_r
         })
         .await
         .unwrap();
-        let value: Value = serde_json::from_str(&serde_json::to_string(&result).unwrap().replace(&root, "$ROOT")).unwrap();
+        let value = fixture_paths::map_strings(&serde_json::to_value(&result).unwrap(), &|text| {
+            fixture_paths::normalize_root(text, &root, "$ROOT")
+        });
         assert_eq!(value, case["value"], "{case}");
     }
     let random =

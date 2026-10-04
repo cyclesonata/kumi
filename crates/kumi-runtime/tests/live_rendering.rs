@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{
@@ -104,7 +106,9 @@ fn canonical(value: &Value) -> Value {
     }
 }
 fn normalized(value: &Value) -> String {
-    let mut text = stringify(&canonical(value)).replace(std::env::temp_dir().join("kumi-ears").join("connecti").to_str().unwrap(), "$EARS");
+    let root = std::env::temp_dir().join("kumi-ears").join("connecti");
+    let value = fixture_paths::map_strings(value, &|text| fixture_paths::normalize_root(text, root.to_str().unwrap(), "$EARS"));
+    let mut text = stringify(&canonical(&value));
     for (pattern, replace) in [
         (r"Kumi · render (\d+) [a-f0-9]{4}", "Kumi · render $1 <tag>"),
         (r"Kumi · Goal best [a-f0-9]{3}", "Kumi · Goal best <tag>"),
@@ -164,8 +168,8 @@ async fn replay() {
     for kind in ["square", "noise", "silence"] {
         wav(folder.path(), kind);
     }
-    let source = include_str!("support/rendering-oracle.json").replace("$AUDIO", folder.path().to_str().unwrap());
-    let fixture: Value = serde_json::from_str(&source).unwrap();
+    let source: Value = serde_json::from_str(include_str!("support/rendering-oracle.json")).unwrap();
+    let fixture = fixture_paths::map_strings(&source, &|text| text.replace("$AUDIO", folder.path().to_str().unwrap()));
     for (case_index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
         if std::env::var("KUMI_RENDERING_CASE").is_ok_and(|label| case["label"].as_str() != Some(&label)) {
             continue;

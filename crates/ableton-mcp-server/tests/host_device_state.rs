@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use ableton_mcp_server::{
     host::{device_state::*, helpers::canonical_mutation_identity, McpHost, McpHostOptions},
     live::*,
@@ -11,7 +13,7 @@ fn same(a: &Value, b: &Value, label: &str) {
     assert_eq!(canonical_mutation_identity(a).unwrap(), canonical_mutation_identity(b).unwrap(), "{label}");
 }
 fn expand(v: &Value, root: &Path) -> Value {
-    serde_json::from_str(&serde_json::to_string(v).unwrap().replace("$root", root.to_str().unwrap())).unwrap()
+    fixture_paths::map_strings(v, &|text| text.replace("$root", root.to_str().unwrap()))
 }
 fn clean(mut value: Value, root: &Path) -> Value {
     if let Some(text) = value["result"]["content"][0]["text"].as_str() {
@@ -25,7 +27,7 @@ fn clean(mut value: Value, root: &Path) -> Value {
             value["result"]["content"][0]["text"] = body;
         }
     }
-    serde_json::from_str(&serde_json::to_string(&value).unwrap().replace(root.to_str().unwrap(), "$root")).unwrap()
+    fixture_paths::map_strings(&value, &|text| fixture_paths::normalize_root(text, root.to_str().unwrap(), "$root"))
 }
 fn setup(root: &Path, file: &Value) {
     fs::write(root.join("saved.ableton-device-state.json"), serde_json::to_vec(file).unwrap()).unwrap();
@@ -51,7 +53,7 @@ async fn device_state_file_host_validation_and_recall_workflows_match_source() {
             let fixture = fixture();
             for (index, row) in fixture["rows"].as_array().unwrap().iter().enumerate() {
                 let temp = tempfile::tempdir().unwrap();
-                let root = fs::canonicalize(temp.path()).unwrap();
+                let root = fixture_paths::native_path(&fs::canonicalize(temp.path()).unwrap());
                 setup(&root, &fixture["file"]);
                 let sim = Rc::new(DeterministicLiveSimulator::new());
                 let mut status = serde_json::to_value(sim.status().unwrap()).unwrap();
@@ -73,7 +75,7 @@ async fn device_state_file_host_validation_and_recall_workflows_match_source() {
             }
             for row in fixture["workflows"].as_array().unwrap() {
                 let temp = tempfile::tempdir().unwrap();
-                let root = fs::canonicalize(temp.path()).unwrap();
+                let root = fixture_paths::native_path(&fs::canonicalize(temp.path()).unwrap());
                 setup(&root, &fixture["file"]);
                 let sim = Rc::new(DeterministicLiveSimulator::new());
                 sim.simulate_external_edit(

@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use ableton_mcp_server::{
     host::{McpHost, McpHostOptions, ToolCall},
     live::*,
@@ -150,7 +152,7 @@ fn substitute(value: &Value, root: &str) -> Value {
 async fn offline_project_host_source_artifacts_and_shared_profile_diff() {
     let f = fixture();
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = fixture_paths::native_path(&std::fs::canonicalize(dir.path()).unwrap());
     let path = root.join("Test.als");
     for (name, key) in [("Test.als", "raw"), ("Changed.als", "changedRaw")] {
         std::fs::write(root.join(name), base64::engine::general_purpose::STANDARD.decode(f[key].as_str().unwrap()).unwrap()).unwrap();
@@ -187,7 +189,7 @@ async fn live_export_cache_and_guarded_backup_lifecycle() {
     call(&host, "live_project_snapshot_export", json!({"limit":1,"cursor":cursor})).await;
     assert_eq!(adapter.calls.borrow().len(), calls + 1);
     let dir = tempfile::tempdir().unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = fixture_paths::native_path(&std::fs::canonicalize(dir.path()).unwrap());
     let path = root.join("Test.als");
     std::fs::write(&path, base64::engine::general_purpose::STANDARD.decode(f["raw"].as_str().unwrap()).unwrap()).unwrap();
     *adapter.path.borrow_mut() = Some(path.to_string_lossy().into_owned());
@@ -219,7 +221,7 @@ fn normalize_backup(value: &Value, root: &str, id: &str, key: &str) -> Value {
     }
     match value {
         Value::String(s) => {
-            let s = s.replace(root, "ROOT").replace(id, "backup_ID");
+            let s = fixture_paths::normalize_root(s, root, "ROOT").replace(id, "backup_ID");
             let s = if s.starts_with("ROOT/Test.backup-") && s.ends_with(".als") { "ROOT/BACKUP.als".into() } else { s };
             json!(s)
         }
@@ -237,7 +239,7 @@ async fn source_backup_complete_traces_preserve_cancellation_replay_uncertainty_
             continue;
         }
         let directory = tempfile::tempdir().unwrap();
-        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let root = fixture_paths::native_path(&std::fs::canonicalize(directory.path()).unwrap());
         let path = root.join("Test.als");
         std::fs::write(&path, base64::engine::general_purpose::STANDARD.decode(fixture["raw"].as_str().unwrap()).unwrap()).unwrap();
         let adapter = adapter(json!({}));

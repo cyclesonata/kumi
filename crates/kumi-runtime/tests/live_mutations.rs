@@ -1,3 +1,5 @@
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{
@@ -95,8 +97,11 @@ fn canonical(value: &Value) -> Value {
     }
 }
 fn normalized(value: &Value) -> String {
-    let text = stringify(&canonical(value)).replace(&kumi_runtime::library::sources::homedir(), "<home>");
-    let text = FIXTURE_ROOT.with(|root| text.replace(root.borrow().as_str(), "<fixture>"));
+    let home = kumi_runtime::library::sources::homedir();
+    let value = fixture_paths::map_strings(value, &|text| fixture_paths::normalize_root(text, &home, "<home>"));
+    let value = FIXTURE_ROOT
+        .with(|root| fixture_paths::map_strings(&value, &|text| fixture_paths::normalize_root(text, root.borrow().as_str(), "<fixture>")));
+    let text = stringify(&canonical(&value));
     let text = regex::Regex::new(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").unwrap().replace_all(&text, "<uuid>");
     regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&text, "<change>").into_owned()
 }
@@ -241,8 +246,7 @@ async fn replay() {
                 *connection.set.borrow_mut() = Some(set.into());
             }
             let work = async {
-                let input = serde_json::from_str::<Value>(&serde_json::to_string(&operation["input"]).unwrap().replace("<fixture>", &root))
-                    .unwrap()
+                let input = fixture_paths::map_strings(&operation["input"], &|text| text.replace("<fixture>", &root))
                     .as_object()
                     .cloned()
                     .unwrap_or_default();
