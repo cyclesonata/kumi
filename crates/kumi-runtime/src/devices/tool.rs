@@ -146,6 +146,7 @@ impl KernelTool for DeviceTool {
             options.mode(0o644);
             let mut out = options.open(&temporary).await.map_err(io_error)?;
             out.write_all(&encode_amxd(spec.kind(), &patcher)).await.map_err(io_error)?;
+            out.flush().await.map_err(io_error)?;
             drop(out);
             tokio::fs::rename(&temporary, &file).await.map_err(io_error)
         }

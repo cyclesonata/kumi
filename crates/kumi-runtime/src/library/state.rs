@@ -141,6 +141,7 @@ pub async fn acquire_lock(dir: &str) -> io::Result<Option<LibraryLock>> {
         match options.open(&file).await {
             Ok(mut handle) => {
                 handle.write_all(stringify(&json!({"pid":std::process::id(),"at":now_ms()})).as_bytes()).await?;
+                handle.flush().await?;
                 drop(handle);
                 return Ok(Some(LibraryLock { file }));
             }

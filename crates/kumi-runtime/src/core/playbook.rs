@@ -133,6 +133,7 @@ impl PlaybookStore for FilePlaybookStore {
                     json::file_text(&json!({"version":1,"lessons":&lessons[lessons.len().saturating_sub(MAX_LESSONS)..]})).as_bytes(),
                 )
                 .await?;
+            handle.flush().await?;
             drop(handle);
             tokio::fs::rename(&temporary, &self.file).await
         }

@@ -175,6 +175,7 @@ impl TechniqueStore for FileTechniqueStore {
             let mut file = options.open(&temporary).await?;
             let data = json!({"version":1,"techniques":&techniques[techniques.len().saturating_sub(MAX_TECHNIQUES)..]});
             file.write_all(json::file_text(&data).as_bytes()).await?;
+            file.flush().await?;
             drop(file);
             tokio::fs::rename(&temporary, &self.file).await
         }

@@ -126,6 +126,7 @@ impl MemoryStore for FileMemoryStore {
             handle
                 .write_all(json::file_text(&json!({"version": 1, "notes": &notes[notes.len().saturating_sub(MAX_NOTES)..]})).as_bytes())
                 .await?;
+            handle.flush().await?;
             drop(handle);
             tokio::fs::rename(&temporary, file).await
         }

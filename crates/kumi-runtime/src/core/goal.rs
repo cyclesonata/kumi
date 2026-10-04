@@ -188,6 +188,7 @@ impl GoalStore for FileGoalStore {
             let mut data = stringify(&serde_json::to_value(state).expect("goal serialization"));
             data.push('\n');
             file.write_all(data.as_bytes()).await?;
+            file.flush().await?;
             drop(file);
             tokio::fs::rename(&temporary, self.file(place)).await
         }

@@ -80,6 +80,7 @@ impl KernelTool for GapTool {
         options.mode(0o600);
         let mut file = options.open(&self.file).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
         file.write_all(format!("{}\n", json::stringify(&entry)).as_bytes()).await.map_err(|e| RuntimeError::plain(e.to_string()))?;
+        file.flush().await.map_err(|e| RuntimeError::plain(e.to_string()))?;
         drop(file);
         // Trimming is best effort: the entry is already logged either way.
         if tokio::fs::metadata(&self.file).await.is_ok_and(|m| m.len() > MAX_BYTES) {

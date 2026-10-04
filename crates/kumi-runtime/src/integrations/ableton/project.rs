@@ -65,6 +65,7 @@ async fn write_privately(folder: &Path, name: &str, text: &str) -> Result<(), Ru
         options.mode(0o600);
         let mut file = options.open(&temporary).await?;
         file.write_all(text.as_bytes()).await?;
+        file.flush().await?;
         drop(file);
         tokio::fs::rename(&temporary, folder.join(name)).await
     }
