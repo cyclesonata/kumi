@@ -312,7 +312,7 @@ class MigrationRelease(unittest.TestCase):
         legacy_root = home / "legacy bridge"
         legacy_root.mkdir()
         installed = subprocess.run(["node", str(release.native.ROOT / "crates/ableton-mcp-server/tests/support/legacy_install.mjs"),
-                                    json.dumps({"root":str(legacy_root),"version":"1.0.73","custom":False,"clean":True})],
+                                    json.dumps({"root":str(legacy_root),"version":"1.0.74","custom":False,"clean":True})],
                                    cwd=reference_root, capture_output=True, text=True, encoding="utf-8", timeout=60)
         self.assertEqual(installed.returncode, 0, installed.stderr)
         old = json.loads(installed.stdout)["receipt"]
