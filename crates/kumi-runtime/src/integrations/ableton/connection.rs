@@ -89,7 +89,10 @@ impl From<ObservationError> for ReadError {
 }
 impl From<RuntimeError> for ReadError {
     fn from(e: RuntimeError) -> Self {
-        Self::Other(e)
+        match e {
+            RuntimeError::Observation(message) => Self::Observation(ObservationError(message)),
+            e => Self::Other(e),
+        }
     }
 }
 impl From<kumi_common::abort::Aborted> for ReadError {

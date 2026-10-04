@@ -60,6 +60,8 @@ pub enum RuntimeError {
     Kumi(KumiError),
     /// `new Error(message)`: not in Kumi's own words, so apps don't show it as such.
     Plain(String),
+    /// A Live observation error, whose own message may be shown by integration tools.
+    Observation(String),
     /// The work was cancelled.
     Aborted,
 }
@@ -91,7 +93,7 @@ impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Kumi(error) => f.write_str(&error.message),
-            Self::Plain(message) => f.write_str(message),
+            Self::Plain(message) | Self::Observation(message) => f.write_str(message),
             Self::Aborted => f.write_str("This operation was aborted"),
         }
     }

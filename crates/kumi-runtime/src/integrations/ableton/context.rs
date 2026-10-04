@@ -17,7 +17,7 @@ pub static PARENTS: LazyLock<JsonObject> = LazyLock::new(|| serde_json::from_str
 pub struct ObservationError(pub String);
 impl From<ObservationError> for RuntimeError {
     fn from(error: ObservationError) -> Self {
-        RuntimeError::plain(error.0)
+        RuntimeError::Observation(error.0)
     }
 }
 fn error(message: &str) -> ObservationError {

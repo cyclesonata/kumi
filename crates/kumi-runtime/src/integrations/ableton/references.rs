@@ -60,6 +60,24 @@ fn ref_key(key: &str) -> bool {
     key == "ref" || key == "parent" || key.ends_with("Ref") || key.ends_with("Refs")
 }
 impl References {
+    /// Retired names never acquire a different object; counters continue across retirement.
+    pub fn clear_names(&mut self) {
+        self.short.clear();
+        self.long.clear();
+    }
+    pub fn unname(&mut self, reference: &str) {
+        if let Some(short) = self.short.shift_remove(reference) {
+            self.long.shift_remove(&short);
+        }
+    }
+    pub fn retire(&mut self, reference: &str) {
+        self.refs.shift_remove(reference);
+        self.known.shift_remove(reference);
+        self.unname(reference);
+    }
+    pub fn named_references(&self) -> Vec<String> {
+        self.short.keys().cloned().collect()
+    }
     pub fn invalidate(&mut self) {
         self.refs.clear();
         self.cursors.clear();
