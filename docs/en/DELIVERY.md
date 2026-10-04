@@ -99,7 +99,7 @@ root, artifact and hash, retaining the existing state/config/secret paths. A ver
 installation may migrate to a native package with the same bridge version. Other upgrades must
 increase the version. Keep the previous package for rollback. Run `uninstall` before deleting
 package directories. The lifecycle still accepts legacy Node release artifacts and receipts;
-those retain their original Node requirements.
+those require Node 22 or 24.
 
 ## Lifecycle CLI reference
 
