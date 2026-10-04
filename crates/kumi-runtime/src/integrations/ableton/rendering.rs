@@ -150,7 +150,9 @@ impl Rendering {
         let main = self.rows("main-track", json!({"fields":["name","mixer"]}), signal).await?.into_iter().next();
         let main = main.ok_or_else(|| observation("Live didn't say where Main is."))?;
         let reference = main.get("ref").and_then(Value::as_str).ok_or_else(|| observation("Live didn't say where Main is."))?.to_owned();
-        Ok((reference, main.get("mixer").and_then(|v| v.get("volume")).and_then(Value::as_f64)))
+        let mixer = main.get("mixer").filter(|value| !value.is_null()).cloned().unwrap_or_else(|| json!({}));
+        let mixer = super::context::object(&mixer)?;
+        Ok((reference, mixer.get("volume").and_then(Value::as_f64)))
     }
     async fn put_main_back(&self, volume: f64, signal: Signal) -> bool {
         for _ in 0..2 {

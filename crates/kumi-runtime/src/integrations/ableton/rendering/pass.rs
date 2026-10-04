@@ -61,9 +61,8 @@ impl Rendering {
                     self.step("set_routing", json!({"trackRef":track["ref"],"arm":false}), signal.clone()).await?;
                     rearm.push(track["ref"].as_str().unwrap().to_owned());
                 }
-                let mut record = object(
-                    json!({"action":"start","lane":"arrangement","destinationTrackRef":refs.first().and_then(|track|track.get("ref"))}),
-                );
+                let destination = refs.first().ok_or_else(|| RuntimeError::plain("Cannot read properties of undefined (reading 'ref')"))?;
+                let mut record = object(json!({"action":"start","lane":"arrangement","destinationTrackRef":destination.get("ref")}));
                 if refs.len() > 1 {
                     record.insert("alsoTrackRefs".into(), json!(refs.iter().skip(1).map(|track| track["ref"].clone()).collect::<Vec<_>>()));
                 }

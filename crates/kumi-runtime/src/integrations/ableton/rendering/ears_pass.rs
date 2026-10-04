@@ -47,7 +47,7 @@ impl Rendering {
                     }))
                     .await?;
                     self.step("play", json!({"action":"continue"}), signal.clone()).await?;
-                    let probe = &taps[0].1;
+                    let probe = &taps.first().ok_or_else(|| plain("Cannot read properties of undefined (reading '1')"))?.1;
                     let mut first = None;
                     for _ in 0..8 {
                         first = link.transport(probe, Some(signal.clone())).await.map_err(plain)?;
