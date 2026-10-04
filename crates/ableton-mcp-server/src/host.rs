@@ -28,6 +28,7 @@ pub mod device_state;
 mod dispatch;
 mod device_edit;
 mod dialog;
+mod object_view;
 mod events;
 mod extended_mixer;
 mod import_files;
