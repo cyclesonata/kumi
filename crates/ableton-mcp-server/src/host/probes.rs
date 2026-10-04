@@ -10,29 +10,17 @@ use kumi_common::{
 use sha2::{Digest, Sha256};
 const MAX_SET_COLLECTION: usize = 10_000_000;
 fn hash(value: &Value) -> Result<String, LiveError> {
-    Ok(hex::encode(Sha256::digest(canonical_mutation_identity(
-        value,
-    )?)))
+    Ok(hex::encode(Sha256::digest(canonical_mutation_identity(value)?)))
 }
 fn rows(value: &Value) -> impl Iterator<Item = &Value> {
-    value
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|v| v.is_object())
+    value.as_array().into_iter().flatten().filter(|v| v.is_object())
 }
 fn fields(value: &Value, keys: &[&str]) -> Value {
-    Value::Object(
-        keys.iter()
-            .filter_map(|k| value.get(*k).map(|v| ((*k).into(), v.clone())))
-            .collect(),
-    )
+    Value::Object(keys.iter().filter_map(|k| value.get(*k).map(|v| ((*k).into(), v.clone()))).collect())
 }
 fn authority_fields(value: &Value, keys: &[&str]) -> Result<Value, LiveError> {
     if keys.iter().any(|k| value.get(*k).is_none()) {
-        return Err(LiveError::error(
-            "mutation authority contains an unsupported value",
-        ));
+        return Err(LiveError::error("mutation authority contains an unsupported value"));
     }
     Ok(fields(value, keys))
 }
@@ -65,18 +53,13 @@ fn operation(status: &LiveStatus, name: &str, reason: &str) -> Result<(), LiveEr
 }
 fn property<'a>(value: &'a Value, key: &str) -> Result<&'a Value, LiveError> {
     if value.is_null() {
-        Err(LiveError::type_error(format!(
-            "Cannot read properties of null (reading '{key}')"
-        )))
+        Err(LiveError::type_error(format!("Cannot read properties of null (reading '{key}')")))
     } else {
         Ok(value.get(key).unwrap_or(&Value::Null))
     }
 }
 fn collection<'a>(read: &'a Value, key: &str, message: &str) -> Result<&'a Vec<Value>, LiveError> {
-    property(read, key)?
-        .as_array()
-        .filter(|v| v.len() <= MAX_SET_COLLECTION)
-        .ok_or_else(|| LiveError::error(message))
+    property(read, key)?.as_array().filter(|v| v.len() <= MAX_SET_COLLECTION).ok_or_else(|| LiveError::error(message))
 }
 fn finite(value: &Value) -> bool {
     value.as_f64().is_some_and(f64::is_finite)
@@ -92,11 +75,7 @@ fn page_paging(page: &Value, key: &str, bound: usize) -> Value {
 fn probe_envelope(status: &LiveStatus) -> Value {
     let s = serde_json::to_value(status).unwrap();
     let mut v = fields(&s, &["adapter", "epoch", "protocol"]);
-    v["provenance"] = s
-        .get("provenance")
-        .filter(|v| !v.is_null())
-        .cloned()
-        .unwrap_or(json!("unknown"));
+    v["provenance"] = s.get("provenance").filter(|v| !v.is_null()).cloned().unwrap_or(json!("unknown"));
     v["environment"] = s["environment"].clone();
     v
 }
@@ -122,39 +101,23 @@ pub(super) fn node_base64_decode(text: &str) -> Vec<u8> {
     }
     out
 }
-fn probe_page(
-    items: &[Value],
-    revision: &str,
-    limit: Option<&Value>,
-    cursor: Option<&Value>,
-    max: usize,
-) -> Result<Value, LiveError> {
+fn probe_page(items: &[Value], revision: &str, limit: Option<&Value>, cursor: Option<&Value>, max: usize) -> Result<Value, LiveError> {
     let limit = match limit {
         None => max,
         Some(v) if is_integer_in_range(v, 1.0, max as f64) => v.as_f64().unwrap() as usize,
-        _ => {
-            return Err(LiveError::range_error(format!(
-                "limit must be an integer from 1 to {max}"
-            )))
-        }
+        _ => return Err(LiveError::range_error(format!("limit must be an integer from 1 to {max}"))),
     };
     let offset = if let Some(cursor) = cursor {
         if !is_non_empty_string(cursor, 1024) {
             return Err(LiveError::range_error("cursor is invalid"));
         }
-        let decoded: Value = serde_json::from_str(&String::from_utf8_lossy(&node_base64_decode(
-            cursor.as_str().unwrap(),
-        )))
-        .map_err(|_| LiveError::range_error("cursor is invalid"))?;
+        let decoded: Value = serde_json::from_str(&String::from_utf8_lossy(&node_base64_decode(cursor.as_str().unwrap())))
+            .map_err(|_| LiveError::range_error("cursor is invalid"))?;
         if !decoded.is_object()
             || decoded["revision"] != revision
-            || !decoded["offset"].as_f64().is_some_and(|n| {
-                js_number::is_safe_integer(n) && n >= 0.0 && n <= items.len() as f64
-            })
+            || !decoded["offset"].as_f64().is_some_and(|n| js_number::is_safe_integer(n) && n >= 0.0 && n <= items.len() as f64)
         {
-            return Err(LiveError::error(
-                "probe cursor is stale; request a fresh first page",
-            ));
+            return Err(LiveError::error("probe cursor is stale; request a fresh first page"));
         }
         decoded["offset"].as_f64().unwrap() as usize
     } else {
@@ -164,16 +127,13 @@ fn probe_page(
     let page = &items[offset..next];
     let mut out = json!({"items":page,"total":items.len(),"returned":page.len(),"complete":next>=items.len()});
     if next < items.len() {
-        out["nextCursor"] = json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(js_json::stringify(&json!({"revision":revision,"offset":next}))));
+        out["nextCursor"] =
+            json!(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(js_json::stringify(&json!({"revision":revision,"offset":next}))));
     }
     Ok(out)
 }
 impl McpHost {
-    pub async fn dispatch_probe_tool(
-        &self,
-        call: &ToolCall,
-        _signal: Option<&Signal>,
-    ) -> Option<Result<Value, LiveError>> {
+    pub async fn dispatch_probe_tool(&self, call: &ToolCall, _signal: Option<&Signal>) -> Option<Result<Value, LiveError>> {
         if !call.asynchronous {
             return None;
         }
@@ -181,9 +141,7 @@ impl McpHost {
         let args = call.arguments.as_ref().unwrap_or(&Value::Null);
         Some(Ok(match call.name.as_str() {
             "live_library_search" => return Some(self.live_library_search_async(id, args).await),
-            "live_arrangement_automation_read" => {
-                self.live_arrangement_automation_read_async(id, args).await
-            }
+            "live_arrangement_automation_read" => self.live_arrangement_automation_read_async(id, args).await,
             "live_take_lane_read" => self.live_take_lane_read_async(id, args).await,
             "live_comp_read" => self.live_comp_read_async(id, args).await,
             "live_warp_marker_read" => self.live_warp_marker_read_async(id, args).await,
@@ -191,11 +149,7 @@ impl McpHost {
             _ => return None,
         }))
     }
-    pub async fn live_arrangement_automation_read_async(
-        &self,
-        id: &Value,
-        params: &Value,
-    ) -> Value {
+    pub async fn live_arrangement_automation_read_async(&self, id: &Value, params: &Value) -> Value {
         if !has_only(params, &["clipRef", "parameterRef", "limit", "cursor"])
             || !is_non_empty_string(&params["clipRef"], 256)
             || !is_non_empty_string(&params["parameterRef"], 256)
@@ -302,9 +256,7 @@ impl McpHost {
         )
     }
     pub async fn live_take_lane_read_async(&self, id: &Value, params: &Value) -> Value {
-        if !has_only(params, &["trackRef", "limit", "cursor"])
-            || !is_non_empty_string(&params["trackRef"], 256)
-        {
+        if !has_only(params, &["trackRef", "limit", "cursor"]) || !is_non_empty_string(&params["trackRef"], 256) {
             return error(id, -32602, "trackRef is required", None);
         }
         let result = async {
@@ -395,9 +347,7 @@ impl McpHost {
         )
     }
     pub async fn live_comp_read_async(&self, id: &Value, params: &Value) -> Value {
-        if !has_only(params, &["clipRef", "limit", "cursor"])
-            || !is_non_empty_string(&params["clipRef"], 256)
-        {
+        if !has_only(params, &["clipRef", "limit", "cursor"]) || !is_non_empty_string(&params["clipRef"], 256) {
             return error(id, -32602, "clipRef is required", None);
         }
         let result = async {
@@ -432,9 +382,7 @@ clip["ref"]=params["clipRef"].clone();
         )
     }
     pub async fn live_warp_marker_read_async(&self, id: &Value, params: &Value) -> Value {
-        if !has_only(params, &["clipRef", "limit", "cursor"])
-            || !is_non_empty_string(&params["clipRef"], 256)
-        {
+        if !has_only(params, &["clipRef", "limit", "cursor"]) || !is_non_empty_string(&params["clipRef"], 256) {
             return error(id, -32602, "clipRef is required", None);
         }
         let result = async {
@@ -579,20 +527,10 @@ clip["ref"]=params["clipRef"].clone();
         .await;
         outcome(id, result, "Browser inspection requires an available Live Browser and an exact item id from a fresh search.")
     }
-    pub(super) fn parameter_row(
-        &self,
-        snapshot: &LiveSnapshot,
-        reference: &str,
-    ) -> Result<Value, LiveError> {
-        fn walk<'a>(
-            devices: impl Iterator<Item = &'a Value>,
-            reference: &str,
-        ) -> Option<&'a Value> {
+    pub(super) fn parameter_row(&self, snapshot: &LiveSnapshot, reference: &str) -> Result<Value, LiveError> {
+        fn walk<'a>(devices: impl Iterator<Item = &'a Value>, reference: &str) -> Option<&'a Value> {
             for device in devices {
-                if let Some(found) = rows(&device["parameters"])
-                    .chain(rows(&device["macros"]))
-                    .find(|v| v["ref"] == reference)
-                {
+                if let Some(found) = rows(&device["parameters"]).chain(rows(&device["macros"])).find(|v| v["ref"] == reference) {
                     return Some(found);
                 }
                 for chain in rows(&device["chains"]) {
@@ -648,11 +586,7 @@ clip["ref"]=params["clipRef"].clone();
             "ramMode",
             "clipView",
         ];
-        let value = Value::Object(
-            keys.into_iter()
-                .map(|k| (k.into(), clip[k].clone()))
-                .collect(),
-        );
+        let value = Value::Object(keys.into_iter().map(|k| (k.into(), clip[k].clone())).collect());
         let text = canonical_json(
             &value,
             &CanonicalLimits {
@@ -666,18 +600,13 @@ clip["ref"]=params["clipRef"].clone();
             LiveError::error(match e {
                 CanonicalError::TooDeep => "clip content is too deeply nested",
                 CanonicalError::StringTooLarge => "clip content string is too large",
-                CanonicalError::ArrayTooLarge => {
-                    "clip content array exceeds its authoritative bound"
-                }
+                CanonicalError::ArrayTooLarge => "clip content array exceeds its authoritative bound",
                 CanonicalError::ObjectTooLarge => "clip content object is too large",
             })
         })?;
         Ok(hex::encode(Sha256::digest(text)))
     }
-    pub(super) fn warp_marker_collection_revision(
-        &self,
-        markers: &[Value],
-    ) -> Result<String, LiveError> {
+    pub(super) fn warp_marker_collection_revision(&self, markers: &[Value]) -> Result<String, LiveError> {
         let mut sorted = markers.to_vec();
         sorted.sort_by(|a, b| {
             a["beatTime"]
@@ -686,67 +615,36 @@ clip["ref"]=params["clipRef"].clone();
                 .partial_cmp(&b["beatTime"].as_f64().unwrap_or(f64::NAN))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        hash(&Value::Array(
-            sorted
-                .iter()
-                .map(|v| authority_fields(v, &["beatTime", "sampleTime"]))
-                .collect::<Result<_, _>>()?,
-        ))
+        hash(&Value::Array(sorted.iter().map(|v| authority_fields(v, &["beatTime", "sampleTime"])).collect::<Result<_, _>>()?))
     }
-    pub(super) fn clip_authority_digest(
-        &self,
-        snapshot: &LiveSnapshot,
-        reference: &str,
-    ) -> Result<String, LiveError> {
+    pub(super) fn clip_authority_digest(&self, snapshot: &LiveSnapshot, reference: &str) -> Result<String, LiveError> {
         let row = self.clip_row(snapshot, reference)?;
         if let Some(lane) = row.take_lane {
-            let siblings: Vec<_> = rows(&lane["clips"])
-                .map(|v| authority_fields(v, &["ref", "objectIdentity"]))
-                .collect::<Result<_, _>>()?;
+            let siblings: Vec<_> =
+                rows(&lane["clips"]).map(|v| authority_fields(v, &["ref", "objectIdentity"])).collect::<Result<_, _>>()?;
             let mut value = fields(&lane, &[]);
-            value["laneIdentity"] = lane
-                .get("objectIdentity")
-                .ok_or_else(|| {
-                    LiveError::error("mutation authority contains an unsupported value")
-                })?
-                .clone();
+            value["laneIdentity"] =
+                lane.get("objectIdentity").ok_or_else(|| LiveError::error("mutation authority contains an unsupported value"))?.clone();
             value["takeLaneRevision"] = json!(hash(&json!(siblings))?);
             return hash(&value);
         }
         let authority = self.clip_authority(snapshot, reference)?;
         if row.arrangement {
-            Ok(authority["expectedAuthorityRevision"]
-                .as_str()
-                .unwrap()
-                .into())
+            Ok(authority["expectedAuthorityRevision"].as_str().unwrap().into())
         } else {
             hash(&authority)
         }
     }
-    pub(super) fn arrangement_collection_revision(
-        &self,
-        snapshot: &LiveSnapshot,
-        track: &str,
-    ) -> Result<String, LiveError> {
+    pub(super) fn arrangement_collection_revision(&self, snapshot: &LiveSnapshot, track: &str) -> Result<String, LiveError> {
         let s = serde_json::to_value(snapshot).unwrap();
-        let clips: Vec<_> = rows(&s["arrangement"]["clips"])
-            .filter(|v| v["trackRef"] == track)
-            .map(|v| fields(v, &["ref", "objectIdentity"]))
-            .collect();
-        if clips.iter().any(|v| {
-            !is_non_empty_string(&v["ref"], 256) || !is_non_empty_string(&v["objectIdentity"], 256)
-        }) {
-            return Err(LiveError::error(
-                "Arrangement clip collection authority is incomplete",
-            ));
+        let clips: Vec<_> =
+            rows(&s["arrangement"]["clips"]).filter(|v| v["trackRef"] == track).map(|v| fields(v, &["ref", "objectIdentity"])).collect();
+        if clips.iter().any(|v| !is_non_empty_string(&v["ref"], 256) || !is_non_empty_string(&v["objectIdentity"], 256)) {
+            return Err(LiveError::error("Arrangement clip collection authority is incomplete"));
         }
         hash(&json!(clips))
     }
-    pub(super) fn arrangement_clip_authority(
-        &self,
-        snapshot: &LiveSnapshot,
-        reference: &str,
-    ) -> Result<Value, LiveError> {
+    pub(super) fn arrangement_clip_authority(&self, snapshot: &LiveSnapshot, reference: &str) -> Result<Value, LiveError> {
         let row = self.clip_row(snapshot, reference)?;
         let track = row.track.as_ref().unwrap_or(&Value::Null);
         if !row.arrangement
@@ -754,22 +652,18 @@ clip["ref"]=params["clipRef"].clone();
             || !is_non_empty_string(&track["ref"], 256)
             || !is_non_empty_string(&track["objectIdentity"], 256)
         {
-            return Err(LiveError::error(
-                "Arrangement clip hierarchy authority is incomplete",
-            ));
+            return Err(LiveError::error("Arrangement clip hierarchy authority is incomplete"));
         }
         let s = serde_json::to_value(snapshot).unwrap();
         let siblings: Vec<_> = rows(&s["arrangement"]["clips"])
             .filter(|v| v["trackRef"] == track["ref"])
             .map(|v| authority_fields(v, &["ref", "objectIdentity"]))
             .collect::<Result<_, _>>()?;
-        Ok(json!({"expectedObjectIdentity":row.clip["objectIdentity"],"expectedAuthorityRevision":hash(&json!({"clip":{"ref":reference,"objectIdentity":row.clip["objectIdentity"]},"owner":fields(track,&["ref","objectIdentity"]),"siblings":siblings}))?}))
+        Ok(
+            json!({"expectedObjectIdentity":row.clip["objectIdentity"],"expectedAuthorityRevision":hash(&json!({"clip":{"ref":reference,"objectIdentity":row.clip["objectIdentity"]},"owner":fields(track,&["ref","objectIdentity"]),"siblings":siblings}))?}),
+        )
     }
-    pub(super) fn clip_authority(
-        &self,
-        snapshot: &LiveSnapshot,
-        reference: &str,
-    ) -> Result<Value, LiveError> {
+    pub(super) fn clip_authority(&self, snapshot: &LiveSnapshot, reference: &str) -> Result<Value, LiveError> {
         let row = self.clip_row(snapshot, reference)?;
         if !is_non_empty_string(&row.clip["objectIdentity"], 256) {
             return Err(LiveError::error("clip lacks exact object identity"));
@@ -778,29 +672,23 @@ clip["ref"]=params["clipRef"].clone();
             return self.arrangement_clip_authority(snapshot, reference);
         }
         let track = row.track.as_ref().unwrap_or(&Value::Null);
-        if !is_non_empty_string(&track["ref"], 256)
-            || !is_non_empty_string(&track["objectIdentity"], 256)
-            || !track["clipSlots"].is_array()
+        if !is_non_empty_string(&track["ref"], 256) || !is_non_empty_string(&track["objectIdentity"], 256) || !track["clipSlots"].is_array()
         {
             return Err(LiveError::error("clip track authority is incomplete"));
         }
-        let slot = rows(&track["clipSlots"])
-            .find(|v| v["clipRef"] == reference)
-            .unwrap_or(&Value::Null);
+        let slot = rows(&track["clipSlots"]).find(|v| v["clipRef"] == reference).unwrap_or(&Value::Null);
         let s = serde_json::to_value(snapshot).unwrap();
-        let scene = rows(&s["scenes"])
-            .find(|v| v["index"].as_f64() == slot["sceneIndex"].as_f64())
-            .unwrap_or(&Value::Null);
+        let scene = rows(&s["scenes"]).find(|v| v["index"].as_f64() == slot["sceneIndex"].as_f64()).unwrap_or(&Value::Null);
         if !is_non_empty_string(&slot["ref"], 256)
             || !is_non_empty_string(&slot["objectIdentity"], 256)
             || !is_non_empty_string(&scene["ref"], 256)
             || !is_non_empty_string(&scene["objectIdentity"], 256)
         {
-            return Err(LiveError::error(
-                "clip slot or scene authority is incomplete",
-            ));
+            return Err(LiveError::error("clip slot or scene authority is incomplete"));
         }
-        Ok(json!({"expectedObjectIdentity":row.clip["objectIdentity"],"expectedTrackRef":track["ref"],"expectedTrackIdentity":track["objectIdentity"],"expectedSlotRef":slot["ref"],"expectedSlotIdentity":slot["objectIdentity"],"expectedSceneRef":scene["ref"],"expectedSceneIdentity":scene["objectIdentity"]}))
+        Ok(
+            json!({"expectedObjectIdentity":row.clip["objectIdentity"],"expectedTrackRef":track["ref"],"expectedTrackIdentity":track["objectIdentity"],"expectedSlotRef":slot["ref"],"expectedSlotIdentity":slot["objectIdentity"],"expectedSceneRef":scene["ref"],"expectedSceneIdentity":scene["objectIdentity"]}),
+        )
     }
 }
 
@@ -809,9 +697,7 @@ mod tests {
     use super::*;
     #[test]
     fn shared_authority_helpers_match_source_and_clip_bounds() {
-        let f: Value =
-            serde_json::from_str(include_str!("../../tests/support/host_probes_oracle.json"))
-                .unwrap();
+        let f: Value = serde_json::from_str(include_str!("../../tests/support/host_probes_oracle.json")).unwrap();
         let host = McpHost::default();
         for (i, c) in f["helpers"].as_array().unwrap().iter().enumerate() {
             let mut snapshot = f["base"].clone();
@@ -819,35 +705,19 @@ mod tests {
                 let path = path.as_array().unwrap();
                 let mut at = &mut snapshot;
                 for k in &path[..path.len() - 1] {
-                    at = if let Some(k) = k.as_str() {
-                        &mut at[k]
-                    } else {
-                        &mut at[k.as_u64().unwrap() as usize]
-                    };
+                    at = if let Some(k) = k.as_str() { &mut at[k] } else { &mut at[k.as_u64().unwrap() as usize] };
                 }
-                at.as_object_mut()
-                    .unwrap()
-                    .shift_remove(path.last().unwrap().as_str().unwrap());
+                at.as_object_mut().unwrap().shift_remove(path.last().unwrap().as_str().unwrap());
             }
             let s: LiveSnapshot = serde_json::from_value(snapshot).unwrap();
             let arg = &c["arg"];
             let r = match c["method"].as_str().unwrap() {
                 "clipAuthority" => host.clip_authority(&s, arg.as_str().unwrap()),
-                "arrangementClipAuthority" => {
-                    host.arrangement_clip_authority(&s, arg.as_str().unwrap())
-                }
-                "clipAuthorityDigest" => host
-                    .clip_authority_digest(&s, arg.as_str().unwrap())
-                    .map(Value::String),
-                "arrangementCollectionRevision" => host
-                    .arrangement_collection_revision(&s, arg.as_str().unwrap())
-                    .map(Value::String),
-                "boundedClipContentDigest" => {
-                    host.bounded_clip_content_digest(arg).map(Value::String)
-                }
-                "warpMarkerCollectionRevision" => host
-                    .warp_marker_collection_revision(arg.as_array().unwrap())
-                    .map(Value::String),
+                "arrangementClipAuthority" => host.arrangement_clip_authority(&s, arg.as_str().unwrap()),
+                "clipAuthorityDigest" => host.clip_authority_digest(&s, arg.as_str().unwrap()).map(Value::String),
+                "arrangementCollectionRevision" => host.arrangement_collection_revision(&s, arg.as_str().unwrap()).map(Value::String),
+                "boundedClipContentDigest" => host.bounded_clip_content_digest(arg).map(Value::String),
+                "warpMarkerCollectionRevision" => host.warp_marker_collection_revision(arg.as_array().unwrap()).map(Value::String),
                 _ => unreachable!(),
             };
             match r {
@@ -860,15 +730,11 @@ mod tests {
             value = json!({"nested":value});
         }
         assert_eq!(
-            host.bounded_clip_content_digest(&json!({"clipView":value}))
-                .unwrap_err()
-                .message(),
+            host.bounded_clip_content_digest(&json!({"clipView":value})).unwrap_err().message(),
             "clip content is too deeply nested"
         );
         assert_eq!(
-            host.bounded_clip_content_digest(&json!({"name":"a".repeat(1_048_577)}))
-                .unwrap_err()
-                .message(),
+            host.bounded_clip_content_digest(&json!({"name":"a".repeat(1_048_577)})).unwrap_err().message(),
             "clip content string is too large"
         );
         assert!(host.bounded_clip_content_digest(&json!({"warpMarkers":vec![json!({"beatTime":0,"sampleTime":0});4096]})).is_ok());
