@@ -49,13 +49,17 @@ bridge (apps/mcp-server)
 
 ## Setup
 
-With Node.js 22 or 24, Python 3 and git:
+With Rust, Cargo, Python 3.11 or later, and git:
 
 ```sh
-npm run setup                 # install and build Kumi and the bridge
-npm run kumi                  # run the checkout; npm run kumi -- <command> for the rest
-npm run kumi -- bridge --allow-dirty   # put this checkout's bridge into Live (Live closed)
+cargo build --release --locked --workspace --bins
+cargo run --release -p kumi --
+cargo run --release -p kumi -- bridge --allow-dirty   # Live must be closed
 ```
+
+The existing npm setup/start commands use this checkout when Cargo is available. Without Cargo,
+they hand off to the matching published native release. Node.js 22 or 24 is needed for the
+TypeScript reference build and tests, not for the native application.
 
 A checkout shares `~/.kumi` (settings, sign-ins, conversations, the bridge's
 state) with an installed Kumi. `--allow-dirty` lets `kumi bridge` install the

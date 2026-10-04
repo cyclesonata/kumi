@@ -516,7 +516,7 @@ only with Live's own undo. `/new` keeps the connection, so undo still works.
 kumi update              # the newest Kumi, and the bridge in Live when it's older
 kumi update --check      # only say whether there's a newer Kumi
 kumi update --rollback   # go back to the Kumi before the last update
-kumi doctor              # check Node, sign-in, the bridge, Live, the extension and the terminal
+kumi doctor              # check sign-in, the bridge, Live, the extension and the terminal
 kumi report              # a file to send when something goes wrong
 kumi uninstall           # remove Kumi; add --all to remove your conversations, notes and sign-ins too
 ```
@@ -526,9 +526,14 @@ it once to be sure it runs before putting it in place; the one before is kept
 for `--rollback`. If the bridge in Live is older and Live is closed, it then runs
 `kumi bridge`; if Live is open, it says to quit Live and run `kumi bridge`. In a
 copy of the repository, `update` moves the checkout forward instead
-(`git merge --ff-only`, refusing local changes) and runs `npm run setup`.
+(`git merge --ff-only`, refusing local changes) and builds the workspace with Cargo.
 Inside Kumi, `/update` asks first, then closes Kumi, updates it and opens it
 again with the same conversation.
+
+Existing installer users can use the same `kumi update` command to switch to the native release.
+Settings, sign-ins, conversations and the library stay in the same Kumi home. The bridge can
+switch when Live is closed. Rolling back to the JavaScript application also restores its retained
+bridge generation, so Live must be closed for that rollback.
 
 Kumi checks for a newer version as it starts, at most once a day, and says
 nothing when there's none or no network. `"updateCheck": false` in
