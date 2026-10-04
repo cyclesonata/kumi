@@ -11,19 +11,24 @@ are in [supported platforms](SUPPORT_MATRIX.md).
 
 Each release in the [changelog](../../CHANGELOG.md) names the bridge it ships
 with; [bridge versions](KUMI_CHANGES.md#bridge-versions) lists them all. The
-version numbers themselves live in the `package.json` files (Kumi, the bridge)
-and `apps/live-extension/manifest.json` (the extension).
+version numbers themselves live in `Cargo.toml` and the `package.json` files
+(Kumi, the bridge), and `apps/live-extension/manifest.json` (the extension).
 
 | Part | Version |
 | --- | --- |
 | Live protocol | `ableton-live/v1`; the registry's hash is in [the capability manifest](../evidence/capability-manifest.json) |
 | MCP protocol eras | `2025-11-25` and `2026-07-28` |
-| Node | Kumi's own Node 24 when installed; Node 22/24 for checkouts and the standalone bridge |
+| Runtime | Native Rust app and standalone bridge; fresh installs require no Node |
+| TypeScript reference and legacy installs | Node 22/24; retained Node also supports rollback and optional YouTube challenges ([details](SUPPORT_MATRIX.md)) |
 
 ## What has been tested where
 
-- **Every pull request:** builds and tests on macOS, Linux and Windows with
-  Node 22 and 24, and the installer on all three; see [CI](TESTING.md#ci).
+The real-Live records below are from earlier TypeScript releases. Native CI
+and migration checks do not replace a new real-Live acceptance run.
+
+- **Every pull request:** native Rust builds and tests, six target bundles,
+  installation and migration tests, plus TypeScript reference tests on
+  Node 22 and 24; see [CI](TESTING.md#ci).
 - **Real Live on macOS** (Apple silicon, Live 12.4.15 beta): every kind of change
   Kumi makes, each undone through Kumi (65 of 65 on bridges 1.0.62 and 1.0.63,
   in 19- and 200-track Sets), playing, bouncing, listening and watching, offline

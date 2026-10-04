@@ -10,9 +10,9 @@ what the bridge's package may contain. The steps for cutting a release are in
 
 | What | Where | How people get it |
 | --- | --- | --- |
-| Kumi | GitHub Releases of `user1303836/kumi`: `kumi.tar.gz`, `kumi-release.json` and `SHA256SUMS`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
-| The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as the `npm pack` tarball and that tarball already installed | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
-| The bridge on its own | No release of its own. Build it with `npm pack`, or take the `exact-local-candidate` artifact a CI run keeps for 90 days | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
+| Kumi | GitHub Releases of `user1303836/kumi`: native `kumi-<target>.tar.gz` bundles, the compatibility `kumi.tar.gz`, `kumi-release.json` and `SHA256SUMS`, attached to each `vX.Y.Z` tag by the Installer workflow | `install.sh` or `install.ps1`, then `kumi update` |
+| The bridge (`@ableton-mcp/mcp-server`) | Inside each Kumi bundle, as a native bridge tarball and its prepared package | `kumi bridge`, which installs it through the bridge's lifecycle ([delivery](DELIVERY.md)) |
+| The bridge on its own | No release of its own. Build it with `python3 scripts/build-native-release.py --bridge-only` ([build options](DEVELOPER_GUIDE.md#releasing)) | The lifecycle CLI ([delivery](DELIVERY.md#the-standalone-bridge)) |
 
 The installer scripts are read from the `main` branch; the bundle they install
 comes from the latest published release (or the one `KUMI_VERSION` names). A
@@ -22,19 +22,21 @@ release is "latest". Nothing is published to npm: every package is
 
 ## Integrity, not identity
 
-Nothing is signed or notarized, and there are no native installers (`.pkg`,
-`.msi`). The installer checks the bundle against the sha256 in
-`kumi-release.json`, and Node against nodejs.org's `SHASUMS256.txt`; `kumi update`
-checks the bundle the same way, and `kumi bridge` checks the bridge's tarball
-against the hash recorded when the bundle was built. A checksum from the same
-place as the download proves the bytes arrived intact, not who made them.
+The app and bridge have no publisher signature or notarization, and there are
+no `.pkg` or `.msi` installers. The macOS Hands helper is ad-hoc signed; that
+does not establish publisher identity. The installer and `kumi update` check
+the bundle against the sha256 in `kumi-release.json`. Fresh native installs
+do not download Node. `kumi bridge` checks the bridge tarball against the hash
+recorded when the bundle was built. A checksum from the same place as the
+download proves the bytes arrived intact, not who made them.
 
 The software is [MIT licensed](../../LICENSE.md). The licence grants no rights
 to Ableton's trademarks, and Kumi isn't affiliated with or endorsed by Ableton.
 
 ## What the bridge's package may contain
 
-- compiled runtime JavaScript and type declarations (no source maps, no tests);
+- native `ableton-mcp-server` and `ableton-mcp-analysis-worker` executables
+  (`.exe` on Windows);
 - the Remote Script, its README, the operation registry and their hash
   manifest;
 - Kumi's Live extension: its manifest, `package.json`, built `extension.js` and
@@ -42,30 +44,33 @@ to Ableton's trademarks, and Kumi isn't affiliated with or endorsed by Ableton.
 - the bridge's guides (`README.md` and `release-docs/`);
 - `release-manifest.json`, `package.json` and `LICENSE.md`.
 
-Nothing else: no scripts, test fixtures, `node_modules`, credentials,
-configuration, local state, logs, captured media or evidence. `npm run
-package:verify` refuses any path outside its own explicit list, and
-`release-manifest.json` is the source of truth for the exact payload. CI packs
-the bridge twice, the second time from a fresh clone with a fresh `npm ci`, and
-requires identical bytes.
+Nothing else: no build scripts, test fixtures, `node_modules`, credentials,
+configuration, local state, logs, captured media or evidence. The native
+producer and lifecycle enforce the exact file inventory and hashes in
+`release-manifest.json`.
+
+The retained legacy npm package contains compiled JavaScript and type
+declarations instead of native binaries. Its `npm run package:verify` checks
+an explicit file list; CI packs that legacy package twice, including once
+from a fresh clone and `npm ci`, and requires identical bytes.
 
 ## The release manifest
 
-`release-manifest.json` (schema `ableton-mcp-release/v2`) records the package
-name and version, the source commit and whether the tree was dirty, the Node
-range and majors, the Node, npm and TypeScript versions and runner image that
-built it, the SHA-256 of `package-lock.json` and of the CI workflow, the build
-recipe, the protocol versions and registry hash, each payload file's role and
-SHA-256, and the distribution fields.
+`release-manifest.json` (schema `ableton-mcp-native-release/v1`) records the
+package name and version, source commit and dirty state, Rust target, rustc
+and Cargo versions, runner image, SHA-256 of `Cargo.lock` and the CI workflow,
+build recipe, protocol registry hash, and each payload file's role and SHA-256.
 
-The distribution fields say `channel: "local-npm-tarball"`, `published: false`,
-`signed: false` and `notarized: false`, and `package:verify` and the lifecycle
-require exactly those values. Here "local" and "unpublished" describe the
-tarball itself, built with `npm pack` and installed from a local path by its
-hash: never published to a registry. It does reach people inside the Kumi
-bundle on GitHub Releases. The lifecycle still accepts the older
-`ableton-mcp-private-release/v1` manifest so an existing installation can be
-upgraded or rolled back.
+Its distribution fields are `channel: "local-native-tarball"`, with
+`published`, `signed`, `notarized` and `integrityIsIdentityProof` all `false`.
+The lifecycle requires these values. The tarball is installed from a local
+path by its hash and reaches users inside the Kumi bundle on GitHub Releases;
+it is not published to a package registry.
+
+For existing installations, the lifecycle also accepts the legacy
+`ableton-mcp-release/v2` and `ableton-mcp-private-release/v1` schemas for
+upgrade and rollback. Their Node/npm/TypeScript build evidence and
+`local-npm-tarball` channel describe the retained legacy artifacts.
 
 ## Merge gate
 

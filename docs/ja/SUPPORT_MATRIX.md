@@ -8,11 +8,15 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 
 | システム | バージョン | プロセッサ | 状況 |
 | --- | --- | --- | --- |
-| macOS | 13（Ventura）以降 | Apple silicon、Intel | Apple silicon 上の Live でテスト済み |
-| Windows | 10 または 11 | x64、ARM64 | インストールと Live への接続をテスト済み。[Windows](#windows) を参照 |
-| Linux | glibc のディストリビューション（Alpine などの musl 系は不可） | x64、ARM64 | Kumi のインストールと実行はできますが、Live は使えません。Linux 版の Live は存在しません |
+| macOS | 13（Ventura）以降 | Apple silicon、Intel | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Apple silicon 上の Live でテスト済み |
+| Windows | 10 または 11 | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。過去の TypeScript 版を Windows 10 上の Live でテスト済み。[Windows](#windows) を参照 |
+| Linux | glibc のディストリビューション（Alpine などの musl 系は不可） | x64、ARM64 | ネイティブのビルドとインストールは CI 対象。Linux 版の Live は存在しません |
 
-インストーラーは Kumi 専用の Node を持ち込みます。Kumi のビルドとテストに使ったものとまったく同じ Node 24 のリリースなので、Node を自分でインストールする必要はありません。今後の Kumi が別の Node メジャーバージョンに移行した場合は、`kumi update` がインストーラーをもう一度実行するよう伝え、それで新しい Node が入ります。
+- Kumi と単体のブリッジはネイティブ Rust プログラムです。新規インストールは Node をダウンロードせず、必要としません。
+- Node 24 を使う既存の Kumi 1.7.4 は、`kumi update` で設定、サインイン、データを保ったまま移行します。残された Node はロールバックと任意の YouTube チャレンジ処理に使えます。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[更新方法](KUMI_GUIDE.md)を参照してください。
+- YouTube チャレンジ処理には残された Node または PATH 上の Node を使い、Kumi はそのための Node を取得しません。Live 拡張機能は Live 自身の JavaScript ホストで動きます。
+
+以下の実機 Live の結果は旧 TypeScript 版の記録です。ネイティブ版の CI と移行テストは、実機 Live での受け入れ確認とは別です。
 
 ## Ableton Live
 
@@ -34,7 +38,7 @@ Windows でまだ確認できていないこと：
 - **Windows のターミナルでのフルスクリーンアプリ。** Windows Terminal を推奨します。[ターミナル](KUMI_TUI.md#ターミナル)を参照してください。
 - **Kumi 1.6.0 以前からの `kumi update`** は、PATH 上で Git の `tar` が Windows 自身の `tar` より前にあると（Git Bash から起動した PowerShell など）、tar のエラーで失敗します。インストールのコマンドをもう一度実行するか、`kumi update` の前に `$env:Path = "$env:SystemRoot\System32;$env:Path"` を実行してください。
 
-## ソースのチェックアウトとスタンドアロンのブリッジ向けの Node.js
+## TypeScript 参照版と旧ブリッジ向けの Node.js
 
 | Node.js | 状況 |
 | --- | --- |
@@ -42,7 +46,7 @@ Windows でまだ確認できていないこと：
 | 25.x | 非対応：2026年6月1日にサポートが終了しました |
 | 26.x 以降、21.x 以前、プレリリース | テストされるまで非対応 |
 
-すべてのパッケージのエンジン範囲は `>=22 <23 || >=24 <25` です。チェックアウトの `kumi` はそれ以外のメジャーバージョンでは動作を拒否します（例外は `kumi doctor` で、何が問題かを伝えます）。ブリッジのサーバーと `ableton-mcp-setup` も拒否し、`ableton-mcp-diagnostics` はそれを報告します。`ableton-mcp-lifecycle` と `ableton-mcp-migrate` は引き続き動作するので、古いインストールを調べたり削除したりできます。
+この表は保持している TypeScript 参照版と旧 Node インストールに適用されます。npm のエンジン範囲は `>=22 <23 || >=24 <25` です。旧 TypeScript 版の `kumi` はそれ以外のメジャーバージョンでは動作を拒否します（例外は `kumi doctor` で、何が問題かを伝えます）。ブリッジのサーバーと `ableton-mcp-setup` も拒否し、`ableton-mcp-diagnostics` はそれを報告します。`ableton-mcp-lifecycle` と `ableton-mcp-migrate` は引き続き動作するので、古いインストールを調べたり削除したりできます。
 
 ## MCP プロトコル
 
@@ -54,4 +58,4 @@ Windows でまだ確認できていないこと：
 
 ## CI がカバーする範囲
 
-CI は GitHub がホストする macOS 15、Ubuntu 24.04、Windows Server 2025 のランナー上で、Node 22 と 24 を使って実行されます。どのランナーにも Live はありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。
+CI は GitHub がホストする macOS 15、Ubuntu 24.04、Windows Server 2025 上で、Rust のチェック、6 ターゲットのバンドル、インストールと移行テスト、および Node 22 と 24 の TypeScript 参照テストを実行します。どのランナーにも Live はありません。すべてのジョブは[テスト](TESTING.md#ci)に記載しています。

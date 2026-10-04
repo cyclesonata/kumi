@@ -8,11 +8,15 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 | 系统 | 版本 | 处理器 | 状态 |
 | --- | --- | --- | --- |
-| macOS | 13（Ventura）或更高 | Apple 芯片、Intel | 已在 Apple 芯片上配合 Live 测试 |
-| Windows | 10 或 11 | x64、ARM64 | 已测试安装和连接 Live；见 [Windows](#windows) |
-| Linux | glibc 发行版（不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | Kumi 可以安装和运行，但没有 Live：Live 没有 Linux 版 |
+| macOS | 13（Ventura）或更高 | Apple 芯片、Intel | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Apple 芯片上配合 Live 测试 |
+| Windows | 10 或 11 | x64、ARM64 | 原生构建和安装纳入 CI；较早的 TypeScript 版已在 Windows 10 上配合 Live 测试；见 [Windows](#windows) |
+| Linux | glibc 发行版（不包括 Alpine 或其他 musl 发行版） | x64、ARM64 | 原生构建和安装纳入 CI；Live 没有 Linux 版 |
 
-安装程序会带上 Kumi 自己的 Node，也就是构建和测试 Kumi 时所用的那个确切的 Node 24 版本，所以你不必自己安装 Node。如果以后的 Kumi 换用另一个 Node 主版本，`kumi update` 会提示你重新运行安装程序，由它带来新的 Node。
+- Kumi 和独立桥接都是原生 Rust 程序。全新安装不会下载 Node，也不要求 Node。
+- 使用 Node 24 的现有 Kumi 1.7.4 可通过 `kumi update` 迁移，保留原有设置、登录和数据。保留的 Node 用于回滚和可选的 YouTube 挑战处理。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序；见[更新说明](KUMI_GUIDE.md)。
+- YouTube 挑战处理使用保留的 Node 或 PATH 中的 Node；Kumi 不会为此下载 Node。Live 扩展由 Live 自己的 JavaScript 宿主运行。
+
+下述真实 Live 测试来自较早的 TypeScript 版本。原生版 CI 和迁移检查不等同于真实 Live 硬件验收。
 
 ## Ableton Live
 
@@ -34,7 +38,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 - **全屏应用在 Windows 终端中的表现。** 推荐使用 Windows Terminal；见[终端](KUMI_TUI.md#终端)。
 - **从 Kumi 1.6.0 或更早版本运行 `kumi update`** 时，如果 PATH 上 Git 的 `tar` 排在 Windows 自带的 tar 前面（例如在从 Git Bash 启动的 PowerShell 中），会因 tar 错误而失败。请重新运行那行安装命令，或在 `kumi update` 之前运行 `$env:Path = "$env:SystemRoot\System32;$env:Path"`。
 
-## 源码副本与独立桥接所用的 Node.js
+## TypeScript 参考实现与旧桥接所用的 Node.js
 
 | Node.js | 状态 |
 | --- | --- |
@@ -42,7 +46,7 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 | 25.x | 不支持：已于 2026 年 6 月 1 日终止维护 |
 | 26.x 及更高、21.x 及更早、预发布版 | 经过测试之前不支持 |
 
-每个包的 engines 范围都是 `>=22 <23 || >=24 <25`。源码副本中的 `kumi` 会拒绝其他主版本（`kumi doctor` 除外，它会说明问题所在）。桥接的服务器和 `ableton-mcp-setup` 同样会拒绝；`ableton-mcp-diagnostics` 会报告它们；`ableton-mcp-lifecycle` 和 `ableton-mcp-migrate` 仍可运行，以便检查或移除旧的安装。
+此表适用于保留的 TypeScript 参考实现和旧 Node 安装。其 npm engines 范围为 `>=22 <23 || >=24 <25`。旧 TypeScript 版 `kumi` 会拒绝其他主版本（`kumi doctor` 除外，它会说明问题所在）。桥接的服务器和 `ableton-mcp-setup` 同样会拒绝；`ableton-mcp-diagnostics` 会报告它们；`ableton-mcp-lifecycle` 和 `ableton-mcp-migrate` 仍可运行，以便检查或移除旧的安装。
 
 ## MCP 协议
 
@@ -54,4 +58,4 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 ## CI 覆盖的范围
 
-CI 在 GitHub 托管的 macOS 15、Ubuntu 24.04 和 Windows Server 2025 运行器上，使用 Node 22 和 24 运行；这些运行器都没有 Live。[测试](TESTING.md#ci)列出了每个作业。
+CI 在 GitHub 托管的 macOS 15、Ubuntu 24.04 和 Windows Server 2025 上运行 Rust 检查、六个目标平台的发行包及安装和迁移测试，并用 Node 22 和 24 测试 TypeScript 参考实现；这些运行器都没有 Live。[测试](TESTING.md#ci)列出了每个作业。
