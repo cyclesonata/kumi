@@ -56,6 +56,7 @@ mod structure;
 mod tempo;
 mod transport;
 mod ui;
+mod willington;
 
 use crate::{
     live::*,
