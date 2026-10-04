@@ -100,6 +100,12 @@ fn write_text(console: &File, text: &str) {
     write_records(console, &text.encode_utf16().map(|unit| key(unit, 1)).collect::<Vec<_>>());
 }
 
+fn mode(console: &File) -> u32 {
+    let mut mode = 0;
+    assert_ne!(unsafe { GetConsoleMode(console.as_raw_handle(), &mut mode) }, 0);
+    mode
+}
+
 fn queue_empty(console: &File) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -218,21 +224,20 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                 let mut focus = INPUT_RECORD { EventType: FOCUS_EVENT as u16, ..INPUT_RECORD::default() };
                 focus.Event.FocusEvent = FOCUS_EVENT_RECORD { bSetFocus: 1 };
                 let mut release = key(b'x' as u16, 1);
-                unsafe { release.Event.KeyEvent.bKeyDown = 0 };
+                release.Event.KeyEvent.bKeyDown = 0;
                 write_records(&console, &[focus, release]);
                 queue_empty(&console);
                 tokio::task::yield_now().await;
                 assert!(!ended.get(), "non-text records must not emit EOF");
-                write_records(&console, &[key(b'a' as u16, 3), key(0xd83d, 1)]);
+                // The host expands VT input into text events. WriteConsoleInputW
+                // itself collapses a VK0 repeat count and consumes synthetic Alt
+                // key-up, as the direct Win32 control proves. Feed realistic text
+                // here; decoder unit tests retain those record-level policies.
+                write_records(&console, &[key(b'a' as u16, 1), key(b'a' as u16, 1), key(b'a' as u16, 1), key(0xd83d, 1)]);
                 // The next batch completes the UTF-16 pair. The intervening message
                 // acknowledgement must retain the pending high surrogate.
                 tokio::task::yield_now().await;
-                let mut alt_release = key(0xe9, 1);
-                unsafe {
-                    alt_release.Event.KeyEvent.bKeyDown = 0;
-                    alt_release.Event.KeyEvent.wVirtualKeyCode = 0x12;
-                }
-                write_records(&console, &[key(0xde00, 1), key(27, 1), key(91, 1), key(68, 1), key(0, 1), alt_release]);
+                write_records(&console, &[key(0xde00, 1), key(27, 1), key(91, 1), key(68, 1), key(0, 1), key(0xe9, 1)]);
                 assert_eq!(received(first, "initial raw VT/Unicode/repeat payload").await, "aaa😀\x1b[D\0é".as_bytes());
                 input.set_raw_mode(false).unwrap();
                 child_reads(&console, "raw-child");
@@ -241,7 +246,7 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                 let expected = format!("{}😀😀", "x".repeat(127));
                 let boundary = receive(&input, expected.len(), true);
                 let mut records = vec![key(b'x' as u16, 1); 127];
-                records.extend([key(0xd83d, 2), key(0xde00, 2)]);
+                records.extend([key(0xd83d, 1), key(0xde00, 1), key(0xd83d, 1), key(0xde00, 1)]);
                 write_records(&console, &records);
                 assert_eq!(received(boundary, "raw surrogate batch128 boundary").await, expected.as_bytes());
                 input.set_raw_mode(false).unwrap();
@@ -275,26 +280,50 @@ fn cooked_console_pause_preserves_os_editing_and_partial_text() {
                 for round in 0..3 {
                     // An inherited VT flag is legal with cooked input and is restored
                     // exactly by the mode owner; cancellation must work in both modes.
-                    let mode = ENABLE_LINE_INPUT
+                    let original = ENABLE_LINE_INPUT
                         | ENABLE_ECHO_INPUT
                         | ENABLE_PROCESSED_INPUT
                         | if round == 1 { ENABLE_VIRTUAL_TERMINAL_INPUT } else { 0 };
-                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), mode) }, 0);
+                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), original) }, 0);
                     let _waiting = receive(&input, 2, false);
+                    assert_eq!(
+                        mode(&console),
+                        original & !ENABLE_VIRTUAL_TERMINAL_INPUT,
+                        "resume must establish cooked editing synchronously"
+                    );
+                    let _repeated_resume = receive(&input, 2, false);
+                    assert_eq!(mode(&console), original & !ENABLE_VIRTUAL_TERMINAL_INPUT);
                     write_text(&console, "ab\u{8}C");
                     queue_empty(&console);
                     input.pause();
+                    assert_eq!(mode(&console), original, "pause restores the exact inherited flags");
                     child_reads(&console, &format!("cooked-child-{round}"));
                     assert_eq!(
-                        received(receive(&input, 2, true), &format!("cooked edited partial round {round}, mode {mode}")).await,
+                        received(receive(&input, 2, true), &format!("cooked edited partial round {round}, mode {original}")).await,
                         b"aC"
                     );
+                    assert_eq!(mode(&console), original, "callback pause restores flags after repeated resume");
                 }
+                let original = ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), original) }, 0);
+                let _waiting = receive(&input, 11, false);
+                write_text(&console, "mode-parent");
+                queue_empty(&console);
+                input.set_raw_mode(true).unwrap();
+                assert_eq!(mode(&console), ENABLE_VIRTUAL_TERMINAL_INPUT);
+                input.pause();
+                input.set_raw_mode(false).unwrap();
+                assert_eq!(mode(&console), original, "RawMode must snapshot the inherited flags, not temporary cooked flags");
+                child_reads(&console, "mode-change-child");
+                assert_eq!(received(receive(&input, 11, true), "cooked partial across raw-mode change").await, b"mode-parent");
+                assert_eq!(mode(&console), original);
                 // Dropping a pending cooked read must release console ownership too.
                 input.resume(Rc::new(|_| panic!("unexpected parent input")));
+                assert_eq!(mode(&console), original & !ENABLE_VIRTUAL_TERMINAL_INPUT);
                 write_text(&console, "drop-parent");
                 queue_empty(&console);
                 drop(input);
+                assert_eq!(mode(&console), original, "Drop restores inherited cooked VT mode");
                 child_reads(&console, "drop-child");
             },
         ));
@@ -345,21 +374,23 @@ fn natural_newline_racing_pause_never_reaches_the_child() {
             async {
                 let input = Stdin::new();
                 for round in 0..32 {
-                    let mode = ENABLE_LINE_INPUT
+                    let original = ENABLE_LINE_INPUT
                         | ENABLE_ECHO_INPUT
                         | ENABLE_PROCESSED_INPUT
                         | if round >= 16 { ENABLE_VIRTUAL_TERMINAL_INPUT } else { 0 };
-                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), mode) }, 0);
+                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), original) }, 0);
                     let _waiting = receive(&input, 8, false);
+                    assert_eq!(mode(&console), original & !ENABLE_VIRTUAL_TERMINAL_INPUT);
                     write_text(&console, "parent");
                     queue_empty(&console);
                     // Enqueue the real Return first, then race its completion
                     // publication. Any synthetic Return belongs solely to the parent.
                     write_text(&console, "\r");
                     input.pause();
+                    assert_eq!(mode(&console), original);
                     child_reads(&console, &format!("race-child-{round}"));
                     assert_eq!(
-                        received(receive(&input, 8, true), &format!("natural newline race round {round}, mode {mode}")).await,
+                        received(receive(&input, 8, true), &format!("natural newline race round {round}, mode {original}")).await,
                         b"parent\r\n"
                     );
                 }

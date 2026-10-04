@@ -28,6 +28,8 @@ struct State {
     cooked: bool,
     injected: bool,
     cursor: Option<CONSOLE_SCREEN_BUFFER_INFO>,
+    cooked_mode: Option<u32>,
+    failure: Option<io::Error>,
 }
 
 struct Control {
@@ -48,6 +50,52 @@ impl Control {
         // SAFETY: the event remains owned until after the worker has joined.
         unsafe { SetEvent(self.wake.as_raw_handle()) };
         self.changed.notify_all();
+    }
+
+    fn activate(&self) {
+        let mut state = self.lock();
+        if state.closing || state.terminal || state.failure.is_some() {
+            return;
+        }
+        if !state.active && self.console_writer.is_some() {
+            let prepare = (|| {
+                let mode = console_mode(self.input.as_raw_handle())?;
+                if mode & (ENABLE_LINE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT) == (ENABLE_LINE_INPUT | ENABLE_VIRTUAL_TERMINAL_INPUT) {
+                    // libuv's normal mode excludes VT input. Besides changing
+                    // cooked Backspace editing, VT translation rewrites injected
+                    // records and erases the cancellation Return's scan tag.
+                    // Establish this before resume returns, not in the worker:
+                    // input typed immediately after resume must use normal editing.
+                    if unsafe { SetConsoleMode(self.input.as_raw_handle(), mode & !ENABLE_VIRTUAL_TERMINAL_INPUT) } == 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    state.cooked_mode.get_or_insert(mode);
+                }
+                Ok(())
+            })();
+            if let Err(error) = prepare {
+                state.failure = Some(error);
+                self.changed.notify_all();
+                return;
+            }
+        }
+        // SAFETY: the owned wake event remains live.
+        unsafe { ResetEvent(self.wake.as_raw_handle()) };
+        state.active = true;
+        self.changed.notify_all();
+    }
+
+    fn restore_cooked_mode(&self, state: &mut State) {
+        if let Some(mode) = state.cooked_mode {
+            // No OS read or cancellation marker may remain when the inherited
+            // mode is restored. Keep the snapshot on failure so Drop can retry.
+            if unsafe { SetConsoleMode(self.input.as_raw_handle(), mode) } != 0 {
+                state.cooked_mode = None;
+            } else if !state.terminal && state.failure.is_none() {
+                state.failure = Some(io::Error::last_os_error());
+                self.changed.notify_all();
+            }
+        }
     }
 
     fn park(&self) {
@@ -83,6 +131,7 @@ impl Control {
         while state.busy {
             state = self.changed.wait(state).unwrap_or_else(|error| error.into_inner());
         }
+        self.restore_cooked_mode(&mut state);
     }
 }
 
@@ -120,6 +169,8 @@ impl Reader {
                 cooked: false,
                 injected: false,
                 cursor: None,
+                cooked_mode: None,
+                failure: None,
             }),
             changed: Condvar::new(),
             input,
@@ -135,15 +186,7 @@ impl Reader {
 
     pub(crate) fn resume(&self) {
         let _command = self.commands.lock().unwrap_or_else(|error| error.into_inner());
-        self.activate();
-    }
-
-    fn activate(&self) {
-        let mut state = self.control.lock();
-        // SAFETY: the owned wake event remains live.
-        unsafe { ResetEvent(self.control.wake.as_raw_handle()) };
-        state.active = true;
-        self.control.changed.notify_all();
+        self.control.activate();
     }
 
     pub(crate) fn pause(&self) {
@@ -162,7 +205,7 @@ impl Reader {
         self.control.park();
         let result = change();
         if active {
-            self.activate();
+            self.control.activate();
         }
         result
     }
@@ -198,10 +241,16 @@ fn run(control: &Control, sender: tokio::sync::mpsc::UnboundedSender<Message>) {
     let mut decoder = ConsoleText::default();
     loop {
         let mut state = control.lock();
-        while !state.closing && !state.terminal && !(state.active && state.ready) {
+        while !state.closing && !state.terminal && state.failure.is_none() && !(state.active && state.ready) {
             state = control.changed.wait(state).unwrap_or_else(|error| error.into_inner());
         }
         if state.closing || state.terminal {
+            break;
+        }
+        if let Some(error) = state.failure.take() {
+            state.terminal = true;
+            state.ready = false;
+            let _ = sender.send(Message::Error(error));
             break;
         }
         let mode = if control.console_writer.is_some() { console_mode(control.input.as_raw_handle()) } else { Ok(0) };
@@ -513,4 +562,73 @@ fn text_key(record: &INPUT_RECORD) -> Option<(u16, u16)> {
         return None;
     }
     Some((unit, key.wRepeatCount))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(unit: u16, repeats: u16, down: bool, virtual_key: u16, scan: u16) -> INPUT_RECORD {
+        let mut record = INPUT_RECORD { EventType: KEY_EVENT as u16, ..INPUT_RECORD::default() };
+        record.Event.KeyEvent = KEY_EVENT_RECORD {
+            bKeyDown: down as i32,
+            wRepeatCount: repeats,
+            wVirtualKeyCode: virtual_key,
+            wVirtualScanCode: scan,
+            uChar: KEY_EVENT_RECORD_0 { UnicodeChar: unit },
+            dwControlKeyState: 0,
+        };
+        record
+    }
+
+    #[test]
+    fn raw_decoder_preserves_repeat_counts_and_alt_code_key_up() {
+        let mut decoder = ConsoleText::default();
+        let mut text = String::new();
+        decoder.record(&key(b'a' as u16, 3, true, 0x41, 0x1e), &mut text);
+        decoder.record(&key(b'x' as u16, 1, false, 0x58, 0x2d), &mut text);
+        decoder.record(&key(0xe9, 2, false, 0x12, 0x38), &mut text);
+        assert_eq!(text, "aaaéé");
+    }
+
+    #[test]
+    fn raw_decoder_pairs_repeated_surrogates_across_record_batches() {
+        let mut decoder = ConsoleText::default();
+        let mut first = String::new();
+        decoder.record(&key(0xd83d, 2, true, 0, 0), &mut first);
+        assert_eq!(first, "");
+        let mut next = String::new();
+        decoder.record(&key(0xde00, 2, true, 0, 0), &mut next);
+        assert_eq!(next, "😀😀");
+        assert!(decoder.high.is_none());
+    }
+
+    #[test]
+    fn raw_decoder_keeps_vt_nul_but_ignores_modifier_and_non_text_records() {
+        let mut decoder = ConsoleText::default();
+        let mut text = String::new();
+        decoder.record(&INPUT_RECORD { EventType: FOCUS_EVENT as u16, ..INPUT_RECORD::default() }, &mut text);
+        decoder.record(&INPUT_RECORD { EventType: WINDOW_BUFFER_SIZE_EVENT as u16, ..INPUT_RECORD::default() }, &mut text);
+        decoder.record(&key(0, 1, true, 0x10, 0x2a), &mut text);
+        decoder.record(&key(b'x' as u16, 0, true, 0, 0), &mut text);
+        assert_eq!(text, "");
+        for unit in [27, 91, 65, 0] {
+            decoder.record(&key(unit, 1, true, 0, 0), &mut text);
+        }
+        assert_eq!(text, "\x1b[A\0");
+    }
+
+    #[test]
+    fn raw_decoder_retains_surrogates_across_non_text_records() {
+        let mut decoder = ConsoleText::default();
+        let mut text = String::new();
+        decoder.record(&key(0xd83d, 1, true, 0, 0), &mut text);
+        decoder.record(&INPUT_RECORD { EventType: FOCUS_EVENT as u16, ..INPUT_RECORD::default() }, &mut text);
+        decoder.record(&key(0xde00, 1, true, 0, 0), &mut text);
+        assert_eq!(text, "😀");
+        decoder.record(&key(0xd83d, 1, true, 0, 0), &mut text);
+        decoder.record(&key(b'a' as u16, 1, true, 0, 0), &mut text);
+        decoder.record(&key(0xde00, 1, true, 0, 0), &mut text);
+        assert_eq!(text, "😀\u{fffd}a\u{fffd}");
+    }
 }
