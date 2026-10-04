@@ -298,7 +298,7 @@ impl Ableton {
         }
         let done = payload(&result)?;
         fn register(value: &Value, refs: &mut super::references::References) {
-            static LIVE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+:([a-z][a-z_]{0,31}):").unwrap());
+            static LIVE_REF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[0-9]+:([a-z][a-z_]{0,31}):").unwrap());
             match value {
                 Value::Array(items) => {
                     for item in items {

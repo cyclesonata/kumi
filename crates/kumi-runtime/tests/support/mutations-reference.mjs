@@ -7,7 +7,7 @@ if(!source.includes(marker))throw Error('source hook changed');
 source=source.replace(marker,`    let oracleArrange; return {
       async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;currentSet=c.set;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);oracleArrange=arrangeHost();},
       _bump(){observationGeneration++;},
-      async _op(op,signal){if(op.set!==undefined)currentSet=op.set;if(op.service==='watch')return watch(op.input,signal);if(op.service==='plan')return makeChanges(op.input,signal);if(op.service==='stream'){
+      async _op(op,signal){if(op.set!==undefined)currentSet=op.set;if(op.service==='public'){const tool=definitions().find(t=>t.name===op.tool);if(!tool)throw Error('Tool not offered');return tool.execute(op.input,signal);}if(op.service==='watch')return watch(op.input,signal);if(op.service==='plan')return makeChanges(op.input,signal);if(op.service==='stream'){
         let onStarts=0;const stream=streamChanges(signal,()=>onStarts++);const progress=[];
         for(const chunk of op.chunks??[]){stream.push(chunk);await new Promise(resolve=>setImmediate(resolve));progress.push({started:stream.started});}
         if(op.cancel)options._cancel();
@@ -25,10 +25,10 @@ const base={refs,shorts:refs.map(r=>r[0]),known:[['7:track:0',{name:'Bass',color
 const change=(tool,input={},extra={})=>({tool,input,...extra}),action=(tool,input={},extra={})=>({tool,input,action:true,...extra});
 const cases=[];
 try{
- const {createAbletonIntegration}=await import(file.href);
+ const {createAbletonIntegration,BRIDGE_TOOLS}=await import(file.href);
  const {CHANGES}=await import(new URL('changes.js',original));
  const {ACTIONS}=await import(new URL('actions.js',original));
- const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end','live_project_snapshot_export','live_project_snapshot_diff',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
+ const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end','live_project_snapshot_export','live_project_snapshot_diff',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply]),...BRIDGE_TOOLS])];
  async function run(label,provided,operations){
   const config={...base,...provided},calls=[],responses=[],events=[],actions=[],results=[],disks=[];let controller,integration;let listCalls=0,deviceReads=0,exportReads=0;const watchEvents=[];
   const endpoint={pid:null,serverInfo:{name:'fixture',version:config.version??'1.0.73'},async list(){listCalls++;return{tools:toolNames.filter(n=>!(config.missing??[]).includes(n)&&!(listCalls===1&&(config.initiallyMissing??[]).includes(n))).map(name=>({name,inputSchema:config.schemas?.[name]??{type:'object'}}))};},async call(name,args,signal){
@@ -138,6 +138,22 @@ try{
  await run('watch-malformed-track',{discoverBy:{track:{items:[null]}}},[watch('start'),watch('stop')]);
  const addedTrack={snapshotId:'new-track',kind:'track',name:'Recorded',order:1,data:{kind:'track',armed:true,monitoring:'off',mixer:{volume:.8},routing:{input:'Resampling'}}};
  await run('watch-added-track',{exports:[{page:{},records:[]},{page:{},records:[addedTrack]}],diff:{items:[{type:'change',kind:'track',afterSnapshotId:'new-track',facets:['added']}]},discoverBy:{track:{items:[{ref:'7:track:1',name:'Recorded',mediaKind:'audio'}]}}},[watch('start'),watch('stop')]);
+ const publicTool=(tool,input={},extra={})=>service('public',{tool,input,...extra});
+ for(const kind of CHANGES.filter(k=>!k.internal))await run('public-change-'+kind.tool,{},[publicTool(kind.tool)]);
+ for(const kind of ACTIONS)await run('public-action-'+kind.tool,{},[publicTool(kind.tool)]);
+ for(const input of [{},{track:3,from_beat:0,beats:4},{track:'track:1',from_beat:-1,beats:4},{track:'track:1',from_beat:0,beats:0},{track:'track:999',from_beat:0,beats:4},{track:'track:1',from_beat:0,beats:4},{track:'7:track:2',from_beat:1.5,beats:2.5}])await run('public-render',{other:{path:'/audio/result.wav',seconds:4,channels:2,sampleRate:48000}},[publicTool('render',input)]);
+ for(const response of [{throw:'bridge failed'},{reply:{isError:true,content:[{type:'text',text:'render refused'}]}},{reply:wrap({})},{reply:{content:[{type:'text',text:'bad JSON'}]}}])await run('public-render-failure',{fail:{other:response}},[publicTool('render',{track:'track:1',from_beat:0,beats:4})]);
+ for(const done of [true,false,null])for(const redo of [true,false,'true'])await run('public-live-undo',{other:{done}},[publicTool('undo_in_live',{redo})]);
+ for(const response of [{throw:'bridge failed'},{reply:{isError:true,content:[{type:'text',text:'undo refused'}]}},{reply:{content:[{type:'text',text:'bad JSON'}]}}])await run('public-live-undo-failure',{fail:{other:response}},[publicTool('undo_in_live')]);
+ for(const result of [null,3,{},[{ref:'7:track:90',type:'Track',name:'Created'},{ref:'7:clip:90:0',type:'Clip',name:'New clip'}],{nested:{ref:'7:device:90:0',type:'Device'}},{ref:'7:track:90',type:3,name:'Ignore'},{ref:'7:track:90',type:'Wrong',name:'X'.repeat(300)},{ref:'7:t_:0',type:'Other'},{ref:'۷:track:90',type:'Track',name:'Unicode digit'},{ref:'7:'+('a'.repeat(33))+':0',type:'Other'}])await run('public-python-register',{other:{ok:true,result}},[publicTool('run_python',{code:'result = None'})]);
+ for(const response of [{throw:'bridge failed'},{reply:{isError:true,content:[{type:'text',text:'python refused'}]}},{reply:{content:[{type:'text',text:'bad JSON'}]}},{reply:wrap({ok:false,result:{ref:'7:track:90',type:'Track',name:'Made before error'},error:'oops'})},{cancel:true,reply:wrap({ok:true,result:7})}])await run('public-python-failure',{fail:{other:response}},[publicTool('run_python',{code:'result = obj.name',ref:'track:1'})]);
+ await run('public-python-stale',{},[publicTool('run_python',{code:'result = obj.name',ref:'track:999'})]);
+ await run('public-python-retirement',{other:{ok:true,result:{ref:'7:track:90',type:'Track',name:'Made'}}},[publicTool('run_python',{code:'result = obj'}),publicTool('render',{track:'track:1',from_beat:0,beats:4}),publicTool('render',{track:'track:4',from_beat:0,beats:4})]);
+ for(const input of [{change:'missing'},{},{change:'last',final:true}])await run('public-undo',{},[publicTool('undo_change',input)]);
+ await run('public-plan',{},[publicTool('make_changes',{steps:[{tool:'set_tempo',input:{tempo:128}}],final:true})]);
+ await run('public-watch',{},[publicTool('watch_me',{action:'start'}),publicTool('watch_me',{action:'stop'})]);
+ for(const input of [{},{candidates:[]},{candidates:[{track:'track:1'}],beats:0}])await run('public-audition-invalid',{},[publicTool('audition',input)]);
+ for(const folders of [['relative'],[fixture],[fixture+'/missing'],[fixture,42]])await run('public-samples',{},[publicTool('find_sounds',{folders,limit:1,words:['missing']})]);
  const values=[],ids=new Map();for(const c of cases)c.responses=c.responses.map(v=>{const key=JSON.stringify(v);if(!ids.has(key)){ids.set(key,values.length);values.push(v);}return ids.get(key);});
  writeFileSync(new URL('mutations-oracle.json',import.meta.url),JSON.stringify({toolNames,cases,values})+'\n');console.log(cases.length+' source change/action sequences');
 }finally{unlinkSync(file);rmSync(fixture,{recursive:true,force:true})}

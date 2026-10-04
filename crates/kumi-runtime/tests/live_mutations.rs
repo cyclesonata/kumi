@@ -6,21 +6,12 @@ use kumi_common::{
 };
 use kumi_runtime::{
     core::{
-        contracts::{JsonObject, ToolResult},
+        contracts::{Integration, JsonObject, ToolResult},
         errors::RuntimeError,
     },
     integrations::ableton::{
-        actions::ACTIONS,
-        arrange::ArrangeHost,
-        changes::CHANGES,
-        connection::LiveConnection,
-        history::History,
-        mutations::Mutations,
-        observation::Observer,
-        options::AbletonOptions,
-        parameters::Parameters,
-        remember::{CurrentProject, Remember},
-        watch::Watch,
+        actions::ACTIONS, arrange::ArrangeHost, changes::CHANGES, connection::LiveConnection, integration::Ableton, mutations::Mutations,
+        observation::ObservationHost, options::AbletonOptions, remember::CurrentProject, watch::Watch,
     },
     mcp::{
         client::{McpEndpoint, StderrStatus},
@@ -193,8 +184,8 @@ async fn replay() {
             let result = disk.clone();
             async move { result }.boxed_local()
         }));
-        let options = Rc::new(options);
-        let connection = LiveConnection::new(options.connection_options());
+        let integration = Ableton::new(options);
+        let connection = integration.connection.clone();
         *endpoint.connection.borrow_mut() = Rc::downgrade(&connection);
         connection.start(Signal::new()).await.unwrap();
         connection.tools().unwrap().refresh(Signal::new()).await.unwrap();
@@ -217,7 +208,8 @@ async fn replay() {
                 book.cursors.insert(row[0].as_str().unwrap().into(), row[1].as_str().unwrap().into());
             }
         }
-        let remember = Remember::new(connection.clone(), None, None);
+        let history = integration.history.clone();
+        let remember = history.remember.clone();
         if let Some(project) = config.get("project") {
             *remember.current.borrow_mut() = Some(Rc::new(CurrentProject {
                 identity: project["identity"].as_str().unwrap().into(),
@@ -225,12 +217,11 @@ async fn replay() {
                 name: project["name"].as_str().unwrap().into(),
             }));
         }
-        let history = Rc::new(History::new(connection.clone(), remember.clone(), options.change_timeout_ms, options.on_change.clone()));
         history.changes_this_turn.set(config["count"].as_u64().unwrap_or(0) as usize);
-        let parameters = Rc::new(Parameters::new(history.clone(), options.fast));
-        let observer = Rc::new(Observer::new(connection.clone(), remember.clone()));
+        let parameters = integration.mutations.parameters.clone();
+        let observer = integration.observer.clone();
         observer.tempo.set(Some(120.0));
-        let mutations = Rc::new(Mutations::new(parameters.clone(), observer.clone(), options));
+        let mutations = integration.mutations.clone();
         let arrangement = mutations.arrange_host();
         let watcher = Watch::new(mutations.clone());
         for sample in config["samples"].as_array().into_iter().flatten() {
@@ -250,9 +241,17 @@ async fn replay() {
                 *connection.set.borrow_mut() = Some(set.into());
             }
             let work = async {
-                let input = operation["input"].as_object().cloned().unwrap_or_default();
+                let input = serde_json::from_str::<Value>(&serde_json::to_string(&operation["input"]).unwrap().replace("<fixture>", &root))
+                    .unwrap()
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default();
                 if let Some(service) = operation["service"].as_str() {
                     let result: Result<Value, RuntimeError> = match service {
+                        "public" => match integration.definitions().into_iter().find(|t| Some(t.name()) == operation["tool"].as_str()) {
+                            Some(tool) => tool.execute(input, signal).await.map(tool_result),
+                            None => Err(RuntimeError::plain("Tool not offered")),
+                        },
                         "plan" => mutations.make_changes(input, signal).await.map(tool_result),
                         "watch" => watcher.execute(input, signal).await.map(tool_result),
                         "stream" => streaming(&mutations, operation, signal).await,
@@ -324,6 +323,6 @@ async fn replay() {
         let unique: std::collections::HashSet<_> = keys.iter().collect();
         assert_eq!(keys.len(), unique.len(), "{label} reuses mutation keys");
         remember.cancel_timer();
-        connection.close().await.unwrap();
+        integration.close().await.unwrap();
     }
 }
