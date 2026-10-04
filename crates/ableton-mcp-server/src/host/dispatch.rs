@@ -149,6 +149,9 @@ impl McpHost {
             optional!(dispatch_device_basic_tool);
             optional!(dispatch_data_tool);
             optional!(dispatch_follow_tool);
+            optional!(dispatch_midi_transform_tool);
+            optional!(dispatch_advanced_device_tool);
+            optional!(dispatch_willington_tool);
             optional!(dispatch_clip_properties_tool);
             optional!(dispatch_extended_mixer_tool);
             optional!(dispatch_audio_clip_tool);
@@ -346,6 +349,18 @@ impl McpHost {
             }
             if ["mixerext_", "chainmix_", "devio_"].iter().any(|prefix| tx.starts_with(prefix)) {
                 return Ok(self.undo_extended_mixer_async(id, params, signal).await);
+            }
+            if tx.starts_with("miditransform_") {
+                return Ok(self.undo_midi_transform_async(id, params, signal).await);
+            }
+            if tx.starts_with("devadv_") {
+                return Ok(self.undo_device_advanced_async(id, params, signal).await);
+            }
+            if tx.starts_with("chainset_") {
+                return Ok(self.undo_chain_async(id, params, signal).await);
+            }
+            if tx.starts_with("willington_") {
+                return Ok(self.undo_willington_async(id, params, signal).await);
             }
             if tx.starts_with("data_") {
                 return Ok(self.undo_data_async(id, params, signal).await);
