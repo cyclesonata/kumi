@@ -152,6 +152,12 @@ impl McpHost {
             optional!(dispatch_midi_transform_tool);
             optional!(dispatch_advanced_device_tool);
             optional!(dispatch_willington_tool);
+            optional!(dispatch_device_edit_tool);
+            optional!(dispatch_rack_tool);
+            optional!(dispatch_scene_tool);
+            optional!(dispatch_track_view_tool);
+            optional!(dispatch_track_properties_tool);
+            optional!(dispatch_song_settings_tool);
             optional!(dispatch_fire_button_tool);
             optional!(dispatch_specialized_device_tool);
             optional!(dispatch_looper_tool);
@@ -371,6 +377,27 @@ impl McpHost {
             }
             if tx.starts_with("willington_") {
                 return Ok(self.undo_willington_async(id, params, signal).await);
+            }
+            if tx.starts_with("devedit_") {
+                return Ok(self.undo_device_edit_async(id, params, signal).await);
+            }
+            if tx.starts_with("rack_") {
+                return Ok(self.undo_rack_async(id, params, signal).await);
+            }
+            if tx.starts_with("rackview_") {
+                return Ok(self.undo_rack_async(id, params, signal).await);
+            }
+            if tx.starts_with("sceneset_") {
+                return Ok(self.undo_scene_async(id, params, signal).await);
+            }
+            if tx.starts_with("trackview_") {
+                return Ok(self.undo_track_view_async(id, params, signal).await);
+            }
+            if tx.starts_with("trackset_") {
+                return Ok(self.undo_track_properties_async(id, params, signal).await);
+            }
+            if tx.starts_with("songset_") {
+                return Ok(self.undo_song_settings_async(id, params, signal).await);
             }
             if tx.starts_with("firebutton_") {
                 return Ok(self.undo_fire_button(id));
