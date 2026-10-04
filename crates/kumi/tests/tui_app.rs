@@ -786,3 +786,24 @@ case!(whole_screens_match_source, async {
         h.close().await;
     }
 });
+
+#[tokio::test(flavor = "current_thread")]
+async fn quitting_right_after_a_change_leaves_nothing_running() {
+    // A change's flash ends with a redraw 4 s later. Quitting before then mustn't wait on it: the
+    // process's shutdown waits for every task, then calls a leftover a live handle and exits 1.
+    let local = tokio::task::LocalSet::new();
+    let code = local
+        .run_until(async {
+            let h = Harness::new(120, 36);
+            let done = h.app.run();
+            delay(5).await;
+            h.connect();
+            h.emit(json!({"type":"remembered","scope":"set","note":{"id":"s1","text":"The Reese is the main bass","at":1}}));
+            delay(5).await;
+            h.type_text("\x03").await;
+            done.await
+        })
+        .await;
+    assert_eq!(code, 0);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(500), local).await.is_ok(), "a task outlived the app");
+}

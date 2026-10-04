@@ -701,7 +701,9 @@ impl TuiApp {
     }
     fn flash(&self) {
         let weak = Rc::downgrade(&self.0);
-        tokio::task::spawn_local(async move {
+        // A redraw when the flash ends, kept so quitting aborts it: a JavaScript timer that didn't hold
+        // the process open.
+        let timer = tokio::task::spawn_local(async move {
             tokio::time::sleep(Duration::from_millis((CHANGE_FLASH_MS + 20.) as u64)).await;
             if let Some(a) = weak.upgrade() {
                 if !a.state.borrow().closing {
@@ -709,6 +711,9 @@ impl TuiApp {
                 }
             }
         });
+        let mut state = self.0.state.borrow_mut();
+        state.flash_timers.retain(|timer| !timer.is_finished());
+        state.flash_timers.push(timer);
     }
     pub(super) fn memory_line(&self, what: MemoryKind, text: &str) {
         let text = self.clean_line(text, 300);

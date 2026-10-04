@@ -216,6 +216,8 @@ struct State {
     wake_timer: Option<JoinHandle<()>>,
     wake_time: Option<f64>,
     beat_timer: Option<JoinHandle<()>>,
+    /// The redraws that end changes' flashes; quitting doesn't wait for them.
+    flash_timers: Vec<JoinHandle<()>>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -284,6 +286,7 @@ impl State {
             wake_timer: None,
             wake_time: None,
             beat_timer: None,
+            flash_timers: Vec::new(),
         }
     }
 }
@@ -499,7 +502,8 @@ impl TuiApp {
             state.closing = true;
             state.suppress = true;
             state.stream.discard();
-            for task in [state.tree_refresh.take(), state.wake_timer.take(), state.beat_timer.take()].into_iter().flatten() {
+            let flashes = std::mem::take(&mut state.flash_timers);
+            for task in [state.tree_refresh.take(), state.wake_timer.take(), state.beat_timer.take()].into_iter().flatten().chain(flashes) {
                 task.abort();
             }
             if let Some(panel) = state.panel.take() {
