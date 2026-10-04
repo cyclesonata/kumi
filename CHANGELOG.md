@@ -3,6 +3,13 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## Unreleased
+
+- Python that removes notes the pre-Live 11 way (`remove_notes`, `replace_selected_notes`) no longer
+  stops Live with "A custom MIDI Remote Script uses an older process to modify MIDI notes". The bridge
+  (1.0.74) refuses those calls before a script runs and names Live 11's calls instead. Kumi's model is
+  also told to use Live 11's calls, which keep each note's MPE, probability and velocity data.
+
 ## 1.7.4 — 2026-10-03
 
 Ships with bridge 1.0.73.
