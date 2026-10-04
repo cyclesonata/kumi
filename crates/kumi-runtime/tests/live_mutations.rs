@@ -1,0 +1,246 @@
+use async_trait::async_trait;
+use futures::FutureExt;
+use kumi_common::{
+    abort::{Signal, SignalExt},
+    js::json::stringify,
+};
+use kumi_runtime::{
+    core::{contracts::JsonObject, errors::RuntimeError},
+    integrations::ableton::{
+        actions::ACTIONS,
+        changes::CHANGES,
+        connection::LiveConnection,
+        history::History,
+        mutations::Mutations,
+        observation::Observer,
+        options::AbletonOptions,
+        parameters::Parameters,
+        remember::{CurrentProject, Remember},
+    },
+    mcp::{
+        client::{McpEndpoint, StderrStatus},
+        types::{CallToolResult, Implementation, ListToolsResult},
+    },
+};
+use serde_json::{json, Value};
+use std::{
+    cell::{Cell, RefCell},
+    rc::{Rc, Weak},
+};
+
+struct Fixture {
+    case: Value,
+    tools: Value,
+    calls: RefCell<Vec<Value>>,
+    lists: Cell<usize>,
+    original: RefCell<Signal>,
+    connection: RefCell<Weak<LiveConnection>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for Fixture {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        Some(
+            serde_json::from_value(
+                json!({"name":"fixture","version":self.case["config"].get("version").cloned().unwrap_or(json!("1.0.73"))}),
+            )
+            .unwrap(),
+        )
+    }
+    async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
+        self.lists.set(self.lists.get() + 1);
+        let contains = |key: &str, name: &Value| self.case["config"][key].as_array().is_some_and(|a| a.contains(name));
+        Ok(serde_json::from_value(json!({"tools":self.tools.as_array().unwrap().iter().filter(|name|!contains("missing",name)&&!(self.lists.get()==1&&contains("initiallyMissing",name))).map(|name|json!({"name":name,"inputSchema":{"type":"object"}})).collect::<Vec<_>>()})).unwrap())
+    }
+    async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
+        signal.check()?;
+        let index = self.calls.borrow().len();
+        let call = json!({"name":name,"args":args});
+        eq(&call, &self.case["calls"][index], &format!("{} dispatch {index}", self.case["label"]));
+        self.calls.borrow_mut().push(call);
+        let response = &self.case["responses"][index];
+        if response["cancel"] == true {
+            self.original.borrow().cancel();
+        }
+        if response["bump"] == true {
+            let connection = self.connection.borrow().upgrade().unwrap();
+            connection.lease.set(connection.lease.get() + 1);
+        }
+        if let Some(error) = response["throw"].as_str() {
+            return Err(RuntimeError::plain(error));
+        }
+        serde_json::from_value(response["reply"].clone()).map_err(|e| RuntimeError::plain(e.to_string()))
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+fn canonical(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<_> = map.keys().collect();
+            keys.sort();
+            Value::Object(keys.into_iter().map(|key| (key.clone(), canonical(&map[key]))).collect())
+        }
+        Value::Array(a) => Value::Array(a.iter().map(canonical).collect()),
+        v => v.clone(),
+    }
+}
+fn normalized(value: &Value) -> String {
+    let text = stringify(&canonical(value)).replace(&kumi_runtime::library::sources::homedir(), "<home>");
+    let text = regex::Regex::new(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").unwrap().replace_all(&text, "<uuid>");
+    regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&text, "<change>").into_owned()
+}
+fn eq(actual: &Value, expected: &Value, label: &str) {
+    assert_eq!(normalized(actual), normalized(expected).replace("npm run kumi --", &kumi_runtime::command::KUMI), "{label}");
+}
+#[tokio::test(flavor = "current_thread")]
+async fn preview_apply_history_reference_retirement_and_actions_match_source() {
+    tokio::task::LocalSet::new().run_until(replay()).await;
+}
+async fn replay() {
+    let fixture: Value = serde_json::from_str(include_str!("support/mutations-oracle.json")).unwrap();
+    for (case_index, original) in fixture["cases"].as_array().unwrap().iter().enumerate() {
+        let mut case = original.clone();
+        case["responses"] = json!(case["responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|id| fixture["values"][id.as_u64().unwrap() as usize].clone())
+            .collect::<Vec<_>>());
+        let endpoint = Rc::new(Fixture {
+            case: case.clone(),
+            tools: fixture["toolNames"].clone(),
+            calls: RefCell::new(Vec::new()),
+            lists: Cell::new(0),
+            original: RefCell::new(Signal::new()),
+            connection: RefCell::new(Weak::new()),
+        });
+        let config = &case["config"];
+        let events = Rc::new(RefCell::new(Vec::<Value>::new()));
+        let actions = Rc::new(RefCell::new(Vec::<Value>::new()));
+        let disks = Rc::new(RefCell::new(Vec::<Value>::new()));
+        let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+        let out = endpoint.clone();
+        options.connect = Some(Rc::new(move |_| {
+            let endpoint: Rc<dyn McpEndpoint> = out.clone();
+            async move { Ok(endpoint) }.boxed_local()
+        }));
+        options.now = Some(Rc::new(|| chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z").unwrap().with_timezone(&chrono::Utc)));
+        options.generation = Some("connection".into());
+        options.fast = Some(false);
+        options.change_timeout_ms = Some(50);
+        let out = events.clone();
+        options.on_change = Some(Rc::new(move |record| out.borrow_mut().push(json!(record))));
+        let out = actions.clone();
+        options.on_action = Some(Rc::new(move |event| out.borrow_mut().push(json!(event))));
+        let out = disks.clone();
+        let disk = config["disk"].as_str().map(str::to_owned);
+        options.low_disk = Some(Rc::new(move |folder, bytes, what| {
+            out.borrow_mut().push(json!([folder, bytes, what]));
+            let result = disk.clone();
+            async move { result }.boxed_local()
+        }));
+        let options = Rc::new(options);
+        let connection = LiveConnection::new(options.connection_options());
+        *endpoint.connection.borrow_mut() = Rc::downgrade(&connection);
+        connection.start(Signal::new()).await.unwrap();
+        connection.tools().unwrap().refresh(Signal::new()).await.unwrap();
+        connection.available.set(config["available"].as_bool().unwrap_or(true));
+        connection.lost.set(config["lost"].as_bool().unwrap_or(false));
+        connection.epoch.set((config["noEpoch"] != true).then_some(7.0));
+        {
+            let mut book = connection.references.borrow_mut();
+            for row in config["refs"].as_array().into_iter().flatten() {
+                book.refs.insert(row[0].as_str().unwrap().into(), row[1].as_str().unwrap().into());
+            }
+            for reference in config["shorts"].as_array().into_iter().flatten() {
+                book.short_ref(reference.as_str().unwrap());
+            }
+            for row in config["known"].as_array().into_iter().flatten() {
+                book.known.insert(row[0].as_str().unwrap().into(), serde_json::from_value(row[1].clone()).unwrap());
+            }
+            for row in config["cursors"].as_array().into_iter().flatten() {
+                book.cursors.insert(row[0].as_str().unwrap().into(), row[1].as_str().unwrap().into());
+            }
+        }
+        let remember = Remember::new(connection.clone(), None, None);
+        if let Some(project) = config.get("project") {
+            *remember.current.borrow_mut() = Some(Rc::new(CurrentProject {
+                identity: project["identity"].as_str().unwrap().into(),
+                path: project["path"].as_str().map(str::to_owned),
+                name: project["name"].as_str().unwrap().into(),
+            }));
+        }
+        let history = Rc::new(History::new(connection.clone(), remember.clone(), options.change_timeout_ms, options.on_change.clone()));
+        history.changes_this_turn.set(config["count"].as_u64().unwrap_or(0) as usize);
+        let parameters = Rc::new(Parameters::new(history.clone(), options.fast));
+        let observer = Rc::new(Observer::new(connection.clone(), remember.clone()));
+        observer.tempo.set(Some(120.0));
+        let mutations = Mutations::new(parameters.clone(), observer.clone(), options);
+        for sample in config["samples"].as_array().into_iter().flatten() {
+            mutations
+                .samples
+                .samples
+                .borrow_mut()
+                .insert(sample["path"].as_str().unwrap().into(), serde_json::from_value(sample.clone()).unwrap());
+        }
+        for (index, operation) in case["operations"].as_array().unwrap().iter().enumerate() {
+            let signal = Signal::new();
+            if operation["abort"] == true {
+                signal.cancel();
+            }
+            *endpoint.original.borrow_mut() = signal.clone();
+            let work = async {
+                let input = operation["input"].as_object().unwrap().clone();
+                if operation["action"] == true {
+                    let kind = ACTIONS.iter().find(|k| k.tool == operation["tool"].as_str().unwrap()).unwrap();
+                    json!(mutations.act(kind, input, signal, operation["cleanup"] == true).await)
+                } else {
+                    let kind = CHANGES.iter().find(|k| k.tool == operation["tool"].as_str().unwrap()).unwrap();
+                    json!(mutations.change(kind, input, signal, operation["settled"] == true).await)
+                }
+            };
+            let value = if operation["quiet"] == true { history.quietly(Some(&mut Vec::new()), work).await } else { work.await };
+            let changes: Vec<_> = history.entries.borrow().values().map(|entry| json!(*entry.borrow())).collect();
+            let state = {
+                let mut book = connection.references.borrow_mut();
+                let names: Vec<_> = book
+                    .named_references()
+                    .into_iter()
+                    .map(|reference| {
+                        let short = book.short_ref(&reference);
+                        json!([reference, short])
+                    })
+                    .collect();
+                json!({"changes":changes,"changesThisTurn":history.changes_this_turn.get(),"refs":book.refs.iter().collect::<Vec<_>>(),"known":book.known.iter().collect::<Vec<_>>(),"names":names,"cursors":book.cursors.iter().collect::<Vec<_>>(),"tempo":observer.tempo.get(),"lease":connection.lease.get(),"found":parameters.fast_found.borrow().iter().collect::<Vec<_>>()})
+            };
+            let label = format!("{} case {case_index} step {index}", case["label"]);
+            eq(&value, &case["results"][index]["value"], &label);
+            eq(&state, &case["results"][index]["state"], &format!("{label} state"));
+        }
+        let label = format!("{} case {case_index}", case["label"]);
+        eq(&json!(*endpoint.calls.borrow()), &case["calls"], &format!("{label} calls"));
+        eq(&json!(*events.borrow()), &case["events"], &format!("{label} events"));
+        eq(&json!(*actions.borrow()), &case["actions"], &format!("{label} actions"));
+        eq(&json!(*disks.borrow()), &case["disks"], &format!("{label} disk"));
+        eq(&json!(endpoint.lists.get()), &case["listCalls"], &format!("{label} lists"));
+        let keys: Vec<_> =
+            endpoint.calls.borrow().iter().filter_map(|call| call["args"]["idempotencyKey"].as_str().map(str::to_owned)).collect();
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(keys.len(), unique.len(), "{label} reuses mutation keys");
+        remember.cancel_timer();
+        connection.close().await.unwrap();
+    }
+}

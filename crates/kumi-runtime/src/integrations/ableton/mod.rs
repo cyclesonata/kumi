@@ -1,6 +1,8 @@
 //! Port of `packages/runtime/src/integrations/ableton/index.ts`.
 
+pub mod action_execution;
 pub mod actions;
+pub mod change_context;
 pub mod arrange;
 pub mod audition;
 pub mod bridge_version;
@@ -22,6 +24,7 @@ pub mod views;
 pub use inference::create_inference_only_integration;
 pub mod live_command;
 pub mod more_changes;
+pub mod mutations;
 pub mod observation;
 pub mod options;
 pub mod parameters;

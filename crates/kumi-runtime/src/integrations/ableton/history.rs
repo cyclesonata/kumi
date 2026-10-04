@@ -126,6 +126,9 @@ impl History {
             let _ = catch_unwind(AssertUnwindSafe(|| listener(record.clone())));
         }
     }
+    pub fn is_quiet(&self) -> bool {
+        self.quiet.borrow().is_some()
+    }
     pub fn remember(&self, record: ChangeRecord, transaction_id: String, restore: Option<Restore>) {
         self.entries.borrow_mut().insert(record.id.clone(), Rc::new(RefCell::new(Applied::new(record.clone(), transaction_id, restore))));
         if let Some(quiet) = self.quiet.borrow_mut().as_mut() {
