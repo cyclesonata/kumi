@@ -139,6 +139,8 @@ impl McpHost {
             optional!(dispatch_device_state_tool);
             optional!(dispatch_history_tool);
             optional!(dispatch_note_edit_tool);
+            optional!(dispatch_routing_tool);
+            optional!(dispatch_session_capture_tool);
             // Kept explicit until every source family has landed: a missing port is never reported
             // as a successful operation or silently routed to another mutation.
             Err(LiveError::error(format!("MCP tool implementation is not ported yet: {}", call.name)))
@@ -294,6 +296,12 @@ impl McpHost {
             if tx.starts_with("noteupdate_") || tx.starts_with("notedelete_") {
                 return Ok(self.undo_note_edit_async(id, params, signal).await);
             }
+            if tx.starts_with("capturemidi_") || tx.starts_with("scenecapture_") {
+                return Ok(self.undo_session_capture_async(id, params, signal).await);
+            }
+            if tx.starts_with("routing_") {
+                return Ok(self.undo_routing_async(id, params, signal).await);
+            }
             if tx.starts_with("parameter_") {
                 return Ok(self.undo_device_parameter_async(id, params, signal).await);
             }
@@ -347,13 +355,19 @@ impl McpHost {
         if !has_only(params, &[]) {
             return error(id, -32602, "no arguments accepted", None);
         }
-        self.adapter
+        self.async_adapter()
             .invoke_async(
                 &LiveInvocation::new("subscribe", json!({"types":[]})),
                 Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS))),
             )
             .await
-            .map(|r| success_text(id, &json!({"subscribed":r["subscribed"]==true})))
+            .and_then(|r| {
+                if r.is_null() {
+                    Err(LiveError::type_error("Cannot read properties of null (reading 'subscribed')"))
+                } else {
+                    Ok(success_text(id, &json!({"subscribed":r["subscribed"]==true})))
+                }
+            })
             .unwrap_or_else(|cause| adapter_tool_error(id, &cause, "Unsubscribe failed."))
     }
 }
