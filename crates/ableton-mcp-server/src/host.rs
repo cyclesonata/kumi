@@ -57,6 +57,7 @@ mod rename;
 mod resources;
 pub mod retention;
 mod routing;
+mod scene;
 mod session_capture;
 mod structure;
 mod specialized_devices;
