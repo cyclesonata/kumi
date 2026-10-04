@@ -134,8 +134,9 @@ pub fn legacy_entry(app: &str) -> String {
 pub fn has_app(app: &str) -> bool {
     Path::new(&join(app, &executable_name("kumi"))).is_file() || Path::new(&legacy_entry(app)).is_file()
 }
-/// Complete a receipt-bound bridge transition after the old updater's application swap.
-pub async fn finish_legacy_transition(io: &InstalledIo) -> Result<(), RuntimeError> {
+/// Complete a receipt-bound bridge transition after the old updater's application swap. Best effort:
+/// Kumi opens whatever happens here, and keeps chatting through the existing bridge until it switches.
+pub async fn finish_legacy_transition(io: &InstalledIo) {
     let home = kumi_home(&io.env);
     let app = join(&home, "app");
     let native = fs::read(join(&app, "package.json"))
@@ -143,17 +144,21 @@ pub async fn finish_legacy_transition(io: &InstalledIo) -> Result<(), RuntimeErr
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .is_some_and(|metadata| metadata["runtime"] == "rust-native");
     if !native {
-        return Ok(());
+        return;
     }
-    let Some(config) = find_bridge_config(&io.env) else { return Ok(()) };
-    let Some(server) = read_bridge_server(&config).ok().filter(|s| !s.native()) else { return Ok(()) };
-    let Some(bundled) = bridge_version(&app) else { return Ok(()) };
+    let Some(config) = find_bridge_config(&io.env) else { return };
+    let Some(server) = read_bridge_server(&config).ok().filter(|s| !s.native()) else { return };
+    let Some(bundled) = bridge_version(&app) else { return };
     if server.version.as_deref().is_none_or(|version| version != bundled && !newer_version(&bundled, version)) {
-        return Ok(());
+        return;
+    }
+    // Live has the existing Remote Script loaded: switching needs Live closed, so wait, quietly (the
+    // session says how to switch). A connect is instant; asking the system about Live is not (Windows).
+    if crate::bridge_setup::remote_script_answers(&config).await {
+        return;
     }
     if live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
-        io.out.write("Kumi is now native. The bridge can switch after Live closes; chatting with the existing bridge for now.\n");
-        return Ok(());
+        return;
     }
     let mut setup = crate::bridge_setup::BridgeSetupIo::new(io.out.clone(), io.env.clone());
     setup.input = io.input.clone();
@@ -163,10 +168,13 @@ pub async fn finish_legacy_transition(io: &InstalledIo) -> Result<(), RuntimeErr
     setup.wait_ms = Some(0);
     setup.run = io.run.clone();
     setup.live_running = io.live_running.clone();
-    if crate::bridge_setup::setup_bridge(setup).await? != 0 {
-        io.out.write("Kumi can still open. To finish switching the bridge, close Live and run: kumi bridge\n");
+    match crate::bridge_setup::setup_bridge(setup).await {
+        Ok(0) => {}
+        Ok(_) => io.out.write("Kumi can still open. To finish switching the bridge, close Live and run: kumi bridge\n"),
+        Err(reason) => io.out.write(&format!(
+            "Kumi can still open; the bridge couldn't switch ({reason}). To finish switching it, close Live and run: kumi bridge\n"
+        )),
     }
-    Ok(())
 }
 
 pub(super) struct BridgeRollback {

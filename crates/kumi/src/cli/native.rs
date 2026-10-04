@@ -343,7 +343,7 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
         }
         AppConfig::InferenceOnly { .. } | AppConfig::Live { .. } => {
             if io.installed() && matches!(config, AppConfig::Live { .. }) {
-                install::finish_legacy_transition(&installed_io(io)).await?;
+                install::finish_legacy_transition(&installed_io(io)).await;
             }
             session::run_session(io.clone(), config, secrets, factory).await
         }

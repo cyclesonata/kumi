@@ -536,3 +536,68 @@ async fn rollback_to_legacy_requires_closed_live_and_retained_legacy_bridge_gene
         }
     }
 }
+
+/// A native app over a JavaScript bridge of the same version, as the old updater leaves it; `port` is
+/// where the old Remote Script would answer.
+fn legacy_bridge(dir: &Path, port: u16) -> (Env, String) {
+    let env = env(dir);
+    let home = dir.join("home");
+    put(home.join("app/package.json"), json!({"version":"1.7.6","bridge":"1.0.74","runtime":"rust-native"}).to_string());
+    put(home.join("app").join(executable_name("ableton-mcp-server")), "native bridge");
+    let package = dir.join("old bridge/package");
+    put(package.join("package.json"), json!({"version":"1.0.74"}).to_string());
+    let config = dir.join("state/bridge-config.json");
+    let entry = package.join("dist/src/cli.js");
+    put(
+        &config,
+        json!({"version":2,"server":{"command":"/usr/bin/node","args":[entry, "--config", config]},"bridge":{"host":"127.0.0.1","port":port}})
+            .to_string(),
+    );
+    put(dir.join("Remote Scripts/AbletonMcpBridge/bridge-reference.json"), json!({"config":config}).to_string());
+    (env, fs::read_to_string(&config).unwrap())
+}
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+#[tokio::test]
+async fn startup_switch_waits_quietly_while_live_has_the_old_remote_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (env, config) = legacy_bridge(dir.path(), listener.local_addr().unwrap().port());
+    let (mut installed, out) = io(&env);
+    installed.live_running =
+        Some(Rc::new(|| async { panic!("Live's process list is not needed while the Remote Script answers") }.boxed_local()));
+    installed.run = Some(Rc::new(|command, _, _| async move { panic!("nothing runs while Live is open: {command}") }.boxed_local()));
+    finish_legacy_transition(&installed).await;
+    assert_eq!(*out.0.borrow(), "");
+    assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
+}
+#[tokio::test]
+async fn startup_switch_failure_never_stops_kumi_and_leaves_no_partial_bridge() {
+    // Unwritable: the bridge folder can't be made.
+    let dir = tempfile::tempdir().unwrap();
+    let (env, config) = legacy_bridge(dir.path(), free_port());
+    put(dir.path().join("home/bridge"), "a file where the bridge folder goes");
+    let (mut installed, out) = io(&env);
+    installed.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+    finish_legacy_transition(&installed).await;
+    assert!(out.0.borrow().contains("Kumi can still open; the bridge couldn't switch ("), "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
+    // Stopped after its folder was made: the folder goes too.
+    let dir = tempfile::tempdir().unwrap();
+    let (env, config) = legacy_bridge(dir.path(), free_port());
+    let (mut installed, out) = io(&env);
+    installed.live_running = Some(Rc::new(|| async { false }.boxed_local()));
+    installed.run =
+        Some(Rc::new(|_, _, _| async { Ran { code: 1, stdout: String::new(), stderr: "no space left on device".into() } }.boxed_local()));
+    finish_legacy_transition(&installed).await;
+    assert!(
+        out.0.borrow().contains("Kumi can still open. To finish switching the bridge, close Live and run: kumi bridge"),
+        "{}",
+        out.0.borrow()
+    );
+    let left: Vec<_> =
+        fs::read_dir(dir.path().join("home/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(fs::read_to_string(dir.path().join("state/bridge-config.json")).unwrap(), config);
+}

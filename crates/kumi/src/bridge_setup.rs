@@ -422,6 +422,20 @@ pub(crate) fn owner_paths(config: &str, package: &str, home: &str) -> Option<(St
     }
     None
 }
+/// A bridge folder made for an install that hasn't finished: removed when the install stops early.
+struct Unfinished(Option<String>);
+impl Unfinished {
+    fn keep(mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for Unfinished {
+    fn drop(&mut self) {
+        if let Some(folder) = self.0.take() {
+            let _ = fs::remove_dir_all(folder);
+        }
+    }
+}
 pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     let say = |line: &str| io.out.write(&format!("{line}\n"));
     let run = io.run.clone().unwrap_or_else(default_run);
@@ -497,6 +511,8 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         dirs.mode(0o700);
     }
     dirs.create(&folder).map_err(error)?;
+    // Until the lifecycle has put this version in place, nothing refers to its folder.
+    let unfinished = Unfinished(Some(folder.clone()));
     let prepared = io.prepared.clone().unwrap_or_else(|| join(&executable_dir(), "bridge"));
     let ready = prepared_bridge(&prepared);
     let artifact;
@@ -614,6 +630,7 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         say(&format!("The bridge's installer stopped, and put back what was there: {reason}"));
         return Ok(1);
     }
+    unfinished.keep();
     say(&format!("Done: the Ableton bridge {bundled} is installed ({}).", tilde(&scripts)));
     place_extension(&io, std::slice::from_ref(&root), false);
     place_ears(io.out.as_ref(), &scripts).await;
