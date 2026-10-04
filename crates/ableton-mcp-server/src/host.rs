@@ -28,6 +28,7 @@ mod rename;
 mod resources;
 mod routing;
 pub mod retention;
+mod session_capture;
 mod structure;
 mod tempo;
 mod transport;
