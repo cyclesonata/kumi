@@ -21,6 +21,7 @@ mod events;
 pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
+mod mixer;
 pub mod mutations;
 mod note_edit;
 mod note_target;
