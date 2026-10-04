@@ -243,11 +243,20 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                 child_reads(&console, "raw-child");
 
                 input.set_raw_mode(true).unwrap();
-                let expected = format!("{}😀😀", "x".repeat(127));
-                let boundary = receive(&input, expected.len(), true);
-                let mut records = vec![key(b'x' as u16, 1); 127];
-                records.extend([key(0xd83d, 1), key(0xde00, 1), key(0xd83d, 1), key(0xde00, 1)]);
+                // Queue the full boundary while parked. Alternating characters
+                // prevent the console from coalescing repeated ASCII records.
+                let prefix: String = (0..127).map(|index| if index % 2 == 0 { 'x' } else { 'y' }).collect();
+                let expected = format!("{prefix}😀");
+                let mut records: Vec<_> = prefix.encode_utf16().map(|unit| key(unit, 1)).collect();
+                records.extend([key(0xd83d, 1), key(0xde00, 1)]);
                 write_records(&console, &records);
+                let mut queued = 0;
+                assert_ne!(unsafe { GetNumberOfConsoleInputEvents(console.as_raw_handle(), &mut queued) }, 0);
+                assert_eq!(queued, 129, "the high surrogate must be record128 and its low surrogate record129");
+                // Pause in the first callback, even if it contains only the ASCII
+                // prefix. Waiting for the full expected length would hide a pair
+                // split across callbacks and leave its second half for the child.
+                let boundary = receive(&input, 1, true);
                 assert_eq!(received(boundary, "raw surrogate batch128 boundary").await, expected.as_bytes());
                 input.set_raw_mode(false).unwrap();
                 child_reads(&console, "surrogate-boundary-child");
