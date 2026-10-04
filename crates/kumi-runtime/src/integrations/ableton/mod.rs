@@ -57,3 +57,5 @@ pub static BRIDGE_TOOLS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock:
         .map(str::to_owned)
         .collect()
 });
+
+pub mod rendering;
