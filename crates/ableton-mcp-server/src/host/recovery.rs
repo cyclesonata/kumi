@@ -110,6 +110,43 @@ impl AsyncLiveAdapter for WatchedAdapter {
     }
 }
 impl McpHost {
+    pub(super) fn moved_target(
+        what: &str,
+        reference: &Value,
+        found: Option<&Value>,
+        made: Option<&Value>,
+    ) -> Result<Option<String>, LiveError> {
+        if made.is_some_and(|v| !v.is_null())
+            && kumi_common::js::json::stringify(found.unwrap_or(&Value::Null)) == kumi_common::js::json::stringify(made.unwrap())
+        {
+            return Ok(None);
+        }
+        Ok(Some(format!("the {what} at {} isn't the one this change was made on any more (something was added, removed or moved since), so undoing there would change another {what}",
+helpers::js_string(reference)?)))
+    }
+    pub(super) fn undo_target_moved(
+        &self,
+        id: &Value,
+        record: &Value,
+        what: &str,
+        reference: &Value,
+        found: Option<&Value>,
+        made: Option<&Value>,
+    ) -> Result<Option<Value>, LiveError> {
+        let Some(moved) = Self::moved_target(what, reference, found, made)? else { return Ok(None) };
+        Ok(Some(if record["state"] == "applied" {
+            reason_error(id,
+&format!("Undo stopped before it changed anything in Live: {moved}"),
+&format!("Nothing changed in Live, and the change is still in place. Find the {what} again with live_discover, and change it back by hand if it still needs to."))
+        } else {
+            reason_error(
+                id,
+                &moved,
+                &format!("Find the {what} again with live_discover and look at it: an earlier try of this undo may have changed it."),
+            )
+        }))
+    }
+
     /// Apply the source host's shared undo refusal and no-dispatch state reconciliation.
     pub async fn with_undo_watch<F>(&self, id: &Value, params: &Value, execute: F) -> Result<Value, LiveError>
     where
