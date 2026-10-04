@@ -40,7 +40,9 @@ static INLINE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
 pub fn inline(text: &str, base: &Rc<Style>) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     let mut last = 0;
-    for found in INLINE.captures_iter(text).flatten() {
+    // A search that hits the backtrack limit errs without moving on, so `flatten` would ask again
+    // forever (a long line froze Kumi). The rest of such a line stays plain text.
+    for found in INLINE.captures_iter(text).map_while(Result::ok) {
         let whole = found.get(0).expect("the match");
         let index = whole.start();
         if index > last {
