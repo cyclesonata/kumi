@@ -31,6 +31,7 @@ pub mod options;
 pub mod parameters;
 pub use options::AbletonOptions;
 pub mod plan_stream;
+pub mod plan_execution;
 pub mod plugin_tool;
 pub mod project;
 pub mod samples;

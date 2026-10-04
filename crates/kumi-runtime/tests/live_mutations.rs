@@ -5,7 +5,10 @@ use kumi_common::{
     js::json::stringify,
 };
 use kumi_runtime::{
-    core::{contracts::JsonObject, errors::RuntimeError},
+    core::{
+        contracts::{JsonObject, ToolResult},
+        errors::RuntimeError,
+    },
     integrations::ableton::{
         actions::ACTIONS,
         arrange::ArrangeHost,
@@ -54,7 +57,7 @@ impl McpEndpoint for Fixture {
     async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
         self.lists.set(self.lists.get() + 1);
         let contains = |key: &str, name: &Value| self.case["config"][key].as_array().is_some_and(|a| a.contains(name));
-        Ok(serde_json::from_value(json!({"tools":self.tools.as_array().unwrap().iter().filter(|name|!contains("missing",name)&&!(self.lists.get()==1&&contains("initiallyMissing",name))).map(|name|json!({"name":name,"inputSchema":{"type":"object"}})).collect::<Vec<_>>()})).unwrap())
+        Ok(serde_json::from_value(json!({"tools":self.tools.as_array().unwrap().iter().filter(|name|!contains("missing",name)&&!(self.lists.get()==1&&contains("initiallyMissing",name))).map(|name|json!({"name":name,"inputSchema":self.case["config"]["schemas"].get(name.as_str().unwrap()).cloned().unwrap_or(json!({"type":"object"}))})).collect::<Vec<_>>()})).unwrap())
     }
     async fn call(&self, name: &str, args: JsonObject, signal: Signal) -> Result<CallToolResult, RuntimeError> {
         signal.check()?;
@@ -108,6 +111,33 @@ fn normalized(value: &Value) -> String {
 fn eq(actual: &Value, expected: &Value, label: &str) {
     assert_eq!(normalized(actual), normalized(expected).replace("npm run kumi --", &kumi_runtime::command::KUMI), "{label}");
 }
+fn tool_result(result: ToolResult) -> Value {
+    let mut value = json!(result);
+    value["isError"] = json!(result.is_error);
+    value
+}
+async fn streaming(mutations: &Rc<Mutations>, operation: &Value, signal: Signal) -> Result<Value, RuntimeError> {
+    let starts = Rc::new(Cell::new(0));
+    let out = starts.clone();
+    let stream = mutations.stream_changes(signal.clone(), Rc::new(move || out.set(out.get() + 1)));
+    let mut progress = Vec::new();
+    for chunk in operation["chunks"].as_array().into_iter().flatten() {
+        stream.push(chunk.as_str().unwrap());
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        progress.push(json!({"started":stream.started()}));
+    }
+    if operation["cancel"] == true {
+        signal.cancel();
+    }
+    if operation["abandon"] == true {
+        stream.abandon().await;
+        return Ok(json!({"abandoned":true,"started":stream.started(),"onStarts":starts.get(),"progress":progress}));
+    }
+    let result = stream.finish(operation["finish"].as_object().cloned()).await?;
+    Ok(json!({"result":tool_result(result),"started":stream.started(),"onStarts":starts.get(),"progress":progress}))
+}
 #[tokio::test(flavor = "current_thread")]
 async fn preview_apply_history_reference_retirement_and_actions_match_source() {
     tokio::task::LocalSet::new().run_until(replay()).await;
@@ -146,7 +176,7 @@ async fn replay() {
         }));
         options.now = Some(Rc::new(|| chrono::DateTime::parse_from_rfc3339("2026-10-03T12:00:00Z").unwrap().with_timezone(&chrono::Utc)));
         options.generation = Some("connection".into());
-        options.fast = Some(false);
+        options.fast = Some(config["fast"].as_bool().unwrap_or(false));
         options.change_timeout_ms = Some(50);
         let out = events.clone();
         options.on_change = Some(Rc::new(move |record| out.borrow_mut().push(json!(record))));
@@ -214,6 +244,8 @@ async fn replay() {
                 let input = operation["input"].as_object().cloned().unwrap_or_default();
                 if let Some(service) = operation["service"].as_str() {
                     let result: Result<Value, RuntimeError> = match service {
+                        "plan" => mutations.make_changes(input, signal).await.map(tool_result),
+                        "stream" => streaming(&mutations, operation, signal).await,
                         "clip" => mutations.clip_file(operation["named"].as_str().unwrap(), signal).await.map(|v| json!(v)),
                         "copy" => mutations.keep_copy(signal).await.map(|v| json!(v)),
                         "step" => mutations.step(operation["tool"].as_str().unwrap(), input, signal).await.map(|v| json!(v)),

@@ -7,7 +7,13 @@ if(!source.includes(marker))throw Error('source hook changed');
 source=source.replace(marker,`    let oracleArrange; return {
       async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);oracleArrange=arrangeHost();},
       _bump(){observationGeneration++;},
-      async _op(op,signal){if(op.service==='clip')return clipFile(op.named,signal);if(op.service==='step')return step(op.tool,op.input,signal);if(op.service==='copy')return keepCopy(signal);if(op.service==='offers')return oracleArrange.offers(op.tool);if(op.service==='arrange')return oracleArrange.change(op.tool,op.input,signal);if(op.service==='undoStep'){const opened=await oracleArrange.undoStep();await opened.close();return opened.opened;}if(op.service==='tell')return oracleArrange.tell(op.title);const run=()=>op.action?act(ACTIONS.find(k=>k.tool===op.tool),op.input,signal,op.cleanup??false):change(CHANGES.find(k=>k.tool===op.tool),op.input,signal,op.settled??false);return op.quiet?quietly([],run):run();},
+      async _op(op,signal){if(op.service==='plan')return makeChanges(op.input,signal);if(op.service==='stream'){
+        let onStarts=0;const stream=streamChanges(signal,()=>onStarts++);const progress=[];
+        for(const chunk of op.chunks??[]){stream.push(chunk);await new Promise(resolve=>setImmediate(resolve));progress.push({started:stream.started});}
+        if(op.cancel)options._cancel();
+        if(op.abandon){await stream.abandon();return{abandoned:true,started:stream.started,onStarts,progress};}
+        const result=await stream.finish(op.finish);return{result,started:stream.started,onStarts,progress};
+      }if(op.service==='clip')return clipFile(op.named,signal);if(op.service==='step')return step(op.tool,op.input,signal);if(op.service==='copy')return keepCopy(signal);if(op.service==='offers')return oracleArrange.offers(op.tool);if(op.service==='arrange')return oracleArrange.change(op.tool,op.input,signal);if(op.service==='undoStep'){const opened=await oracleArrange.undoStep();await opened.close();return opened.opened;}if(op.service==='tell')return oracleArrange.tell(op.title);const run=()=>op.action?act(ACTIONS.find(k=>k.tool===op.tool),op.input,signal,op.cleanup??false):change(CHANGES.find(k=>k.tool===op.tool),op.input,signal,op.settled??false);return op.quiet?quietly([],run):run();},
       _state(){return{changes:[...changes.values()],changesThisTurn,refs:[...refs],known:[...known],names:[...shortRefs],cursors:[...cursors],tempo:currentTempo,lease:observationGeneration,found:[...fastFound]};},
       async start(signal){if(closed||started)`);
 writeFileSync(file,source);
@@ -25,7 +31,7 @@ try{
  const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
  async function run(label,provided,operations){
   const config={...base,...provided},calls=[],responses=[],events=[],actions=[],results=[],disks=[];let controller,integration;let listCalls=0;
-  const endpoint={pid:null,serverInfo:{name:'fixture',version:config.version??'1.0.73'},async list(){listCalls++;return{tools:toolNames.filter(n=>!(config.missing??[]).includes(n)&&!(listCalls===1&&(config.initiallyMissing??[]).includes(n))).map(name=>({name,inputSchema:{type:'object'}}))};},async call(name,args,signal){
+  const endpoint={pid:null,serverInfo:{name:'fixture',version:config.version??'1.0.73'},async list(){listCalls++;return{tools:toolNames.filter(n=>!(config.missing??[]).includes(n)&&!(listCalls===1&&(config.initiallyMissing??[]).includes(n))).map(name=>({name,inputSchema:config.schemas?.[name]??{type:'object'}}))};},async call(name,args,signal){
    signal.throwIfAborted();const at=calls.length;calls.push({name,args:structuredClone(args)});let stage=name==='live_status'?'status':name==='live_discover'?'discover':name.endsWith('_preview')?'preview':name.endsWith('_apply')?'apply':'other';
    let response=config.responses?.[at]??config.fail?.[stage];
    if(!response){let value;
@@ -33,12 +39,15 @@ try{
     else if(stage==='discover')value=config.discover??{epoch:7,items:args.kind==='session-state'?[{transport:{playing:false}}]:args.kind==='parameter'?[{ref:'7:parameter:7:device:0:0:1',name:'Drive',min:0,max:1,value:.5,displayValue:'3 dB'}]:args.kind==='device'?[{ref:'7:device:0:0',name:'Effect',className:'AudioEffect'}]:[]};
     else if(stage==='preview')value=config.preview??{epoch:7,transactionId:'tx',confirmation:'yes',priorTempo:120,proposedTempo:130,prior:{tracks:[{},{}],scenes:[{}]},proposed:[]};
     else if(stage==='apply')value=config.applied??{state:'applied'};
-    else value=config.other??{state:'stopped'};
+    else if(name==='live_run_python'&&args.code?.startsWith('# kumi:fast-')){
+      const line=args.code.split('\n').find(s=>s.startsWith('ARGS = json.loads('));const asked=JSON.parse(JSON.parse(line.slice('ARGS = json.loads('.length,-1)));
+      const found=args.code.startsWith('# kumi:fast-find');value={ok:true,result:found?asked.map((a,i)=>config.parameterMissing?.includes(a.parameter)?{missing:['Drive','Tone']}:{index:i,name:a.parameter??'Drive',min:0,max:1}):{device:'Effect',track:{ref:'7:track:0'},items:asked.map(a=>({name:a.name??'Drive',prior:.5,value:a.value,min:0,max:1,priorDisplay:'3 dB',display:a.value*6+' dB'}))}};
+    }else value=config.other??{state:'stopped'};
     response={reply:wrap(value)};
    }
    responses.push(structuredClone(response));if(response.cancel)controller.abort();if(response.bump)integration._bump();if(response.throw)throw Error(response.throw);return response.reply;
   },onCatalogChanged(){return()=>{}},onDisconnect(){return()=>{}},stderrStatus(){return{bytes:0,truncated:false}},async close(){}};
-  integration=createAbletonIntegration({connect:async()=>endpoint,onConnection(){},onChange:r=>events.push(r),onAction:r=>actions.push(r),lowDisk:async(...args)=>{disks.push(args);return config.disk;},now:()=>new Date('2026-10-03T12:00:00Z'),generation:'connection',fast:false,changeTimeoutMs:50});
+  integration=createAbletonIntegration({connect:async()=>endpoint,onConnection(){},onChange:r=>events.push(r),onAction:r=>actions.push(r),lowDisk:async(...args)=>{disks.push(args);return config.disk;},now:()=>new Date('2026-10-03T12:00:00Z'),generation:'connection',fast:config.fast??false,changeTimeoutMs:50,_cancel:()=>controller.abort()});
   await integration.start(new AbortController().signal);await integration._ready(structuredClone(config));
   for(const op of operations){controller=new AbortController();if(op.abort)controller.abort();let value;try{value=await integration._op(op,controller.signal);}catch(e){value={error:e.name==='AbortError'?'cancelled':e.message};}results.push(structuredClone({value,state:integration._state()}));}
   await integration.close();cases.push(norm({label,config,operations,calls,responses,events,actions,disks,results,listCalls}));
@@ -84,6 +93,36 @@ try{
  for(const config of [{},{other:{stepId:'step-1'}},{other:{stepId:''}},{missing:['live_undo_step_begin']},{fail:{other:{throw:'unavailable'}}}])await run('arrange-undo-step',config,[service('undoStep'),service('tell',{title:'Arrangement complete'})]);
  for(const config of [{},{project:{identity:'p',name:'Set',path:fixture+'/Set.als'}},{project:{identity:'p',name:'Set',path:fixture+'/missing.als'}},{project:{identity:'p',name:'Set',path:fixture+'/Set.als'},missing:['live_project_backup_apply']}])await run('saved-copy',{applied:{backup:fixture+'/Set.backup.als'},...config},[service('copy'),service('copy')]);
  for(const response of [{throw:'bridge failure'},{reply:{isError:true,content:[]}},{reply:wrap({})},{cancel:true,reply:wrap({transactionId:'tx'})}])await run('copy-failure',{project:{identity:'p',name:'Set',path:fixture+'/Set.als'},fail:{preview:response}},[service('copy')]);
+
+ const plan=(steps,extra={})=>service('plan',{input:{steps,...extra}});
+ for(const steps of [undefined,null,[],[null],[{}],[{tool:'missing',input:{}}],[{tool:'load_samples_to_pads',input:{}}],[{tool:'wait',input:{}}],[{tool:'wait',input:{seconds:0}}],[{tool:'wait',input:{seconds:.001}}],[{tool:'set_tempo',input:{tempo:130}},{tool:'wait',input:{beats:.001}}]])await run('plan-input',{},[{service:'plan',input:{...(steps===undefined?{}:{steps})}}]);
+ for(const final of [false,true])await run('plan-simple',{},[plan([{tool:'set_tempo',input:{tempo:130}},{tool:'rename',input:{kind:'track',ref:'track:1',name:'Sub'}}],{final})]);
+ for(const each of [null,{},[],{tempo:[]},{tempo:[120,121]},{tempo:4},{tempo:[120],name:['one','two']},{tempo:[120,121],name:['one','two']}])await run('plan-each',{},[plan([{tool:'set_tempo',input:{tempo:100},each,as:'ignored'}],{final:true})]);
+ await run('plan-count-limit',{},[plan([{tool:'set_tempo',each:{tempo:Array.from({length:5001},()=>120)}}])]);
+ await run('plan-global-limit',{count:4999},[plan([{tool:'set_tempo',input:{tempo:130}},{tool:'set_tempo',input:{tempo:140}}])]);
+ await run('plan-reference',{applied:{state:'applied',deviceRef:'7:device:0:3'}},[plan([{tool:'load_device',input:{trackRef:'track:1',itemId:'Audio Effect'},as:'effect'},{tool:'switch_device',input:{deviceRef:'@effect',enabled:true}}],{final:true})]);
+ for(const name of ['@missing','@bad-hyphen','@x'.repeat(40)])await run('plan-missing-name',{},[plan([{tool:'switch_device',input:{deviceRef:name,enabled:true}},{tool:'set_tempo',input:{tempo:125}}])]);
+ for(const config of [{},{missing:['live_session_emergency_stop']},{fail:{apply:{reply:{isError:true,content:[{type:'text',text:'uncertain'}]}}}}])await run('plan-stops-playback',config,[plan([{tool:'play',input:{action:'start'}},{tool:'unknown',input:{}},{tool:'set_tempo',input:{tempo:130}}])]);
+ await run('plan-stops-recording',{},[plan([{tool:'record',input:{action:'start'}},{tool:'unknown'}])]);
+ await run('plan-success-playing',{},[plan([{tool:'play',input:{action:'start'}}],{final:true})]);
+ await run('plan-cancelled-apply',{fail:{apply:{cancel:true,reply:wrap({state:'applied'})}}},[plan([{tool:'set_tempo',input:{tempo:130}},{tool:'set_tempo',input:{tempo:140}}])]);
+ await run('plan-saved-copy',{project:{identity:'p',name:'Set',path:fixture+'/Set.als'},applied:{state:'applied',backup:fixture+'/backup.als'},other:{stepId:'undo-one'}},[plan(Array.from({length:3},(_,i)=>({tool:'set_tempo',input:{tempo:130+i}})),{final:true})]);
+ const parameters=[{tool:'set_device_parameter',input:{deviceRef:'device:1',parameter:'Drive',value:.8}},{tool:'set_device_parameter',input:{deviceRef:'device:1',parameter:'Tone',value:.2}}];
+ const parameterSchema={live_device_parameter_preview:{type:'object',properties:{values:{type:'array'}}}};
+ const discovery={epoch:7,items:[{ref:'7:parameter:7:device:0:0:1',name:'Drive',min:0,max:1},{ref:'7:parameter:7:device:0:0:2',name:'Tone',min:0,max:1}]};
+ for(const schemas of [{},parameterSchema])await run('plan-parameter-batch',{schemas,discover:discovery},[plan(parameters,{final:true})]);
+ for(const parameterMissing of [[],['Drive'],['Drive','Tone']])await run('plan-partial-parameters',{schemas:parameterSchema,fast:true,parameterMissing},[plan(parameters,{final:true})]);
+ const pads=Array.from({length:3},(_,i)=>({tool:'load_sample_to_pad',input:{deviceRef:'device:1',note:36+i,sample:'/fixture/kick.wav'}}));
+ for(const schemas of [{},{live_drum_pad_preview:{type:'object',properties:{action:{enum:['load-samples']}}}}])await run('plan-pad-batch',{schemas,samples:[{name:'Kick',path:'/fixture/kick.wav',folder:'/fixture',bytes:1000}]},[plan(pads,{final:true})]);
+ const tempo={tool:'set_tempo',input:{tempo:130}},rename={tool:'rename',input:{kind:'track',ref:'track:1',name:'Sub'}};
+ for(const input of [undefined,{steps:[tempo],final:true},{steps:[tempo,rename],final:true}])await run('stream-whole',{},[service('stream',{chunks:[],finish:input})]);
+ for(const finish of [undefined,{steps:[tempo],final:true},{steps:[rename],final:true},{steps:[tempo,rename],final:true}])await run('stream-partial',{},[service('stream',{chunks:['{"steps":[',JSON.stringify(tempo)],finish})]);
+ await run('stream-broken-tail',{},[service('stream',{chunks:['{"steps":['+JSON.stringify(tempo)+',oops'],finish:undefined})]);
+ await run('stream-each-refusal',{},[service('stream',{chunks:['{"steps":['+JSON.stringify({tool:'set_tempo',each:{tempo:3}})],finish:{steps:[{tool:'set_tempo',each:{tempo:3}}]}})]);
+ await run('stream-parameters',{schemas:parameterSchema,discover:discovery},[service('stream',{chunks:['{"steps":['+JSON.stringify(parameters[0]),','+JSON.stringify(parameters[1]),']}'],finish:{steps:parameters,final:true}})]);
+ await run('stream-abandoned-before',{},[service('stream',{chunks:['{"steps":['],abandon:true})]);
+ await run('stream-abandoned-play',{},[service('stream',{chunks:['{"steps":['+JSON.stringify({tool:'play',input:{action:'start'}})],abandon:true})]);
+ await run('stream-cancelled-play',{},[service('stream',{chunks:['{"steps":['+JSON.stringify({tool:'play',input:{action:'start'}})],cancel:true,finish:{steps:[{tool:'play',input:{action:'start'}}]}})]);
  const values=[],ids=new Map();for(const c of cases)c.responses=c.responses.map(v=>{const key=JSON.stringify(v);if(!ids.has(key)){ids.set(key,values.length);values.push(v);}return ids.get(key);});
  writeFileSync(new URL('mutations-oracle.json',import.meta.url),JSON.stringify({toolNames,cases,values})+'\n');console.log(cases.length+' source change/action sequences');
 }finally{unlinkSync(file);rmSync(fixture,{recursive:true,force:true})}
