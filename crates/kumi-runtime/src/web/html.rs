@@ -5,6 +5,7 @@ use kumi_common::js::string::{trim, utf16_len};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     sync::LazyLock,
 };
@@ -22,25 +23,32 @@ pub struct PageText {
 static NAMED: LazyLock<HashMap<String, String>> = LazyLock::new(|| serde_json::from_str(include_str!("entities.json")).unwrap());
 static ENTITY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"&(#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});").unwrap());
 pub fn decode_entities(text: &str) -> String {
-    ENTITY
-        .replace_all(text, |c: &Captures| {
-            let name = &c[1];
-            if let Some(code) = name.strip_prefix('#') {
-                let parsed = if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
-                    u32::from_str_radix(hex, 16)
-                } else {
-                    code.parse()
-                };
-                return parsed.ok().filter(|v| *v > 0).and_then(char::from_u32).unwrap_or('\u{fffd}').to_string();
-            }
-            NAMED.get(name).cloned().unwrap_or_else(|| c[0].into())
-        })
-        .into_owned()
+    decoded_entities(text).into_owned()
+}
+fn decoded_entities(text: &str) -> Cow<'_, str> {
+    if !text.contains('&') {
+        return Cow::Borrowed(text);
+    }
+    ENTITY.replace_all(text, |c: &Captures| {
+        let name = &c[1];
+        if let Some(code) = name.strip_prefix('#') {
+            let parsed = if let Some(hex) = code.strip_prefix('x').or_else(|| code.strip_prefix('X')) {
+                u32::from_str_radix(hex, 16)
+            } else {
+                code.parse()
+            };
+            return parsed.ok().filter(|v| *v > 0).and_then(char::from_u32).unwrap_or('\u{fffd}').to_string();
+        }
+        NAMED.get(name).cloned().unwrap_or_else(|| c[0].into())
+    })
 }
 type Attributes = HashMap<String, String>;
 static ATTR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r#"([^\s"'>/=]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?"#).unwrap());
 fn attributes(source: &str) -> Attributes {
     let mut found = Attributes::new();
+    if source.is_empty() {
+        return found;
+    }
     for c in ATTR.captures_iter(source) {
         found
             .entry(c[1].to_lowercase())
@@ -51,15 +59,89 @@ fn attributes(source: &str) -> Attributes {
 fn contains(set: &str, name: &str) -> bool {
     set.split(' ').any(|v| v == name)
 }
-const RAW: &str = "script style textarea title xmp noscript iframe noembed noframes plaintext";
-const SKIP: &str = "head template svg math canvas object embed nav footer aside select button dialog audio video map datalist";
-const VOID: &str = "area base br col embed hr img input link meta param source track wbr keygen";
-const BLOCK:&str="address article blockquote body center details div dl fieldset figcaption figure form header hgroup html legend main menu section summary caption tbody thead tfoot dir";
+fn raw(name: &str) -> bool {
+    matches!(name, "script" | "style" | "textarea" | "title" | "xmp" | "noscript" | "iframe" | "noembed" | "noframes" | "plaintext")
+}
+fn skip(name: &str) -> bool {
+    matches!(
+        name,
+        "head"
+            | "template"
+            | "svg"
+            | "math"
+            | "canvas"
+            | "object"
+            | "embed"
+            | "nav"
+            | "footer"
+            | "aside"
+            | "select"
+            | "button"
+            | "dialog"
+            | "audio"
+            | "video"
+            | "map"
+            | "datalist"
+    )
+}
+fn void(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+            | "keygen"
+    )
+}
+fn block(name: &str) -> bool {
+    matches!(
+        name,
+        "address"
+            | "article"
+            | "blockquote"
+            | "body"
+            | "center"
+            | "details"
+            | "div"
+            | "dl"
+            | "fieldset"
+            | "figcaption"
+            | "figure"
+            | "form"
+            | "header"
+            | "hgroup"
+            | "html"
+            | "legend"
+            | "main"
+            | "menu"
+            | "section"
+            | "summary"
+            | "caption"
+            | "tbody"
+            | "thead"
+            | "tfoot"
+            | "dir"
+    )
+}
 fn attr<'a>(attrs: &'a Attributes, name: &str) -> &'a str {
     attrs.get(name).map_or("", String::as_str)
 }
 static HIDDEN_STYLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)display\s*:\s*none|visibility\s*:\s*hidden").unwrap());
 fn hidden(a: &Attributes) -> bool {
+    if a.is_empty() {
+        return false;
+    }
     a.contains_key("hidden") || attr(a,"aria-hidden")=="true" || HIDDEN_STYLE.is_match(attr(a,"style")) || contains("navigation banner contentinfo search complementary menu menubar toolbar",&attr(a,"role").to_lowercase()) || format!("{} {}",attr(a,"class"),attr(a,"id")).to_lowercase().split_whitespace().any(|v|contains("navbox navbar breadcrumb breadcrumbs sidebar ambox noprint mw-editsection mw-jump-link vector-dropdown vector-page-toolbar vector-toc mw-indicators cookie-banner skip-link skip-to-content sr-only visually-hidden screen-reader-text",v))
 }
 fn absolute(href: &str, base: &str) -> Option<String> {
@@ -78,7 +160,35 @@ static TAG: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"^<([a-zA-Z][^\s/>]*)((?:\s+[^\s"'>/=]+(?:\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+))?)*)\s*(/?)>"#).unwrap()
 });
 static CLOSE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^</([a-zA-Z][^\s/>]*)\s*>").unwrap());
-static SPACES: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[\s\u{00a0}]+").unwrap());
+// Bare lowercase tags need neither regex capture buffers nor a lowercase copy.
+// Everything outside this exact subset keeps the full source-compatible grammar.
+fn bare_tag(tail: &str, prefix: usize) -> Option<&str> {
+    let bytes = tail.as_bytes().get(prefix..)?;
+    if !bytes.first()?.is_ascii_lowercase() {
+        return None;
+    }
+    let end = bytes.iter().position(|byte| !byte.is_ascii_lowercase() && !byte.is_ascii_digit())?;
+    (bytes[end] == b'>').then(|| &tail[prefix..prefix + end])
+}
+fn close_tag(tail: &str) -> Option<(Cow<'_, str>, usize)> {
+    if !tail.starts_with("</") {
+        return None;
+    }
+    if let Some(name) = bare_tag(tail, 2) {
+        return Some((Cow::Borrowed(name), name.len() + 3));
+    }
+    let capture = CLOSE.captures(tail)?;
+    Some((Cow::Owned(capture[1].to_lowercase()), capture[0].len()))
+}
+fn open_tag(tail: &str) -> Option<(Cow<'_, str>, &str, bool, usize)> {
+    if let Some(name) = bare_tag(tail, 1) {
+        return Some((Cow::Borrowed(name), "", false, name.len() + 2));
+    }
+    let capture = TAG.captures(tail)?;
+    Some((Cow::Owned(capture[1].to_lowercase()), capture.get(2)?.as_str(), &capture[3] == "/", capture[0].len()))
+}
+static SPACES: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[\t-\r \u{00a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}]+").unwrap());
 static OPENING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|\n) *(?:#{1,6} |- |[0-9]+\. |> )$").unwrap());
 static LANGUAGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?:^|\s)(?:lang|language|highlight-source)-([a-zA-Z0-9_+#-]+)").unwrap());
 fn language(a: &Attributes) -> String {
@@ -87,8 +197,17 @@ fn language(a: &Attributes) -> String {
         .map(|c| c[1].into())
         .unwrap_or_else(|| attr(a, "data-lang").chars().filter(|c| c.is_ascii_alphanumeric() || "_+#-".contains(*c)).collect())
 }
-fn words(text: &str) -> String {
-    SPACES.replace_all(text, " ").into_owned()
+fn words(text: &str) -> Cow<'_, str> {
+    // Ordinary ASCII prose already has the exact whitespace this pass produces.
+    // Unicode, other whitespace and adjacent spaces retain the full regex behavior.
+    let mut space = false;
+    for byte in text.bytes() {
+        if !byte.is_ascii() || matches!(byte, b'\t' | b'\n' | 0x0b | 0x0c | b'\r') || (byte == b' ' && space) {
+            return SPACES.replace_all(text, " ");
+        }
+        space = byte == b' ';
+    }
+    Cow::Borrowed(text)
 }
 fn level(name: &str) -> Option<usize> {
     let b = name.as_bytes();
@@ -110,8 +229,12 @@ struct Builder {
 }
 impl Builder {
     fn opening(&self) -> bool {
-        let tail: String = self.out.chars().rev().take(24).collect::<String>().chars().rev().collect();
-        OPENING.find(&tail).is_some_and(|m| m.as_str().starts_with('\n') || tail.len() == self.out.len())
+        if !self.out.ends_with(' ') {
+            return false;
+        }
+        let start = self.out.char_indices().rev().nth(23).map_or(0, |(index, _)| index);
+        let tail = &self.out[start..];
+        OPENING.find(tail).is_some_and(|m| m.as_str().starts_with('\n') || start == 0)
     }
     fn trim_end(&mut self) {
         self.out.truncate(self.out.trim_end_matches([' ', '\t']).len());
@@ -282,7 +405,7 @@ impl Builder {
                 }
             }
             _ => {
-                if contains(BLOCK, name) {
+                if block(name) {
                     self.newline();
                 }
             }
@@ -410,7 +533,7 @@ impl Builder {
                 }
             }
             _ => {
-                if contains(BLOCK, name) {
+                if block(name) {
                     self.newline();
                 }
             }
@@ -427,7 +550,7 @@ pub fn html_to_text(html: &str, base: &str) -> String {
         let text_end = html[at..].find('<').map_or(html.len(), |v| at + v);
         if text_end > at {
             if skipping.is_none() {
-                out.write(&decode_entities(&html[at..text_end]));
+                out.write(&decoded_entities(&html[at..text_end]));
             }
             at = text_end;
             if at == html.len() {
@@ -447,11 +570,10 @@ pub fn html_to_text(html: &str, base: &str) -> String {
             at = tail.find('>').map_or(html.len(), |v| at + v + 1);
             continue;
         }
-        if let Some(close) = CLOSE.captures(tail) {
-            at += close[0].len();
-            let name = close[1].to_lowercase();
+        if let Some((name, length)) = close_tag(tail) {
+            at += length;
             if let Some((skipped, depth)) = &mut skipping {
-                if &name == skipped {
+                if name.as_ref() == skipped {
                     *depth -= 1;
                     if *depth == 0 {
                         skipping = None;
@@ -462,38 +584,37 @@ pub fn html_to_text(html: &str, base: &str) -> String {
             out.close(&name);
             continue;
         }
-        let Some(open) = TAG.captures(tail) else {
+        let Some((name, attributes_text, slash, length)) = open_tag(tail) else {
             if skipping.is_none() {
                 out.write("<");
             }
             at += 1;
             continue;
         };
-        at += open[0].len();
-        let name = open[1].to_lowercase();
-        let self_closing = &open[3] == "/" || contains(VOID, &name);
-        if contains(RAW, &name) && !self_closing {
+        at += length;
+        let self_closing = slash || void(&name);
+        if raw(&name) && !self_closing {
             let end = lower[at..].find(&format!("</{name}")).map(|v| at + v);
             let inside = &html[at..end.unwrap_or(html.len())];
             at = end.and_then(|end| html[end..].find('>').map(|v| end + v + 1)).unwrap_or(html.len());
             if skipping.is_none() && name == "textarea" {
-                out.write(&decode_entities(inside));
+                out.write(&decoded_entities(inside));
             }
             continue;
         }
         if let Some((skipped, depth)) = &mut skipping {
-            if &name == skipped && !self_closing {
+            if name.as_ref() == skipped && !self_closing {
                 *depth += 1;
             }
             continue;
         }
-        let attrs = attributes(&open[2]);
+        let attrs = attributes(attributes_text);
         if name == "math" && !attr(&attrs, "alttext").is_empty() {
             out.write(&format!(" ${}$ ", trim(attr(&attrs, "alttext"))));
         }
-        if contains(SKIP, &name) || (hidden(&attrs) && !self_closing) {
+        if skip(&name) || (hidden(&attrs) && !self_closing) {
             if !self_closing {
-                skipping = Some((name, 1));
+                skipping = Some((name.into_owned(), 1));
             }
             continue;
         }
@@ -510,7 +631,8 @@ fn heading(html: &str) -> (Option<String>, Option<String>) {
     static META: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<meta\b([^>]*)>").unwrap());
     static TITLE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<title[^>]*>(.*?)</title>").unwrap());
     let clean = |text: String| {
-        let t = words(&decode_entities(&text));
+        let decoded = decoded_entities(&text);
+        let t = words(&decoded);
         let t = trim(&t);
         (!t.is_empty()).then(|| t.into())
     };

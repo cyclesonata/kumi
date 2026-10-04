@@ -3,12 +3,14 @@ use kumi_runtime::web::html::{html_to_text, read_html};
 use serde_json::Value;
 #[test]
 fn a_page_becomes_text_with_structure_code_formulas_links_and_no_furniture() {
-    let fixtures: Vec<Value> = serde_json::from_str(include_str!("support/web/html-reference.json")).unwrap();
-    for f in fixtures {
-        let html = f["html"].as_str().unwrap();
-        let base = f["base"].as_str().unwrap();
-        assert_eq!(html_to_text(html, base), f["text"].as_str().unwrap());
-        assert_eq!(serde_json::to_value(read_html(html, base)).unwrap(), f["read"]);
+    for source in [include_str!("support/web/html-reference.json"), include_str!("support/web/html-fastpaths.json")] {
+        let fixtures: Vec<Value> = serde_json::from_str(source).unwrap();
+        for f in fixtures {
+            let html = f["html"].as_str().unwrap();
+            let base = f["base"].as_str().unwrap();
+            assert_eq!(html_to_text(html, base), f["text"].as_str().unwrap(), "{html}");
+            assert_eq!(serde_json::to_value(read_html(html, base)).unwrap(), f["read"], "{html}");
+        }
     }
 }
 #[test]
