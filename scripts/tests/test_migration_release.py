@@ -1,5 +1,8 @@
 """Real legacy-updater probes against native fixture programs; no publication or user files."""
 import hashlib
+import functools
+import http.server
+import threading
 import importlib.util
 import json
 import os
@@ -74,6 +77,63 @@ class MigrationRelease(unittest.TestCase):
         (self.manifest.parent / original["bundle"]).write_bytes(b"tampered")
         with self.assertRaisesRegex(ValueError, "checksum"):
             release.build([self.manifest], self.out, self.node)
+
+    @unittest.skipIf(os.name == "nt", "Unix installer; Windows PowerShell runs in the installer workflow")
+    def test_fresh_unix_installer_uses_native_target_without_node_and_preserves_repair_rollback(self):
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(self.out)))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            home = self.root / "fresh home"
+            env = dict(os.environ, KUMI_HOME=str(home), KUMI_RELEASES=f"http://127.0.0.1:{server.server_port}",
+                       KUMI_NO_MODIFY_PATH="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+            for iteration in range(2):
+                run = subprocess.run(["sh", str(release.native.ROOT / "install.sh")], env=env, capture_output=True, text=True)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertFalse((home / "node").exists())
+                result = subprocess.run([str(home / "bin/kumi"), "--version"], env=env, capture_output=True, text=True)
+                self.assertEqual(result.stdout, "Kumi 99.0.0\n")
+                self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((home / "app.previous" / self.binary).is_file())
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
+    @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
+    def test_actual_built_release_with_authoritative_old_updater(self):
+        reference = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT)) / "apps/kumi/dist/src/install.js"
+        artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
+        manifest = json.loads((artifacts / "kumi-release.json").read_text())
+        # Pending final integration: old 1.7.4 updaters ignore same-version application releases.
+        self.assertGreater(tuple(map(int, manifest["kumi"].split("-")[0].split("."))), (1, 7, 4),
+                           "the native transition must publish a newer application version than legacy 1.7.4")
+        home = self.root / "production home"
+        entry = home / "app/apps/kumi/bin/kumi.mjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("console.log('legacy fixture entry')")
+        (home / "app/package.json").write_text('{"version":"0.0.1"}')
+        (home / "auth.json").write_text('{"version":1,"credentials":{}}')
+        test = self.root / "built-updater.mjs"
+        test.write_text('''import {readFileSync} from 'node:fs';
+import {pathToFileURL} from 'node:url';
+const {updateInstalled} = await import(pathToFileURL(process.argv[2]));
+const release = JSON.parse(readFileSync(process.argv[3] + '/kumi-release.json'));
+const env = {KUMI_HOME:process.argv[4], KUMI_RELEASES:'https://fixture.invalid', KUMI_REMOTE_SCRIPTS_DIR:process.argv[4]+'/absent'};
+const io = {env, out:process.stdout, fetcher: async url => new Response(url.endsWith('.json') ? JSON.stringify(release) : readFileSync(process.argv[3] + '/' + release.bundle))};
+if (await updateInstalled(io) !== 0) throw new Error('old updater failed');
+''')
+        result = subprocess.run(["node", str(test), str(reference), str(artifacts), str(home)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / "app" / self.binary).is_file(), result.stdout)
+        result = subprocess.run([str(home / "app" / self.binary), "--version"], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(manifest["kumi"], result.stdout)
+        self.assertEqual((home / "auth.json").read_text(), '{"version":1,"credentials":{}}')
+        self.assertEqual((home / "app.previous/apps/kumi/bin/kumi.mjs").read_text(), "console.log('legacy fixture entry')")
 
     def test_actual_source_installed_updater_swaps_after_native_probe_and_retains_user_data(self):
         reference = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT)) / "apps/kumi/dist/src/install.js"

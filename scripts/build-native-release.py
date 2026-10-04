@@ -232,6 +232,10 @@ def build_release(root: Path, binaries: Path, out: Path, target: str, source: di
         version = tomllib.loads((root / "crates/kumi/Cargo.toml").read_text())["package"]["version"]
         metadata = {"name": "kumi", "version": version, "bridge": manifest["package"]["version"], "runtime": "rust-native", "target": target}
         json_write(bundle / "package.json", metadata)
+        # Existing JavaScript applications use this entry to return from an explicit rollback.
+        # Normal installed launchers execute the root native binary directly.
+        copy(root / "scripts/migration/kumi.mjs", bundle / "apps/kumi/bin/kumi.mjs")
+        json_write(bundle / "apps/mcp-server/package.json", {"version": metadata["bridge"]})
         json_write(bundle / "kumi-install.json", {"kumi": version, "bridge": metadata["bridge"], "runtime": "rust-native", "target": target})
         for name in ("LICENSE.md", "README.md", "CHANGELOG.md"):
             copy(root / name, bundle / name)
@@ -273,7 +277,7 @@ def main() -> None:
         "platform": {"Darwin": "darwin", "Windows": "win32"}.get(platform.system(), platform.system().lower()),
         "architecture": platform.machine(), "runnerImage": os.environ.get("ImageOS", "local"),
         "runnerImageVersion": os.environ.get("ImageVersion", "local"), "cargoLockSha256": digest(ROOT / "Cargo.lock"),
-        "workflowSha256": digest(ROOT / ".github/workflows/rust.yml")}
+        "workflowSha256": digest(ROOT / ".github/workflows/installer.yml")}
     result = build_release(ROOT, binaries, args.out or ROOT / "release/native" / target, target, source, builder, recipe, args.bridge_only)
     print(json.dumps({key: value for key, value in result.items() if key != "manifest"}, indent=2))
 

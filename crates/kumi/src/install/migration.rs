@@ -60,7 +60,11 @@ pub fn has_app(app: &str) -> bool {
 pub async fn finish_legacy_transition(io: &InstalledIo) -> Result<(), RuntimeError> {
     let home = kumi_home(&io.env);
     let app = join(&home, "app");
-    if !Path::new(&join(&app, "native-targets.json")).is_file() {
+    let native = fs::read(join(&app, "package.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|metadata| metadata["runtime"] == "rust-native");
+    if !native {
         return Ok(());
     }
     let Some(config) = find_bridge_config(&io.env) else { return Ok(()) };

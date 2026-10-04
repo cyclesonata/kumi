@@ -42,6 +42,8 @@ class NativeRelease(unittest.TestCase):
             self.assertTrue(all(member.isfile() for member in tar.getmembers()))
             names = tar.getnames()
             self.assertTrue(all(binary in names for binary in release.BINARIES))
+            self.assertIn("apps/kumi/bin/kumi.mjs", names)
+            self.assertEqual(json.load(tar.extractfile("apps/mcp-server/package.json"))["version"], result["bridge"])
             self.assertFalse(any("node_modules" in name or name.startswith("node/") for name in names))
             prepared = json.load(tar.extractfile("bridge/prepared.json"))
             artifact = tar.extractfile("bridge/" + prepared["artifact"]).read()
