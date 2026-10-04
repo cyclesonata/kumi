@@ -387,3 +387,34 @@ async fn release_check_cache_is_daily_private_and_ignores_future_clock() {
         assert_eq!(fs::metadata(cache).unwrap().permissions().mode() & 0o777, 0o600);
     }
 }
+
+#[tokio::test]
+async fn installed_update_migrates_equal_version_legacy_bridge_after_live_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let config = home.join("bridge/state/bridge-config.json");
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION,"bridge":"1.0.73"}).to_string());
+    put(home.join("bridge/old/package/package.json"), json!({"version":"1.0.73"}).to_string());
+    put(
+        &config,
+        json!({"server":{"command":"node","args":[home.join("bridge/old/package/dist/src/index.js"),"--config",config]}}).to_string(),
+    );
+    put(Path::new(&env["KUMI_REMOTE_SCRIPTS_DIR"]).join("AbletonMcpBridge/bridge-reference.json"), json!({"config":config}).to_string());
+    for live in [true, false] {
+        let (mut io, out) = io(&env);
+        io.fetcher = Some(Serve::new(manifest(KUMI_VERSION)));
+        io.live_running = Some(Rc::new(move || async move { live }.boxed_local()));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        io.update_bridge = Some(Rc::new({
+            let calls = calls.clone();
+            move |app| {
+                calls.borrow_mut().push(app);
+                async { 0 }.boxed_local()
+            }
+        }));
+        assert_eq!(update_installed(io).await.unwrap(), 0);
+        assert_eq!(calls.borrow().len(), usize::from(!live));
+        assert!(out.0.borrow().contains("includes the native bridge (1.0.73)"));
+    }
+}

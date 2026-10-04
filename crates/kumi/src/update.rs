@@ -124,12 +124,20 @@ pub async fn newer_kumi(io: CheckIo) -> Option<String> {
 pub struct OlderBridge {
     pub installed: String,
     pub bundled: String,
+    #[serde(default)]
+    pub runtime_migration: bool,
 }
 pub fn older_bridge(env: &Env, bundled: Option<&str>) -> Option<OlderBridge> {
     let config = find_bridge_config(env)?;
     let bundled = bundled.filter(|s| !s.is_empty())?;
-    let installed = read_bridge_server(&config).ok()?.version?;
-    newer(bundled, &installed).then(|| OlderBridge { installed, bundled: bundled.into() })
+    let server = read_bridge_server(&config).ok()?;
+    let runtime_migration = !server.native();
+    let installed = server.version?;
+    (newer(bundled, &installed) || (runtime_migration && bundled == installed)).then(|| OlderBridge {
+        installed,
+        bundled: bundled.into(),
+        runtime_migration,
+    })
 }
 #[derive(Clone)]
 pub struct UpdateIo {
@@ -222,7 +230,11 @@ pub async fn run_update(io: UpdateIo) -> i32 {
         say("The bridge in Live is up to date.".into());
         return 0;
     };
-    say(format!("The bridge in Live is {}; this Kumi's is {}.", bridge.installed, bridge.bundled));
+    say(if bridge.runtime_migration {
+        format!("The bridge in Live uses JavaScript ({}); this Kumi includes the native bridge ({}).", bridge.installed, bridge.bundled)
+    } else {
+        format!("The bridge in Live is {}; this Kumi's is {}.", bridge.installed, bridge.bundled)
+    });
     if step(
         io.out.clone(),
         &io.env,

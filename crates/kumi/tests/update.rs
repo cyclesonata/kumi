@@ -264,3 +264,32 @@ async fn dirty_checkout_is_preserved_and_current_or_missing_bridge_is_explained(
         assert!(out.0.borrow().contains("fixture failure"));
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_version_legacy_bridge_migrates_but_newer_bridge_is_preserved() {
+    let c = Checkout::new("1.0.0", "1.0.73", Some("1.0.73"));
+    let config = c.root.path().join("bridge-config.json");
+    fs::write(
+        &config,
+        json!({"server":{"command":"node","args":[c.root.path().join("bridge/package/dist/src/index.js"),"--config",config]}}).to_string(),
+    )
+    .unwrap();
+    assert!(older_bridge(&c.env, Some("1.0.73")).unwrap().runtime_migration);
+    assert!(older_bridge(&c.env, Some("1.0.72")).is_none());
+    for live in [true, false] {
+        let out = Rc::new(Out::default());
+        let touched = Rc::new(Cell::new(false));
+        let mut io = c.update(out.clone(), programs(Options::default()).0);
+        io.live_running = Some(Rc::new(move || async move { live }.boxed_local()));
+        io.update_bridge = Some(Rc::new({
+            let touched = touched.clone();
+            move |_| {
+                touched.set(true);
+                async { 0 }.boxed_local()
+            }
+        }));
+        assert_eq!(run_update(io).await, 0);
+        assert_eq!(touched.get(), !live);
+        assert!(out.0.borrow().contains("includes the native bridge (1.0.73)"));
+    }
+}

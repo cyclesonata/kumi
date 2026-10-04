@@ -398,7 +398,7 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     let state =
         config.as_ref().map(|c| dirname(c)).unwrap_or_else(|| join(io.home.as_deref().unwrap_or(&kumi_dir(&io.env)), "bridge/state"));
     let installed = config.as_ref().and_then(|c| read_bridge_server(c).ok());
-    if config.is_some() && installed.as_ref().and_then(|s| s.version.as_ref()) == Some(&bundled) {
+    if installed.as_ref().is_some_and(|s| s.native() && s.version.as_ref() == Some(&bundled)) {
         say(&format!("The Ableton bridge {bundled} is installed, the same as Kumi's."));
         let mut roots: Vec<_> = installed.as_ref().and_then(|s| s.package_root()).into_iter().collect();
         roots.push(bridge_dir);

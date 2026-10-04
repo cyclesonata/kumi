@@ -155,13 +155,22 @@ async fn bridge_after(io: &InstalledIo, home: &str, app: &str) -> i32 {
         say(format!("To connect Live, quit Live, then run: {} bridge", *KUMI));
         return 0;
     };
-    let installed = read_bridge_server(&config).ok().and_then(|s| s.version);
+    let server = read_bridge_server(&config).ok();
+    let runtime_migration = server.as_ref().is_some_and(|s| !s.native());
+    let installed = server.and_then(|s| s.version);
     let bundled = bridge_version(app);
-    let Some((installed, bundled)) = installed.zip(bundled).filter(|(installed, bundled)| newer_version(bundled, installed)) else {
+    let Some((installed, bundled)) = installed
+        .zip(bundled)
+        .filter(|(installed, bundled)| newer_version(bundled, installed) || (runtime_migration && bundled == installed))
+    else {
         say("The bridge in Live is up to date.".into());
         return 0;
     };
-    say(format!("The bridge in Live is {installed}; this Kumi's is {bundled}."));
+    say(if runtime_migration {
+        format!("The bridge in Live uses JavaScript ({installed}); this Kumi includes the native bridge ({bundled}).")
+    } else {
+        format!("The bridge in Live is {installed}; this Kumi's is {bundled}.")
+    });
     if live_open(io, io.run.clone().unwrap_or_else(default_run)).await {
         say(format!("Quit Live (save your work first), then run: {} bridge", *KUMI));
         return 0;

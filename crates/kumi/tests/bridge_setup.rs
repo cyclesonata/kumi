@@ -415,3 +415,21 @@ async fn remote_script_probe_uses_only_loopback_and_real_runner_captures_exit_an
     }
     assert_eq!(run_program("/definitely/missing/kumi-fixture", &[], None).await.code, 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_version_legacy_bridge_uses_native_lifecycle_upgrade() {
+    let w = World::new(Some("1.0.34"));
+    let config = w.state.join("bridge-config.json");
+    fs::write(
+        &config,
+        json!({"server":{"command":"node","args":[w.root.path().join("installed/dist/src/index.js"),"--config",config]}}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(setup_bridge(w.io()).await.unwrap(), 0);
+    let calls = w.calls.borrow();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].args[1], "upgrade");
+    assert!(!calls[0].args.contains(&"--apply".into()));
+    assert!(calls[1].args.contains(&"--apply".into()));
+    assert!(!w.out.0.borrow().contains("same as Kumi's"));
+}

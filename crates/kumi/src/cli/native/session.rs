@@ -300,7 +300,11 @@ pub(super) async fn run_session(
     let notice = if bridge_missing {
         Some(format!("The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: {} bridge",io.command()))
     } else {
-        stale.map(|stale|format!("The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. Quit Kumi and Live, then run: {} update",stale.installed,stale.bundled,io.command()))
+        stale.map(|stale| if stale.runtime_migration {
+            format!("The bridge in Live still uses JavaScript. Quit Kumi and Live, then run: {} bridge to switch to the native bridge.", io.command())
+        } else {
+            format!("The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. Quit Kumi and Live, then run: {} update",stale.installed,stale.bundled,io.command())
+        })
     };
     let update_after = Rc::new(Cell::new(false));
     let updates = update::UpdateControl {
