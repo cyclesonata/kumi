@@ -45,7 +45,9 @@ jobs:
       - name: Windows terminal ownership and console regressions
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/test-isolated.ps1 --test stdin_handoff --test windows_console_control --test windows_stdin --test windows_tty --no-fail-fast -- --nocapture
+        env:
+          RUST_TEST_NOCAPTURE: '1'
+        run: ./scripts/test-isolated.ps1 --test stdin_handoff --test windows_console_control --test windows_stdin --test windows_tty --no-fail-fast
       - run: cargo build --workspace --all-targets --locked
       - name: Tests, in a home of their own (no test reaches this machine's Live folders or ~/.kumi)
         if: runner.os != 'Windows'
