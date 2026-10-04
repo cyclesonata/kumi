@@ -694,8 +694,11 @@ pub struct Macro {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceView {
+    // Observed values reach the host unchanged so it can decide whether restoration is possible.
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub is_collapsed: Maybe<bool>,
+    pub is_collapsed: Maybe<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

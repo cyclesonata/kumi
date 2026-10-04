@@ -27,3 +27,11 @@ fn clip_groove_retains_observed_extensions_and_property_order() {
     edited["name"] = serde_json::json!("Edited");
     assert_eq!(serde_json::to_string(&groove).unwrap(), serde_json::to_string(&edited).unwrap());
 }
+
+#[test]
+fn device_view_preserves_observed_values_for_host_restoration_checks() {
+    for original in [json!({}), json!({"isCollapsed":null}), json!({"isCollapsed":true}), json!({"isCollapsed":"bad","future":null})] {
+        let view: ableton_mcp_server::live::DeviceView = serde_json::from_value(original.clone()).unwrap();
+        assert_eq!(serde_json::to_value(view).unwrap(), original);
+    }
+}
