@@ -164,16 +164,30 @@ class MigrationRelease(unittest.TestCase):
         env.update(KUMI_HOME=str(home), KUMI_INSTALLED="1", KUMI_NO_UPDATE_CHECK="1", KUMI_UI="plain",
                    KUMI_REMOTE_SCRIPTS_DIR=str(scripts), KUMI_LIVE_EXTENSIONS_DIR=str(home / "Live Extensions"),
                    KUMI_BRIDGE_WAIT_SECONDS="0")
+        if platform.system() == "Darwin":
+            # The fixture owns isolated ports/assets; do not make local tests depend on the user's Live.
+            # Only its process-list observation is injected. The native lifecycle still validates the receipt.
+            tools = home / "test-tools"
+            tools.mkdir(parents=True, exist_ok=True)
+            pgrep = tools / "pgrep"
+            pgrep.write_text('#!/bin/sh\n[ "$#" = 2 ] && [ "$1" = -x ] && [ "$2" = Live ] || exit 2\nexit 1\n')
+            pgrep.chmod(0o755)
+            env["PATH"] = str(tools) + os.pathsep + env["PATH"]
         return env
 
     def existing_data(self, home):
+        project = str(home / "Existing Set.als")
+        project_id = hashlib.sha256(project.encode()).hexdigest()[:32]
         markers = {
             "settings.json": json.dumps({"model":"anthropic/claude-sonnet-5-5", "effort":"high", "panelTab":"history",
                                          "libraryFolders":[], "updateCheck":False, "voice":{"language":"ja","send":True}}),
             "auth.json": json.dumps({"version":1,"credentials":{"anthropic":{"type":"api-key","key":"sk-ant-existing-fixture-private-0000"}}}),
-            "input-history": "/status\n/quit\n", "memory.json": '{"habits":[],"notes":[]}',
-            "library/producer-marker.json": '{"source":"kept"}', "projects/producer-marker.json": '{"name":"existing project"}',
-            "conversations/producer-marker.json": '{"messages":[{"role":"user","text":"existing conversation"}]}',
+            "input-history": '"/status"\n"/quit"\n',
+            "memory.json": '{"version":1,"notes":[{"id":"p1","text":"Keep the kick dry","at":1700000000000}]}',
+            "library/sounds.jsonl": json.dumps({"kumiLibrary":"sounds","version":1,"generation":"existing","created":1700000000000}) + "\n" + json.dumps({"path":str(home / "Existing Kick.wav"),"size":4096,"mtime":1700000000000,"seconds":0.5,"kind":"one-shot","class":"kick"}) + "\n",
+            f"projects/{project_id}/last-seen.json": json.dumps({"version":1,"path":project,"name":"Existing Set","savedAt":1700000000000,"artifactId":"saved-artifact","pages":[{"tempo":120,"tracks":[]}]}),
+            f"projects/{project_id}/current": "saved001",
+            f"projects/{project_id}/conversations/saved001.json": json.dumps({"savedAt":1700000000000,"first":"Keep the kick dry","turns":1,"checkpoint":{"version":1,"origin":"anthropic/claude-sonnet-5-5","messages":[{"role":"user","content":"Keep the kick dry"},{"role":"assistant","content":"I'll keep it dry."}]}}),
         }
         for name, text in markers.items():
             file = home / name
@@ -190,6 +204,40 @@ class MigrationRelease(unittest.TestCase):
         result = subprocess.run([str(command), *args], env=env, input=input, capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
+
+    def legacy_installation(self, home):
+        reference_root = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT))
+        home.mkdir()
+        markers = self.existing_data(home)
+        old_entry = home / "app/apps/kumi/bin/kumi.mjs"
+        old_entry.parent.mkdir(parents=True)
+        # The actual old launcher and CLI execute; a wrapper resolves its reference build's dependencies.
+        shutil.copyfile(reference_root / "apps/kumi/bin/kumi.mjs", old_entry)
+        old_cli = home / "app/apps/kumi/dist/src/cli.js"
+        old_cli.parent.mkdir(parents=True)
+        old_cli.write_text("await import(" + json.dumps((reference_root / "apps/kumi/dist/src/cli.js").as_uri()) + ");\n")
+        (home / "app/package.json").write_text('{"version":"1.7.4","type":"module"}')
+        original_entry = old_entry.read_bytes()
+        node = home / "node" / ("node.exe" if os.name == "nt" else "bin/node")
+        node.parent.mkdir(parents=True)
+        source_node = Path(shutil.which("node")).resolve()
+        shutil.copy2(source_node, node)
+        # Homebrew Node uses a relative libnode; official installer Node is self-contained.
+        if platform.system() == "Darwin":
+            for library in (source_node.parent.parent / "lib").glob("libnode.*.dylib"):
+                target = home / "node/lib" / library.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(library, target)
+        legacy_root = home / "legacy bridge"
+        legacy_root.mkdir()
+        installed = subprocess.run(["node", str(release.native.ROOT / "crates/ableton-mcp-server/tests/support/legacy_install.mjs"),
+                                    json.dumps({"root":str(legacy_root),"version":"1.0.73","custom":False,"clean":True})],
+                                   cwd=reference_root, capture_output=True, text=True, timeout=60)
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        old = json.loads(installed.stdout)["receipt"]
+        env = self.production_environment(home, Path(old["remoteScriptsDirectory"]))
+        self.assertEqual(self.launched(node, env, str(old_entry), "--version"), "Kumi 1.7.4\n")
+        return markers, old, original_entry, env
 
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
     def test_actual_built_bundle_launches_and_reads_existing_data(self):
@@ -218,7 +266,51 @@ class MigrationRelease(unittest.TestCase):
         self.check_existing_data(home, markers)
         suffix = ".exe" if os.name == "nt" else ""
         self.assertIn(manifest["bridge"], self.launched(app / ("ableton-mcp-server" + suffix), env, "--version"))
-        self.launched(app / ("ableton-mcp-analysis-worker" + suffix), env, input="")
+        reply = json.loads(self.launched(app / ("ableton-mcp-analysis-worker" + suffix), env,
+                              input=json.dumps({"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}})))
+        self.assertTrue(reply["ok"])
+        self.assertEqual(reply["result"]["sampleCount"], 4)
+        self.assertEqual(reply["result"]["peak"], 0.5)
+
+    @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
+    def test_actual_built_bundle_migrates_same_version_bridge_and_restores_legacy_launch(self):
+        # Exercise bridge/launcher handoff independently of the separate newer-app updater gate.
+        artifacts = Path(os.environ["KUMI_NATIVE_RELEASES"])
+        manifest = json.loads((artifacts / "kumi-release.json").read_text())
+        home = self.root / "bridge transition home"
+        markers, old, original_entry, env = self.legacy_installation(home)
+        config, secret = Path(old["configPath"]), Path(old["secretPath"])
+        config_before, secret_before = config.read_bytes(), secret.read_bytes()
+        receipt = Path(old["stateDirectory"]) / "install-receipt.json"
+        (home / "app").rename(home / "app.previous")
+        (home / "app").mkdir()
+        archive = artifacts / manifest["targets"][self.target]["bundle"]
+        self.assertEqual(release.native.digest(archive), manifest["targets"][self.target]["sha256"])
+        with tarfile.open(archive) as bundle:
+            bundle.extractall(home / "app", filter="data")
+        self.launched(home / "app" / self.binary, env, "--version")
+        launcher = home / "bin" / ("kumi.cmd" if os.name == "nt" else "kumi")
+        # No new flags or sign-in: the existing bridge reference leads to its original receipt.
+        opened = self.launched(launcher, env, input="/quit\n")
+        current = json.loads(receipt.read_text())
+        self.assertEqual(current["packageVersion"], old["packageVersion"])
+        self.assertEqual(current["config"]["bridge"], old["config"]["bridge"])
+        self.assertEqual(current["config"]["server"]["args"], ["--config", str(config)], opened)
+        self.assertEqual(secret.read_bytes(), secret_before)
+        self.check_existing_data(home, markers)
+        self.launched(launcher, env, "update", "--rollback")
+        self.assertEqual((home / "app/apps/kumi/bin/kumi.mjs").read_bytes(), original_entry)
+        self.assertEqual(config.read_bytes(), config_before)
+        self.assertEqual(secret.read_bytes(), secret_before)
+        self.assertEqual(self.launched(launcher, env, "--version"), "Kumi 1.7.4\n")
+        self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
+        self.check_existing_data(home, markers)
+        self.launched(launcher, env, "update", "--rollback")
+        self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
+        self.launched(launcher, env, input="/quit\n")
+        self.assertEqual(json.loads(receipt.read_text())["config"]["server"]["args"], ["--config", str(config)])
+        self.assertEqual(secret.read_bytes(), secret_before)
+        self.check_existing_data(home, markers)
 
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
     def test_actual_built_release_with_authoritative_old_updater(self):
@@ -230,33 +322,12 @@ class MigrationRelease(unittest.TestCase):
         self.assertGreater(tuple(map(int, manifest["kumi"].split("-")[0].split("."))), (1, 7, 4),
                            "the native transition must publish a newer application version than legacy 1.7.4")
         home = self.root / "production home"
-        home.mkdir()
-        markers = self.existing_data(home)
+        markers, old, original_entry, env = self.legacy_installation(home)
         old_entry = home / "app/apps/kumi/bin/kumi.mjs"
-        old_entry.parent.mkdir(parents=True)
-        # The actual old launcher and CLI execute; a wrapper resolves its reference build's dependencies.
-        shutil.copyfile(reference_root / "apps/kumi/bin/kumi.mjs", old_entry)
-        old_cli = home / "app/apps/kumi/dist/src/cli.js"
-        old_cli.parent.mkdir(parents=True)
-        old_cli.write_text("await import(" + json.dumps((reference_root / "apps/kumi/dist/src/cli.js").as_uri()) + ");\n")
-        (home / "app/package.json").write_text('{"version":"1.7.4","type":"module"}')
-        original_entry = old_entry.read_bytes()
         node = home / "node" / ("node.exe" if os.name == "nt" else "bin/node")
-        node.parent.mkdir(parents=True)
-        shutil.copy2(shutil.which("node"), node)
-        legacy_root = home / "legacy bridge"
-        legacy_root.mkdir()
-        installed = subprocess.run(["node", str(reference_root / "crates/ableton-mcp-server/tests/support/legacy_install.mjs"),
-                                    json.dumps({"root":str(legacy_root),"version":"1.0.73","custom":False})],
-                                   cwd=reference_root, capture_output=True, text=True, timeout=60)
-        self.assertEqual(installed.returncode, 0, installed.stderr)
-        old = json.loads(installed.stdout)["receipt"]
-        config = Path(old["configPath"])
-        secret = Path(old["secretPath"])
+        config, secret = Path(old["configPath"]), Path(old["secretPath"])
         receipt = Path(old["stateDirectory"]) / "install-receipt.json"
         config_before, secret_before = config.read_bytes(), secret.read_bytes()
-        env = self.production_environment(home, Path(old["remoteScriptsDirectory"]))
-        self.assertEqual(self.launched(node, env, str(old_entry), "--version"), "Kumi 1.7.4\n")
         test = self.root / "built-updater.mjs"
         test.write_text('''import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';

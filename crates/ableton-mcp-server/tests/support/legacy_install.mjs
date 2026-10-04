@@ -1,6 +1,7 @@
 // Create the old installation with the unmodified TypeScript lifecycle, including its
 // source fixture package/archive, receipt, config, secret, and managed Live assets.
-import fs from 'node:fs';import path from 'node:path';import {pathToFileURL} from 'node:url';import ts from 'typescript';
+import fs from 'node:fs';import path from 'node:path';import {pathToFileURL} from 'node:url';import {createRequire} from 'node:module';
+const ts=createRequire(path.join(process.cwd(),'package.json'))('typescript');
 const input=JSON.parse(process.argv[2]),root=process.cwd();
 // Build only the reference dependency graph into this test's temporary tree. CI needs
 // TypeScript from npm ci, but no checked-out dist files or separate reference build.
@@ -21,11 +22,19 @@ source=source.replace('new URL("../../../../LICENSE.md", import.meta.url)',JSON.
 source+=`
 const input=${JSON.stringify(input)};
 const packageRoot=fixturePackage(input.root,input.version,'actual-node-install');
+if(input.clean){
+ const manifestPath=join(packageRoot,'release-manifest.json');
+ const manifest=JSON.parse(readFileSync(manifestPath,'utf8'));manifest.source.dirty=false;
+ const bytes=Buffer.from(JSON.stringify(manifest)+'\\n');writeFileSync(manifestPath,bytes);
+ const artifact=artifacts.get(packageRoot);createArtifact(artifact.path,bytes,packageRoot);
+ artifact.sha256=sha(readFileSync(artifact.path));
+}
+
 const stateDirectory=join(input.root,'State ü space');
 const custom=join(input.root,'Custom configuration ü');mkdirSync(custom,{recursive:true});chmodSync(custom,0o700);
 const overrides=input.custom?{configPath:join(custom,'owner config.json'),secretPath:join(custom,'owner secret.key')}:{};
 if(input.custom){writeFileSync(overrides.secretPath,'a'.repeat(64)+'\\n',{mode:0o600});}
-const options=await withPorts(lifecycleOptions(input.root,packageRoot,'install',{timeoutMs:1379,enableBridgeDiagnostics:true,...overrides}));
+const options=await withPorts(lifecycleOptions(input.root,packageRoot,'install',{timeoutMs:1379,enableBridgeDiagnostics:true,allowDirtyPrivateBuild:!input.clean,...overrides}));
 const installed=await runLifecycle(options);
 export default {options,installed,receipt:receipt(options)};
 `;

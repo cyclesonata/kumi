@@ -158,7 +158,8 @@ jobs:
           kumi doctor || true
           test ! -e "$KUMI_HOME/node"
           "$KUMI_HOME/app/ableton-mcp-server" --version
-          "$KUMI_HOME/app/ableton-mcp-analysis-worker" </dev/null
+          printf '%s' '{"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}}' | "$KUMI_HOME/app/ableton-mcp-analysis-worker" > worker.json
+          python3 -c 'import json; r=json.load(open("worker.json")); assert r["ok"] and r["result"]["sampleCount"] == 4 and r["result"]["peak"] == 0.5'
           test -x "$KUMI_HOME/app/ableton-mcp-analysis-worker"
           # PATH line added once, in the startup file bash reads, and not again on a second run (which repairs).
           marked() { grep -c "Added by the Kumi installer" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile" 2>/dev/null | awk -F: '{ n += $NF } END { print n + 0 }'; }
@@ -203,8 +204,10 @@ jobs:
           & (Join-Path $env:KUMI_HOME 'app\ableton-mcp-server.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'native bridge did not start' }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'app\ableton-mcp-analysis-worker.exe'))) { throw 'no native analysis worker' }
-          cmd /c '"%KUMI_HOME%\app\ableton-mcp-analysis-worker.exe" < NUL'
+          $worker = '{"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}}' | & (Join-Path $env:KUMI_HOME 'app\ableton-mcp-analysis-worker.exe')
           if ($LASTEXITCODE -ne 0) { throw 'native worker did not start' }
+          $analysis = $worker | ConvertFrom-Json
+          if (-not $analysis.ok -or $analysis.result.sampleCount -ne 4 -or $analysis.result.peak -ne 0.5) { throw 'native worker returned unexpected analysis' }
           # Again: a repair, keeping the one before.
           Get-Content -Raw install.ps1 | Invoke-Expression
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'app.previous'))) { throw 'no previous app after a second install' }
