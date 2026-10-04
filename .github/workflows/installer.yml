@@ -204,14 +204,25 @@ jobs:
           & (Join-Path $env:KUMI_HOME 'app\ableton-mcp-server.exe') --version
           if ($LASTEXITCODE -ne 0) { throw 'native bridge did not start' }
           if (-not (Test-Path (Join-Path $env:KUMI_HOME 'app\ableton-mcp-analysis-worker.exe'))) { throw 'no native analysis worker' }
-          # Windows PowerShell can add an encoding preamble to native stdin. The worker wire format is UTF-8 JSON.
-          $savedOutputEncoding = $OutputEncoding
+          # Write the worker's UTF-8 JSON wire bytes directly; PowerShell's text pipeline can recode stdin.
+          $workerInput = [Text.Encoding]::UTF8.GetBytes('{"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}}')
+          Write-Host ('Worker stdin first 16 bytes: ' + [BitConverter]::ToString($workerInput[0..15]))
+          $workerProcess = New-Object Diagnostics.Process
+          $workerProcess.StartInfo.FileName = Join-Path $env:KUMI_HOME 'app\ableton-mcp-analysis-worker.exe'
+          $workerProcess.StartInfo.UseShellExecute = $false
+          $workerProcess.StartInfo.RedirectStandardInput = $true
+          $workerProcess.StartInfo.RedirectStandardOutput = $true
+          $workerProcess.StartInfo.RedirectStandardError = $true
           try {
-            $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-            $worker = '{"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}}' | & (Join-Path $env:KUMI_HOME 'app\ableton-mcp-analysis-worker.exe')
-            $workerExit = $LASTEXITCODE
-          } finally { $OutputEncoding = $savedOutputEncoding }
-          if ($workerExit -ne 0) { throw "native worker failed ($workerExit): $worker" }
+            [void]$workerProcess.Start()
+            $workerProcess.StandardInput.BaseStream.Write($workerInput, 0, $workerInput.Length)
+            $workerProcess.StandardInput.BaseStream.Close()
+            $worker = $workerProcess.StandardOutput.ReadToEnd()
+            $workerError = $workerProcess.StandardError.ReadToEnd()
+            $workerProcess.WaitForExit()
+            $workerExit = $workerProcess.ExitCode
+          } finally { $workerProcess.Dispose() }
+          if ($workerExit -ne 0) { throw "native worker failed ($workerExit): $worker $workerError" }
           $analysis = $worker | ConvertFrom-Json
           if (-not $analysis.ok -or $analysis.result.sampleCount -ne 4 -or $analysis.result.peak -ne 0.5) { throw 'native worker returned unexpected analysis' }
           # Again: a repair, keeping the one before.
