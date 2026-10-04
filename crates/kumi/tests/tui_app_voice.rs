@@ -90,6 +90,7 @@ case!(enter_sends_escape_and_control_c_cancel_first, async {
     h.type_text("\x14").await;
     h.has("Listening…");
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Listening…").await;
     assert!(!has(&h.screen(), "Listening…"));
     assert_eq!(v.calls.borrow().last().map(String::as_str), Some("cancel"));
     assert!(!h.calls().contains(&"cancel".into()));
@@ -98,6 +99,7 @@ case!(enter_sends_escape_and_control_c_cancel_first, async {
     assert!(!has(&h.screen(), "Listening…"));
     assert!(!h.calls().contains(&"cancel".into()));
     h.type_text("\x1b").await;
+    h.wait_for_call("cancel").await;
     assert!(h.calls().contains(&"cancel".into()));
     h.close().await;
 });
@@ -189,6 +191,7 @@ case!(voice_panel_send_language_and_microphone, async {
     h.has("Listening…");
     assert!(v.calls.borrow().contains(&"listen".into()));
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Listening…").await;
     h.type_text("/help\r").await;
     h.has("ctrl+t talks instead");
     h.close().await;

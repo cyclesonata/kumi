@@ -56,6 +56,7 @@ impl Input {
 }
 pub struct Out {
     pub text: RefCell<String>,
+    written: tokio::sync::Notify,
     pub width: Cell<i32>,
     pub height: Cell<i32>,
     resize: RefCell<Option<Rc<dyn Fn()>>>,
@@ -71,7 +72,8 @@ impl TtyOutput for Out {
         Some(self.height.get())
     }
     fn write(&self, s: &str) {
-        self.text.borrow_mut().push_str(s)
+        self.text.borrow_mut().push_str(s);
+        self.written.notify_one();
     }
     fn watch_resize(&self, f: Rc<dyn Fn()>) {
         *self.resize.borrow_mut() = Some(f)
@@ -84,6 +86,7 @@ pub struct Control {
     pub extra: RefCell<Value>,
     pub aside_gate: RefCell<Option<kumi_common::abort::Signal>>,
     pub calls: RefCell<Vec<String>>,
+    called: tokio::sync::Notify,
     pub state: Cell<TurnState>,
     pub undo: RefCell<Option<ChangeRecord>>,
     pub emit: RefCell<Option<Rc<dyn Fn(SessionEvent)>>>,
@@ -105,6 +108,7 @@ impl Default for Control {
             extra: RefCell::new(serde_json::json!({})),
             aside_gate: RefCell::default(),
             calls: RefCell::default(),
+            called: tokio::sync::Notify::new(),
             state: Cell::new(TurnState::Idle),
             undo: RefCell::default(),
             emit: RefCell::default(),
@@ -140,6 +144,7 @@ impl Control {
     }
     pub fn call(&self, s: impl Into<String>) {
         self.calls.borrow_mut().push(s.into());
+        self.called.notify_one();
     }
 }
 #[async_trait(?Send)]
@@ -369,7 +374,13 @@ impl Harness {
     }
     pub fn with(w: i32, h: i32, control: Rc<Control>, configure: impl FnOnce(&mut TuiOptions)) -> Self {
         let input = Rc::new(Input::default());
-        let output = Rc::new(Out { text: RefCell::default(), width: Cell::new(w), height: Cell::new(h), resize: RefCell::default() });
+        let output = Rc::new(Out {
+            text: RefCell::default(),
+            written: tokio::sync::Notify::new(),
+            width: Cell::new(w),
+            height: Cell::new(h),
+            resize: RefCell::default(),
+        });
         let browsed = Rc::new(RefCell::new(vec![]));
         let mut opts = TuiOptions::new(control.clone(), input.clone(), output.clone(), "live");
         opts.secrets = vec!["private-token".into()];
@@ -423,6 +434,44 @@ impl Harness {
     }
     pub fn calls(&self) -> Vec<String> {
         self.control.calls.borrow().clone()
+    }
+    pub async fn wait_for_call(&self, expected: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let called = self.control.called.notified();
+                if self.control.calls.borrow().iter().any(|call| call == expected) {
+                    return;
+                }
+                called.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Missing controller call {expected:?}: {:?}", self.calls()));
+    }
+    async fn wait_for_screen(&self, description: &str, ready: impl Fn(&[String]) -> bool) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let written = self.output.written.notified();
+                if ready(&self.screen()) {
+                    return;
+                }
+                written.await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("Waiting for {description}:\n{}", self.screen().join("\n")));
+    }
+    pub async fn wait_until_hidden(&self, text: &str) {
+        self.wait_for_screen(&format!("{text:?} to disappear"), |lines| !has(lines, text)).await;
+    }
+    pub fn has_selection_highlight(&self) -> bool {
+        self.screen();
+        let [r, g, b] = kumi::tui::style::palette::SELECTED;
+        let background = format!("{r},{g},{b}");
+        self.vt.borrow().styles.iter().flatten().any(|style| style.split('|').nth(1) == Some(background.as_str()))
+    }
+    pub async fn wait_until_selection_clears(&self) {
+        self.wait_for_screen("selection highlight to disappear", |_| !self.has_selection_highlight()).await;
     }
     pub fn has(&self, text: &str) {
         let lines = self.screen();

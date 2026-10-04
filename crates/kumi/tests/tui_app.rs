@@ -81,6 +81,7 @@ case!(cancel_clear_and_commands, async {
     delay(5).await;
     h.emit(json!({"type":"state","state":"running"}));
     h.type_text("\x1b").await;
+    h.wait_for_call("cancel").await;
     assert!(h.calls().contains(&"cancel".into()));
     h.emit(json!({"type":"state","state":"idle"}));
     h.type_text("draft").await;
@@ -100,6 +101,7 @@ case!(cancel_clear_and_commands, async {
     h.has("Close Kumi");
     assert!(!has(&h.screen(), "/new"));
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Close Kumi").await;
     assert!(!has(&h.screen(), "Close Kumi"));
     h.type_text("\x15/nope\r").await;
     h.has("There's no /nope command. Type / to see them.");
@@ -545,6 +547,7 @@ case!(effort_logout_auth_error_resends, async {
     h.start().await;
     h.has("Sign in to Anthropic?");
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Sign in to Anthropic?").await;
     h.type_text("How do I tame the snare?\r").await;
     h.emit(json!({"type":"state","state":"running"}));
     h.emit(json!({"type":"error","message":"Not signed in to Anthropic: add its API key with /login (or set ANTHROPIC_API_KEY).","kind":"auth","provider":"anthropic"}));
@@ -605,6 +608,7 @@ case!(device_tree_reads_mouse_keyboard_and_selection_colors, async {
         json!({"trackRef":"3:track:3","ref":"d2a","node":"device","name":"Saturator","trail":["Audio Effect Rack","Chain 1"],"siblings":["EQ Eight"],"track":"4-Audio"})
     );
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Chain 1 › Saturator  ×").await;
     assert!(!has(&h.screen(), "Chain 1 › Saturator  ×"));
     h.type_text("\t").await;
     h.type_text("\x1b[B").await;

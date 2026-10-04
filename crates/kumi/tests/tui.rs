@@ -498,6 +498,32 @@ async fn keys_a_lone_escape_waits_briefly_and_sequences_split_across_reads_still
 }
 
 #[tokio::test(start_paused = true)]
+async fn escape_deadline_starts_at_input_even_when_its_task_is_not_polled() {
+    let local = tokio::task::LocalSet::new();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let received = Rc::new(tokio::sync::Notify::new());
+    let sink = events.clone();
+    let ready = received.clone();
+    let parser = InputParser::new(Rc::new(move |event| {
+        sink.borrow_mut().push(event);
+        ready.notify_one();
+    }));
+    {
+        let _entered = local.enter();
+        parser.push("\x1b");
+    }
+    // The local task cannot run yet, but the original 25 ms deadline has passed.
+    tokio::time::advance(Duration::from_millis(30)).await;
+    local
+        .run_until(async {
+            tokio::time::timeout(Duration::from_millis(1), received.notified()).await.expect("Escape deadline was postponed");
+        })
+        .await;
+    assert_eq!(*events.borrow(), vec![key("escape", NONE)]);
+    parser.dispose();
+}
+
+#[tokio::test(start_paused = true)]
 async fn pastes_bracketed_pastes_even_split_and_unbracketed_multi_line_reads_never_send_enter() {
     local(async {
         assert_eq!(

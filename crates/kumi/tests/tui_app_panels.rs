@@ -80,10 +80,12 @@ case!(chatgpt_browser_clipboard_success_and_cancel, async {
     h.has("Signed in to ChatGPT.");
     assert!(h.screen().iter().any(|s| s.contains("GPT-6 Astra") && s.contains("current")));
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Choose a model").await;
     h.type_text("/login\r").await;
     h.type_text("\r").await;
     h.has("Waiting for the browser…");
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Waiting for the browser…").await;
     assert!(!has(&h.screen(), "Waiting for the browser…"));
     assert!(!has(&h.screen(), "didn't finish"));
     h.close().await;
@@ -129,6 +131,7 @@ case!(local_models_choices_default_network_retry_and_closed_startup, async {
     assert!(!has(&h.screen(), "Sign in to LM Studio"));
     assert!(!has(&h.screen(), "Sign in to Ollama"));
     h.type_text("\x1b").await;
+    h.wait_until_hidden("Choose a model").await;
     h.type_text("/model\r").await;
     h.type_text("gemma\r").await;
     assert!(fake.calls.borrow().contains(&"choose:ollama/gemma3:4b".into()));
@@ -367,6 +370,7 @@ case!(goal_dashboard_and_aside_panel, async {
     release.cancel();
     delay(5).await;
     h.type_text("\x1b").await;
+    h.wait_until_hidden("btw ·").await;
     assert!(!has(&h.screen(), "btw ·"));
     assert!(!has(&h.screen(), "up to a minute"));
     assert!(!h.calls().iter().any(|s| s.starts_with("submit:") && s.contains("tail")));
@@ -531,6 +535,7 @@ case!(stop_live_and_held_cancel_refusal, async {
     h.type_text("make the bass louder\r").await;
     h.has("↳ make the bass louder");
     h.type_text("\x1b").await;
+    h.wait_for_call("cancel").await;
     assert!(h.calls().contains(&"cancel".into()));
     assert!(!h.calls().iter().any(|s| s.starts_with("submit:")));
     h.has("make the bass louder");
@@ -611,7 +616,9 @@ case!(history_scroll_mouse_keyboard_and_badges, async {
     h.type_text("\x1b[B").await;
     h.type_text("\r").await;
     assert!(h.calls().contains(&"undo:c35".into()));
+    assert!(h.has_selection_highlight());
     h.type_text("\x1b").await;
+    h.wait_until_selection_clears().await;
     h.type_text("x").await;
     h.has("x");
     h.close().await;

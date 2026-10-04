@@ -281,8 +281,11 @@ impl InputParser {
                 if used == 0 {
                     let parser = self.clone();
                     let delay = Duration::from_secs_f64(self.inner.escape_delay_ms.max(0.0) / 1000.0);
+                    // Start the timeout when input arrives, as setTimeout does,
+                    // even if the spawned task is first polled much later.
+                    let timeout = tokio::time::sleep(delay);
                     state.timer = Some(tokio::task::spawn_local(async move {
-                        tokio::time::sleep(delay).await;
+                        timeout.await;
                         parser.timed_out();
                     }));
                     return;
