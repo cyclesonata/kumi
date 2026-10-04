@@ -35,3 +35,13 @@ fn device_view_preserves_observed_values_for_host_restoration_checks() {
         assert_eq!(serde_json::to_value(view).unwrap(), original);
     }
 }
+
+#[test]
+fn clip_and_track_views_keep_unknown_observations_until_host_validation() {
+    let clip = json!({"gridQuantization":"bad","gridIsTriplet":5,"future":null});
+    let observed: ableton_mcp_server::live::ClipView = serde_json::from_value(clip.clone()).unwrap();
+    assert_eq!(serde_json::to_value(observed).unwrap(), clip);
+    let track = json!({"deviceInsertMode":"bad","isCollapsed":5,"isShowingChains":[],"selectedDeviceRef":false,"future":null});
+    let observed: ableton_mcp_server::live::TrackView = serde_json::from_value(track.clone()).unwrap();
+    assert_eq!(serde_json::to_value(observed).unwrap(), track);
+}

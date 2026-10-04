@@ -921,9 +921,11 @@ pub struct WarpMarker {
 #[serde(rename_all = "camelCase")]
 pub struct ClipView {
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub grid_quantization: Maybe<i64>,
+    pub grid_quantization: Maybe<Value>,
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub grid_is_triplet: Maybe<bool>,
+    pub grid_is_triplet: Maybe<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1303,13 +1305,15 @@ string_enum! {
 #[serde(rename_all = "camelCase")]
 pub struct TrackView {
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub selected_device_ref: Maybe<LiveRef>,
+    pub selected_device_ref: Maybe<Value>,
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub device_insert_mode: Maybe<i64>,
+    pub device_insert_mode: Maybe<Value>,
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub is_collapsed: Maybe<bool>,
+    pub is_collapsed: Maybe<Value>,
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
-    pub is_showing_chains: Maybe<bool>,
+    pub is_showing_chains: Maybe<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// A track row. A focused read lists the tracks outside its focus as light rows (`light: true`): identity,
