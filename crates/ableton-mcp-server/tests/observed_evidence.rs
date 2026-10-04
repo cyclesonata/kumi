@@ -16,3 +16,14 @@ fn observed_mixer_and_routing_keep_property_order_nulls_and_updated_typed_values
     let typed: RoutingState = serde_json::from_value(route.clone()).unwrap();
     assert_eq!(kumi_common::js::json::stringify(&serde_json::to_value(&typed).unwrap()), kumi_common::js::json::stringify(&route));
 }
+
+#[test]
+fn clip_groove_retains_observed_extensions_and_property_order() {
+    let original = serde_json::json!({"ref":"groove:g","objectIdentity":"groove:identity","name":"Swing","future":null,"base":3});
+    let mut groove: ableton_mcp_server::live::ClipGroove = serde_json::from_value(original.clone()).unwrap();
+    assert_eq!(serde_json::to_string(&groove).unwrap(), serde_json::to_string(&original).unwrap());
+    groove.name = "Edited".into();
+    let mut edited = original;
+    edited["name"] = serde_json::json!("Edited");
+    assert_eq!(serde_json::to_string(&groove).unwrap(), serde_json::to_string(&edited).unwrap());
+}

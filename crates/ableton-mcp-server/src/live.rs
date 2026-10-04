@@ -895,12 +895,16 @@ string_enum! {
     ClipKind { Midi = "midi", Audio = "audio" }
 }
 
+pub type ClipGroove = ObservedObject<ClipGrooveFields>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ClipGroove {
+pub struct ClipGrooveFields {
     #[serde(rename = "ref")]
     pub ref_: LiveRef,
     pub name: String,
+    #[serde(default, flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
