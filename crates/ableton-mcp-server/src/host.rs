@@ -31,6 +31,7 @@ mod dialog;
 mod object_view;
 mod selection;
 mod events;
+mod drum_pad;
 mod extended_mixer;
 mod import_files;
 mod follow;

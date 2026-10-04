@@ -38,7 +38,11 @@ fn path_text(path: &Path) -> String {
     value.into_owned()
 }
 fn canonical(path: &Path) -> Result<String, LiveError> {
-    fs::canonicalize(path).map(|p| path_text(&p)).map_err(|e| io_error(&e, "realpath", &[path]))
+    fs::canonicalize(path).map(|p| path_text(&p)).map_err(|e| {
+        // Node realpath resolves relative input before reporting its failing lstat.
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        io_error(&e, "lstat", &[&absolute])
+    })
 }
 fn chmod(path: &Path, mode: u32) -> Result<(), LiveError> {
     #[cfg(unix)]
@@ -386,6 +390,9 @@ impl McpHost {
     }
     pub(super) fn write_drum_sampler_preset(&self, path: &str, name: &str) -> Result<Value, LiveError> {
         self.import_files.write_preset(path, name)
+    }
+    pub(super) fn release_drum_sampler_preset(&self, path: &Value) {
+        self.import_files.release_preset(path)
     }
     pub(super) fn release_drum_sampler_presets(&self, transaction: &Value) {
         self.import_files.release_presets(transaction)
