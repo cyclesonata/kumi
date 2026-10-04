@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 mod arrangement;
+mod capture;
 pub mod audio;
 mod audition;
 mod device_parameter;
@@ -93,6 +94,7 @@ pub struct McpHost {
     retention: Rc<TransactionRetention>,
     transactions: BoundedTransactionMap,
     audio_capture_transactions: BoundedTransactionMap,
+    capture_controllers: RefCell<Vec<capture::CaptureController>>,
     arrangement_transactions: BoundedTransactionMap,
     session_structure_transactions: BoundedTransactionMap,
     device_parameter_transactions: BoundedTransactionMap,
@@ -164,6 +166,7 @@ impl McpHost {
             events: Rc::new(events::EventState::default()),
             transactions: map(),
             audio_capture_transactions: map(),
+            capture_controllers: RefCell::new(Vec::new()),
             arrangement_transactions: map(),
             session_structure_transactions: map(),
             device_parameter_transactions: map(),
