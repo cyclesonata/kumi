@@ -5,9 +5,9 @@ let source=readFileSync(original,'utf8');
 const marker='    return {\n        async start(signal) {\n            if (closed || started)';
 if(!source.includes(marker))throw Error('source hook changed');
 source=source.replace(marker,`    let oracleArrange; return {
-      async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);oracleArrange=arrangeHost();},
+      async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;currentSet=c.set;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);oracleArrange=arrangeHost();},
       _bump(){observationGeneration++;},
-      async _op(op,signal){if(op.service==='plan')return makeChanges(op.input,signal);if(op.service==='stream'){
+      async _op(op,signal){if(op.set!==undefined)currentSet=op.set;if(op.service==='watch')return watch(op.input,signal);if(op.service==='plan')return makeChanges(op.input,signal);if(op.service==='stream'){
         let onStarts=0;const stream=streamChanges(signal,()=>onStarts++);const progress=[];
         for(const chunk of op.chunks??[]){stream.push(chunk);await new Promise(resolve=>setImmediate(resolve));progress.push({started:stream.started});}
         if(op.cancel)options._cancel();
@@ -28,15 +28,17 @@ try{
  const {createAbletonIntegration}=await import(file.href);
  const {CHANGES}=await import(new URL('changes.js',original));
  const {ACTIONS}=await import(new URL('actions.js',original));
- const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
+ const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end','live_project_snapshot_export','live_project_snapshot_diff',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
  async function run(label,provided,operations){
-  const config={...base,...provided},calls=[],responses=[],events=[],actions=[],results=[],disks=[];let controller,integration;let listCalls=0;
+  const config={...base,...provided},calls=[],responses=[],events=[],actions=[],results=[],disks=[];let controller,integration;let listCalls=0,deviceReads=0,exportReads=0;const watchEvents=[];
   const endpoint={pid:null,serverInfo:{name:'fixture',version:config.version??'1.0.73'},async list(){listCalls++;return{tools:toolNames.filter(n=>!(config.missing??[]).includes(n)&&!(listCalls===1&&(config.initiallyMissing??[]).includes(n))).map(name=>({name,inputSchema:config.schemas?.[name]??{type:'object'}}))};},async call(name,args,signal){
-   signal.throwIfAborted();const at=calls.length;calls.push({name,args:structuredClone(args)});let stage=name==='live_status'?'status':name==='live_discover'?'discover':name.endsWith('_preview')?'preview':name.endsWith('_apply')?'apply':'other';
+   signal.throwIfAborted();const at=calls.length;calls.push({name,args:structuredClone(args)});let stage=name==='live_project_snapshot_export'?'export':name==='live_project_snapshot_diff'?'diff':name==='live_status'?'status':name==='live_discover'?'discover':name.endsWith('_preview')?'preview':name.endsWith('_apply')?'apply':'other';
    let response=config.responses?.[at]??config.fail?.[stage];
    if(!response){let value;
-    if(stage==='status')value=config.status??{connected:true,epoch:7};
-    else if(stage==='discover')value=config.discover??{epoch:7,items:args.kind==='session-state'?[{transport:{playing:false}}]:args.kind==='parameter'?[{ref:'7:parameter:7:device:0:0:1',name:'Drive',min:0,max:1,value:.5,displayValue:'3 dB'}]:args.kind==='device'?[{ref:'7:device:0:0',name:'Effect',className:'AudioEffect'}]:[]};
+    if(stage==='export')value=config.exports?.[Math.min(exportReads++,config.exports.length-1)]??{page:{},artifactId:'artifact',records:[]};
+    else if(stage==='diff')value=config.diff??{items:[]};
+    else if(stage==='status')value=config.status??{connected:true,epoch:7};
+    else if(stage==='discover')value=(args.kind==='device'&&config.deviceLists?{epoch:7,items:config.deviceLists[Math.min(deviceReads++,config.deviceLists.length-1)]}:config.discoverBy?.[args.kind])??config.discover??{epoch:7,items:args.kind==='session-state'?[{transport:{playing:false}}]:args.kind==='parameter'?[{ref:'7:parameter:7:device:0:0:1',name:'Drive',min:0,max:1,value:.5,displayValue:'3 dB'}]:args.kind==='device'?[{ref:'7:device:0:0',name:'Effect',className:'AudioEffect'}]:[]};
     else if(stage==='preview')value=config.preview??{epoch:7,transactionId:'tx',confirmation:'yes',priorTempo:120,proposedTempo:130,prior:{tracks:[{},{}],scenes:[{}]},proposed:[]};
     else if(stage==='apply')value=config.applied??{state:'applied'};
     else if(name==='live_run_python'&&args.code?.startsWith('# kumi:fast-')){
@@ -47,10 +49,10 @@ try{
    }
    responses.push(structuredClone(response));if(response.cancel)controller.abort();if(response.bump)integration._bump();if(response.throw)throw Error(response.throw);return response.reply;
   },onCatalogChanged(){return()=>{}},onDisconnect(){return()=>{}},stderrStatus(){return{bytes:0,truncated:false}},async close(){}};
-  integration=createAbletonIntegration({connect:async()=>endpoint,onConnection(){},onChange:r=>events.push(r),onAction:r=>actions.push(r),lowDisk:async(...args)=>{disks.push(args);return config.disk;},now:()=>new Date('2026-10-03T12:00:00Z'),generation:'connection',fast:config.fast??false,changeTimeoutMs:50,_cancel:()=>controller.abort()});
+  integration=createAbletonIntegration({connect:async()=>endpoint,onConnection(){},onChange:r=>events.push(r),onAction:r=>actions.push(r),onWatch:r=>watchEvents.push(r),lowDisk:async(...args)=>{disks.push(args);return config.disk;},now:()=>new Date('2026-10-03T12:00:00Z'),generation:'connection',fast:config.fast??false,changeTimeoutMs:50,_cancel:()=>controller.abort()});
   await integration.start(new AbortController().signal);await integration._ready(structuredClone(config));
   for(const op of operations){controller=new AbortController();if(op.abort)controller.abort();let value;try{value=await integration._op(op,controller.signal);}catch(e){value={error:e.name==='AbortError'?'cancelled':e.message};}results.push(structuredClone({value,state:integration._state()}));}
-  await integration.close();cases.push(norm({label,config,operations,calls,responses,events,actions,disks,results,listCalls}));
+  await integration.close();cases.push(norm({label,config,operations,calls,responses,events,actions,watchEvents,disks,results,listCalls}));
  }
  for(const kind of CHANGES)await run('kind-'+kind.tool,{},[change(kind.tool)]);
  for(const config of [{available:false},{lost:true},{noEpoch:true},{count:5000},{missing:['live_tempo_preview']},{initiallyMissing:['live_tempo_apply']},{status:{connected:false}},{status:{connected:true,epoch:8}},{status:{}},{fail:{status:{throw:'private bridge failure'}}}])await run('guard',config,[change('set_tempo',{tempo:130})]);
@@ -123,6 +125,19 @@ try{
  await run('stream-abandoned-before',{},[service('stream',{chunks:['{"steps":['],abandon:true})]);
  await run('stream-abandoned-play',{},[service('stream',{chunks:['{"steps":['+JSON.stringify({tool:'play',input:{action:'start'}})],abandon:true})]);
  await run('stream-cancelled-play',{},[service('stream',{chunks:['{"steps":['+JSON.stringify({tool:'play',input:{action:'start'}})],cancel:true,finish:{steps:[{tool:'play',input:{action:'start'}}]}})]);
+
+ const watch=(action,extra={})=>service('watch',{input:{action},...extra});
+ for(const config of [{},{available:false},{lost:true},{missing:['live_project_snapshot_diff']}])await run('watch-availability',config,[watch('stop'),watch('start'),watch('stop'),watch('stop')]);
+ await run('watch-changed-set',{set:'first'},[watch('start'),watch('stop',{set:'second'}),watch('stop')]);
+ await run('watch-restart',{},[watch('start'),watch('start'),watch('stop')]);
+ for(const stage of ['export','discover','diff'])for(const response of [{throw:'private bridge failure'},{reply:{content:[{type:'text',text:'bad JSON'}]}},{reply:wrap({items:[null]})},{cancel:true,reply:wrap({page:{},items:[]})}])await run('watch-read-failure',{fail:{[stage]:response}},[watch('start'),watch('stop')]);
+ const newDevice={ref:'7:device:0:1',parentRef:'7:track:0',objectIdentity:'new',name:'Saturator',className:'Saturator'};
+ const knobs=[{name:'Default',value:.5,defaultValue:.5},{name:'Drive',value:.8,defaultValue:.5,displayValue:'6 dB'},{name:null,value:1,defaultValue:0},{name:'Missing default',value:1},{name:'String default',value:1,defaultValue:'0'},{name:'Near',value:1e-8,defaultValue:0}];
+ for(const device of [newDevice,{...newDevice,parentRef:'rack'},{...newDevice,name:null},{...newDevice,objectIdentity:4}])await run('watch-added-device',{deviceLists:[[],[device]],discoverBy:{track:{items:[{ref:'7:track:0',name:'Bass',mediaKind:'midi'}]},parameter:{items:knobs}}},[watch('start'),watch('stop')]);
+ await run('watch-device-bound',{deviceLists:[[],Array.from({length:14},(_,i)=>({...newDevice,objectIdentity:i,ref:'7:device:0:'+i}))],discoverBy:{parameter:{items:Array.from({length:30},(_,i)=>({name:'P'+i,value:1,defaultValue:0}))}}},[watch('start'),watch('stop')]);
+ await run('watch-malformed-track',{discoverBy:{track:{items:[null]}}},[watch('start'),watch('stop')]);
+ const addedTrack={snapshotId:'new-track',kind:'track',name:'Recorded',order:1,data:{kind:'track',armed:true,monitoring:'off',mixer:{volume:.8},routing:{input:'Resampling'}}};
+ await run('watch-added-track',{exports:[{page:{},records:[]},{page:{},records:[addedTrack]}],diff:{items:[{type:'change',kind:'track',afterSnapshotId:'new-track',facets:['added']}]},discoverBy:{track:{items:[{ref:'7:track:1',name:'Recorded',mediaKind:'audio'}]}}},[watch('start'),watch('stop')]);
  const values=[],ids=new Map();for(const c of cases)c.responses=c.responses.map(v=>{const key=JSON.stringify(v);if(!ids.has(key)){ids.set(key,values.length);values.push(v);}return ids.get(key);});
  writeFileSync(new URL('mutations-oracle.json',import.meta.url),JSON.stringify({toolNames,cases,values})+'\n');console.log(cases.length+' source change/action sequences');
 }finally{unlinkSync(file);rmSync(fixture,{recursive:true,force:true})}

@@ -20,6 +20,7 @@ use kumi_runtime::{
         options::AbletonOptions,
         parameters::Parameters,
         remember::{CurrentProject, Remember},
+        watch::Watch,
     },
     mcp::{
         client::{McpEndpoint, StderrStatus},
@@ -167,6 +168,7 @@ async fn replay() {
         let config = &case["config"];
         let events = Rc::new(RefCell::new(Vec::<Value>::new()));
         let actions = Rc::new(RefCell::new(Vec::<Value>::new()));
+        let watch_events = Rc::new(RefCell::new(Vec::<Value>::new()));
         let disks = Rc::new(RefCell::new(Vec::<Value>::new()));
         let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
         let out = endpoint.clone();
@@ -182,6 +184,8 @@ async fn replay() {
         options.on_change = Some(Rc::new(move |record| out.borrow_mut().push(json!(record))));
         let out = actions.clone();
         options.on_action = Some(Rc::new(move |event| out.borrow_mut().push(json!(event))));
+        let out = watch_events.clone();
+        options.on_watch = Some(Rc::new(move |on| out.borrow_mut().push(json!(on))));
         let out = disks.clone();
         let disk = config["disk"].as_str().map(str::to_owned);
         options.low_disk = Some(Rc::new(move |folder, bytes, what| {
@@ -197,6 +201,7 @@ async fn replay() {
         connection.available.set(config["available"].as_bool().unwrap_or(true));
         connection.lost.set(config["lost"].as_bool().unwrap_or(false));
         connection.epoch.set((config["noEpoch"] != true).then_some(7.0));
+        *connection.set.borrow_mut() = config["set"].as_str().map(str::to_owned);
         {
             let mut book = connection.references.borrow_mut();
             for row in config["refs"].as_array().into_iter().flatten() {
@@ -227,6 +232,7 @@ async fn replay() {
         observer.tempo.set(Some(120.0));
         let mutations = Rc::new(Mutations::new(parameters.clone(), observer.clone(), options));
         let arrangement = mutations.arrange_host();
+        let watcher = Watch::new(mutations.clone());
         for sample in config["samples"].as_array().into_iter().flatten() {
             mutations
                 .samples
@@ -240,11 +246,15 @@ async fn replay() {
                 signal.cancel();
             }
             *endpoint.original.borrow_mut() = signal.clone();
+            if let Some(set) = operation["set"].as_str() {
+                *connection.set.borrow_mut() = Some(set.into());
+            }
             let work = async {
                 let input = operation["input"].as_object().cloned().unwrap_or_default();
                 if let Some(service) = operation["service"].as_str() {
                     let result: Result<Value, RuntimeError> = match service {
                         "plan" => mutations.make_changes(input, signal).await.map(tool_result),
+                        "watch" => watcher.execute(input, signal).await.map(tool_result),
                         "stream" => streaming(&mutations, operation, signal).await,
                         "clip" => mutations.clip_file(operation["named"].as_str().unwrap(), signal).await.map(|v| json!(v)),
                         "copy" => mutations.keep_copy(signal).await.map(|v| json!(v)),
@@ -306,6 +316,7 @@ async fn replay() {
         eq(&json!(*endpoint.calls.borrow()), &case["calls"], &format!("{label} calls"));
         eq(&json!(*events.borrow()), &case["events"], &format!("{label} events"));
         eq(&json!(*actions.borrow()), &case["actions"], &format!("{label} actions"));
+        eq(&json!(*watch_events.borrow()), &case["watchEvents"], &format!("{label} watch events"));
         eq(&json!(*disks.borrow()), &case["disks"], &format!("{label} disk"));
         eq(&json!(endpoint.lists.get()), &case["listCalls"], &format!("{label} lists"));
         let keys: Vec<_> =
