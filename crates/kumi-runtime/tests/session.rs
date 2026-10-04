@@ -1406,6 +1406,8 @@ local_test!(goal_full_length_checks_control_reported_scores_and_time_cap, {
     h.session.close().await.unwrap();
 });
 local_test!(match_polish_confirms_improvement_at_full_length_and_restores_if_not_better, {
+    // Exercise the full search budget independently of the host timer resolution.
+    tokio::time::pause();
     for improves in [false, true] {
         let mut raw = SearchRig::new(vec![50.]);
         raw.values_score = improves;
