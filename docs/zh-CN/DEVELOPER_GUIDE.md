@@ -136,7 +136,7 @@ npm test --prefix apps/mcp-server
 3. 给合并提交打上标签 `vX.Y.Z` 并推送该标签。Installer 工作流会构建包，在 macOS、Linux 和 Windows 上测试安装，并把 `kumi.tar.gz`、`kumi-release.json` 和 `SHA256SUMS` 附加到名为 “Kumi X.Y.Z” 的草稿发布中。
 4. 撰写发布说明并发布该版本。只有在此之后，安装程序、`kumi update` 和更新检查才能看到它。
 
-当前 `kumi-release.json` 保留了旧 Node 24 版更新器所需的格式，`kumi update` 通过一次性引导程序迁移到原生版。全新安装不下载 Node；现有 Node 会保留，供回滚和可选的 YouTube 挑战处理使用。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序。见[当前发布流程](../en/DEVELOPER_GUIDE.md#releasing)。
+当前 `kumi-release.json` 保留了旧 Node 24 版更新器所需的格式，`kumi update` 通过兼容引导程序解包原生版。全新安装不下载 Node；现有 Node 会保留，供回滚、可选的 YouTube 挑战处理和 Windows 原有启动器使用。原有启动器会继续向原生 Kumi 转发命令，直到重新运行安装程序。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序。见[当前发布流程](../en/DEVELOPER_GUIDE.md#releasing)。
 
 **桥接**没有单独的发布：它随每个 Kumi 版本一起发布，`main` 上的每次 CI 运行都会把一个打包好的候选版本保留 90 天。[分发](DISTRIBUTION_POLICY.md)介绍了一个发布版本包含什么，以及如何检查。
 

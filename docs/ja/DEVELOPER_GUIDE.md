@@ -137,7 +137,7 @@ npm test --prefix apps/mcp-server
 3. マージコミットに `vX.Y.Z` のタグを付けてプッシュします。Installer ワークフローがバンドルをビルドし、macOS、Linux、Windows でのインストールをテストし、`kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS` を下書きのリリース "Kumi X.Y.Z" に添付します。
 4. リリースノートを書いてリリースを公開します。そうして初めて、インストーラー、`kumi update`、更新確認がそのリリースを認識します。
 
-現行の `kumi-release.json` は旧 Node 24 版の更新形式を保持し、`kumi update` の一度限りの起動処理でネイティブ版へ移行します。新規インストールは Node を取得しません。既存の Node はロールバックと任意の YouTube チャレンジ処理用に残ります。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[現行リリース手順](../en/DEVELOPER_GUIDE.md#releasing)を参照してください。
+現行の `kumi-release.json` は旧 Node 24 版の更新形式を保持し、`kumi update` の互換起動処理でネイティブ版を展開します。新規インストールは Node を取得しません。既存の Node はロールバック、任意の YouTube チャレンジ処理、および Windows の既存ランチャー用に残ります。このランチャーは、インストーラーを再実行するまでネイティブ版にコマンドを転送します。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[現行リリース手順](../en/DEVELOPER_GUIDE.md#releasing)を参照してください。
 
 **ブリッジ**には独自のリリースはありません。ブリッジは各 Kumi リリースに同梱され、`main` での CI の実行ごとに、パック済みの候補が 90 日間保存されます。リリースに何が含まれ、どう確認されるかは[配布](DISTRIBUTION_POLICY.md)にあります。
 
