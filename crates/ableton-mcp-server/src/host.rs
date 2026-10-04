@@ -5,6 +5,7 @@
 #![allow(dead_code)]
 mod arrangement;
 pub mod audio;
+mod audition;
 mod device_parameter;
 pub mod device_state;
 mod events;
