@@ -346,6 +346,15 @@ async fn read_aiff(handle: &mut File, compressed: bool) -> Result<Layout, AudioE
     Err(AudioError("That AIFF has no audio in it.".into()))
 }
 fn deinterleave(buffer: &[u8], frames: usize, layout: &Layout) -> Vec<Vec<f32>> {
+    if !layout.encoding.float && layout.encoding.bits == 16 {
+        // Choose byte order once per block. Every signed 16-bit value divided by
+        // 32768 is exactly representable in f32, including the source's f64 round trip.
+        return if layout.little_endian {
+            deinterleave_i16(buffer, frames, layout.channels, i16::from_le_bytes)
+        } else {
+            deinterleave_i16(buffer, frames, layout.channels, i16::from_be_bytes)
+        };
+    }
     let mut out = vec![vec![0f32; frames]; layout.channels];
     let step = layout.encoding.bits / 8;
     let mut at = 0;
@@ -369,4 +378,56 @@ fn deinterleave(buffer: &[u8], frames: usize, layout: &Layout) -> Vec<Vec<f32>> 
         }
     }
     out
+}
+
+fn deinterleave_i16(buffer: &[u8], frames: usize, channels: usize, decode: impl Fn([u8; 2]) -> i16) -> Vec<Vec<f32>> {
+    let mut out = vec![vec![0.0; frames]; channels];
+    let stride = 2 * channels;
+    for (channel, samples) in out.iter_mut().enumerate() {
+        let mut at = channel * 2;
+        for sample in samples {
+            *sample = decode([buffer[at], buffer[at + 1]]) as f32 / 32768.0;
+            at += stride;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_signed_16_bit_sample_decodes_exactly_with_both_byte_orders_and_channel_layouts() {
+        for little_endian in [false, true] {
+            for channels in [1, 2, 3] {
+                let frames = 65536;
+                let mut buffer = Vec::with_capacity(frames * channels * 2 + 1);
+                for frame in 0..frames {
+                    for channel in 0..channels {
+                        let sample = (frame as u16).wrapping_add(channel as u16 * 17) as i16;
+                        buffer.extend_from_slice(&if little_endian { sample.to_le_bytes() } else { sample.to_be_bytes() });
+                    }
+                }
+                buffer.push(0xab); // AudioSource only forwards complete frames.
+                let layout = Layout {
+                    sample_rate: 48000.0,
+                    channels,
+                    frames,
+                    data_offset: 0,
+                    little_endian,
+                    encoding: Encoding { float: false, bits: 16, signed: true },
+                    format: "wav".into(),
+                };
+                let decoded = deinterleave(&buffer, frames, &layout);
+                for (channel, samples) in decoded.iter().enumerate() {
+                    for (frame, sample) in samples.iter().enumerate() {
+                        let integer = (frame as u16).wrapping_add(channel as u16 * 17) as i16;
+                        let expected = (integer as f64 / 32768.0) as f32;
+                        assert_eq!(sample.to_bits(), expected.to_bits(), "little={little_endian}, channel={channel}, frame={frame}");
+                    }
+                }
+            }
+        }
+    }
 }
