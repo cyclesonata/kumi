@@ -45,11 +45,11 @@ jobs:
       - run: cargo build --workspace --all-targets --locked
       - name: Tests, in a home of their own (no test reaches this machine's Live folders or ~/.kumi)
         if: runner.os != 'Windows'
-        run: sh scripts/test-isolated.sh
+        run: sh scripts/test-isolated.sh --no-fail-fast
       - name: Tests, in a home of their own (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/test-isolated.ps1
+        run: ./scripts/test-isolated.ps1 --no-fail-fast
       - name: Clippy (advisory while the port is under way)
         continue-on-error: true
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
