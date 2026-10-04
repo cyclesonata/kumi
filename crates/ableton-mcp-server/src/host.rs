@@ -19,6 +19,7 @@ mod reads;
 mod recovery;
 mod resources;
 pub mod retention;
+mod structure;
 mod tempo;
 
 use crate::{

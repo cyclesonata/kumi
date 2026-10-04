@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 pub(super) fn capture_object_fingerprint(value: &Value) -> Result<String, LiveError> {
     Ok(hex::encode(Sha256::digest(canonical_mutation_identity(&without_playback_state(value))?.as_bytes())))
 }
-fn truthy(v: &Value) -> bool {
+pub(super) fn truthy(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Bool(v) => *v,

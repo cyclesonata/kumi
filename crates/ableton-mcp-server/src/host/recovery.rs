@@ -168,7 +168,7 @@ impl McpHost {
             "Nothing changed in Live, and the change is still in place. A later undo checks it again from the start.",
         ))
     }
-    fn delete_undo_plan(&self, record: &TransactionRecord) {
+    pub(super) fn delete_undo_plan(&self, record: &TransactionRecord) {
         self.undo_recovery_plans.borrow_mut().retain(|p| p.record.upgrade().is_some_and(|r| !Rc::ptr_eq(&r, record)));
     }
     pub(super) fn async_adapter(&self) -> Rc<dyn AsyncLiveAdapter> {
