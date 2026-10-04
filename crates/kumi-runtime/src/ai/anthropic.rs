@@ -152,7 +152,7 @@ fn prompt(
     warnings: &mut Vec<Value>,
     betas: &mut Vec<String>,
 ) -> Result<(Option<Value>, Vec<Value>), LanguageModelError> {
-    let original = serde_json::to_value(&call.prompt).unwrap();
+    let original = super::types::to_provider_value(&call.prompt);
     let original = original.as_array().unwrap();
     let mut groups: Vec<(String, Vec<&Value>)> = vec![];
     for message in original {

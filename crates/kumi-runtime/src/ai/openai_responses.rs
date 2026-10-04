@@ -235,7 +235,7 @@ fn caller(value: &Value) -> Option<Value> {
     Some(if caller["type"] == "program" { json!({"type":"program","caller_id":caller["callerId"]}) } else { caller })
 }
 fn prompt(call: &CallOptions, opts: &Value, reasoning: bool, warnings: &mut Vec<Value>) -> Result<Vec<Value>, LanguageModelError> {
-    let messages = serde_json::to_value(&call.prompt).unwrap();
+    let messages = super::types::to_provider_value(&call.prompt);
     let mut input = vec![];
     let store = opts["store"] != false;
     let conversation = !opts["conversation"].is_null();

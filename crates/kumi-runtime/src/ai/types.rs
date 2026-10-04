@@ -32,10 +32,33 @@ pub enum DataContent {
     Base64(String),
 }
 
+thread_local! {
+    /// Set while a provider's request body is built (see [`to_provider_value`]).
+    static BYTES_AS_BASE64: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// `serde_json::to_value` for a provider's request body: file bytes become base64 text, as the body
+/// carries them, rather than `JSON.stringify(Uint8Array)`'s object with a key per byte, which saved
+/// conversations keep. A turn's images (megabytes) were rebuilt from that object on every step.
+pub fn to_provider_value<T: Serialize + ?Sized>(value: &T) -> Value {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            BYTES_AS_BASE64.with(|flag| flag.set(self.0));
+        }
+    }
+    let _restore = Restore(BYTES_AS_BASE64.with(|flag| flag.replace(true)));
+    serde_json::to_value(value).expect("a prompt serializes")
+}
+
 impl Serialize for DataContent {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::Base64(text) => serializer.serialize_str(text),
+            Self::Bytes(bytes) if BYTES_AS_BASE64.with(std::cell::Cell::get) => {
+                use base64::{engine::general_purpose::STANDARD, Engine};
+                serializer.serialize_str(&STANDARD.encode(bytes))
+            }
             Self::Bytes(bytes) => {
                 let mut map = serializer.serialize_map(Some(bytes.len()))?;
                 for (index, byte) in bytes.iter().enumerate() {
@@ -783,5 +806,26 @@ mod tests {
         let options = CallOptions { prompt: vec![Message::user_text("hi")], tools: Some(vec![tool]), ..CallOptions::default() };
         let json = serde_json::to_value(&options).unwrap();
         assert_eq!(json.as_object().unwrap().keys().collect::<Vec<_>>(), ["prompt", "tools"]);
+    }
+}
+
+#[cfg(test)]
+mod provider_value_tests {
+    use super::*;
+
+    #[test]
+    fn provider_bodies_carry_base64_and_saved_conversations_keep_byte_indices() {
+        let bytes: Vec<u8> = (0..=255).cycle().take(1_800_000).collect();
+        let data = DataContent::Bytes(bytes.clone());
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        assert_eq!(to_provider_value(&data), Value::String(STANDARD.encode(&bytes)));
+        // Saved as JSON.stringify(Uint8Array) wrote it, before and after a provider body is built.
+        let small = DataContent::Bytes(vec![7, 0, 255]);
+        let saved = serde_json::json!({"0":7,"1":0,"2":255});
+        assert_eq!(serde_json::to_value(&small).unwrap(), saved);
+        assert_eq!(to_provider_value(&small), Value::String("BwD/".into()));
+        assert_eq!(serde_json::to_value(&small).unwrap(), saved);
+        // Base64 text stays as it is either way.
+        assert_eq!(to_provider_value(&DataContent::Base64("BwD/".into())), Value::String("BwD/".into()));
     }
 }
