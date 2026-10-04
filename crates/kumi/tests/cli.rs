@@ -16,6 +16,7 @@ struct Input {
     raw: Cell<bool>,
     data: RefCell<Option<ByteListener>>,
     end: RefCell<Option<Rc<dyn Fn()>>>,
+    ready: tokio::sync::Notify,
 }
 impl TerminalInput for Input {
     fn is_tty(&self) -> bool {
@@ -29,7 +30,8 @@ impl TerminalInput for Input {
         Ok(())
     }
     fn resume(&self, f: ByteListener) {
-        *self.data.borrow_mut() = Some(f)
+        *self.data.borrow_mut() = Some(f);
+        self.ready.notify_one();
     }
     fn pause(&self) {
         self.data.borrow_mut().take();
@@ -39,11 +41,18 @@ impl TerminalInput for Input {
     }
 }
 impl Input {
+    async fn wait_ready(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while self.data.borrow().is_none() {
+                self.ready.notified().await;
+            }
+        })
+        .await
+        .expect("CLI did not register its input listener");
+    }
     fn write(&self, s: &str) {
-        let f = self.data.borrow().clone();
-        if let Some(f) = f {
-            f(s.as_bytes())
-        }
+        let f = self.data.borrow().clone().expect("wait for the CLI input listener before writing");
+        f(s.as_bytes())
     }
     fn end(&self) {
         let f = self.end.borrow().clone();
@@ -53,7 +62,7 @@ impl Input {
     }
 }
 #[derive(Default)]
-struct Output(RefCell<String>);
+struct Output(RefCell<String>, tokio::sync::Notify);
 impl TtyOutput for Output {
     fn is_tty(&self) -> bool {
         false
@@ -65,7 +74,8 @@ impl TtyOutput for Output {
         None
     }
     fn write(&self, s: &str) {
-        self.0.borrow_mut().push_str(s)
+        self.0.borrow_mut().push_str(s);
+        self.1.notify_one();
     }
 }
 struct Fixture {
@@ -96,6 +106,15 @@ impl Fixture {
     }
     fn output(&self) -> String {
         self.out.0.borrow().clone()
+    }
+    async fn wait_output(&self, text: &str) {
+        let received = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !self.out.0.borrow().contains(text) {
+                self.out.1.notified().await;
+            }
+        })
+        .await;
+        assert!(received.is_ok(), "missing {text:?}; stdout: {}; stderr: {}", self.output(), self.err.0.borrow());
     }
 }
 fn unused_factory() -> AbletonFactory {
@@ -154,7 +173,7 @@ case!(sign_in_choice_non_tty_and_invalid_choice, async {
     assert!(f.err.0.borrow().contains("login <provider>, with provider one of openai-codex, anthropic, openai, opencode."));
     let f = Fixture::new(true);
     let task = tokio::task::spawn_local(run(f.io(&["login"]), unused_factory()));
-    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    f.input.wait_ready().await;
     assert!(f.output().contains("How do you want to sign in?"));
     assert!(f.output().contains("Choose 1–4:"));
     f.input.write("1.5\n");
@@ -186,10 +205,9 @@ case!(inference_only_reports_missing_signin_and_closes_pipe_without_live, async 
     let f = Fixture::new(false);
     f.settings(json!({"model":"anthropic/claude-sonnet-5-5","updateCheck":false,"libraryFolders":[]}));
     let task = tokio::task::spawn_local(run(f.io(&["--inference-only"]), unused_factory()));
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    f.input.wait_ready().await;
     f.input.write("hello\n");
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    assert!(f.output().contains("Not signed in to Anthropic"), "{}", f.output());
+    f.wait_output("Not signed in to Anthropic").await;
     f.input.write("/status\n/quit\n");
     f.input.end();
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
@@ -225,7 +243,7 @@ case!(live_binding_passes_callbacks_and_stores_to_native_session, async {
         create_inference_only_integration(Rc::new(move |state| connection(state, None)))
     });
     let task = tokio::task::spawn_local(run(f.io(&["--bridge-config", config.to_str().unwrap()]), factory));
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    f.input.wait_ready().await;
     f.input.write("/quit\n");
     f.input.end();
     assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(10), task).await.unwrap().unwrap(), 0);
