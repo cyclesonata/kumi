@@ -82,7 +82,7 @@ fn auth(message: impl Into<String>) -> RuntimeError {
 
 impl FileCredentialStore {
     async fn read(&self) -> Result<Value, RuntimeError> {
-        let text = async {
+        let text: Result<Result<String, RuntimeError>, std::io::Error> = async {
             // Windows profile folders supply the privacy guarantee; POSIX mode bits are checked.
             #[cfg(unix)]
             {
