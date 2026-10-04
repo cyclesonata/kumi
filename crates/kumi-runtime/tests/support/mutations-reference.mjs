@@ -1,18 +1,19 @@
-import {readFileSync,writeFileSync,unlinkSync} from 'node:fs';
-import {homedir} from 'node:os';
+import {readFileSync,writeFileSync,unlinkSync,mkdtempSync,rmSync} from 'node:fs';
+import {homedir,tmpdir} from 'node:os';
 const original=new URL('../../../../packages/runtime/dist/src/integrations/ableton/index.js',import.meta.url),file=new URL('index.mutations-oracle.js',original);
 let source=readFileSync(original,'utf8');
 const marker='    return {\n        async start(signal) {\n            if (closed || started)';
 if(!source.includes(marker))throw Error('source hook changed');
-source=source.replace(marker,`    return {
-      async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);},
+source=source.replace(marker,`    let oracleArrange; return {
+      async _ready(c){await tools.refresh(new AbortController().signal);available=c.available??true;lost=c.lost??false;currentEpoch=c.noEpoch?undefined:7;currentTempo=120;changesThisTurn=c.count??0;project=c.project;for(const [r,k] of c.refs??[])refs.set(r,k);for(const r of c.shorts??[])shortRef(r);for(const [r,t] of c.known??[])known.set(r,t);for(const [k,v] of c.cursors??[])cursors.set(k,v);for(const sample of c.samples??[])samples.set(sample.path,sample);oracleArrange=arrangeHost();},
       _bump(){observationGeneration++;},
-      async _op(op,signal){const run=()=>op.action?act(ACTIONS.find(k=>k.tool===op.tool),op.input,signal,op.cleanup??false):change(CHANGES.find(k=>k.tool===op.tool),op.input,signal,op.settled??false);return op.quiet?quietly([],run):run();},
+      async _op(op,signal){if(op.service==='clip')return clipFile(op.named,signal);if(op.service==='step')return step(op.tool,op.input,signal);if(op.service==='copy')return keepCopy(signal);if(op.service==='offers')return oracleArrange.offers(op.tool);if(op.service==='arrange')return oracleArrange.change(op.tool,op.input,signal);if(op.service==='undoStep'){const opened=await oracleArrange.undoStep();await opened.close();return opened.opened;}if(op.service==='tell')return oracleArrange.tell(op.title);const run=()=>op.action?act(ACTIONS.find(k=>k.tool===op.tool),op.input,signal,op.cleanup??false):change(CHANGES.find(k=>k.tool===op.tool),op.input,signal,op.settled??false);return op.quiet?quietly([],run):run();},
       _state(){return{changes:[...changes.values()],changesThisTurn,refs:[...refs],known:[...known],names:[...shortRefs],cursors:[...cursors],tempo:currentTempo,lease:observationGeneration,found:[...fastFound]};},
       async start(signal){if(closed||started)`);
 writeFileSync(file,source);
 const wrap=value=>({content:[{type:'text',text:JSON.stringify(value)}],...(value&&typeof value==='object'&&!Array.isArray(value)?{structuredContent:value}:{})});
-const norm=value=>JSON.parse(JSON.stringify(value).replace(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/g,'<uuid>').replace(/\bc\d+\b/g,'<change>').split(homedir()).join('<home>'));
+const fixture=mkdtempSync(tmpdir()+'/kumi-execution-oracle-');writeFileSync(fixture+'/Set.als','last saved Set');
+const norm=value=>JSON.parse(JSON.stringify(value).replace(/[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/g,'<uuid>').replace(/\bc\d+\b/g,'<change>').split(homedir()).join('<home>').split(fixture).join('<fixture>'));
 const refs=[['7:track:0','track'],['7:track:1','track'],['7:track:2','track'],['7:scene:0','scene'],['7:scene:1','scene'],['7:clip_slot:1:0','clip-slot'],['7:device:0:0','device'],['7:parameter:7:device:0:0:1','parameter'],['7:device:1:0','device'],['7:mixer:0:volume','parameter']];
 const base={refs,shorts:refs.map(r=>r[0]),known:[['7:track:0',{name:'Bass',color:'#ff0000'}],['7:track:1',{name:'Lead'}]],cursors:[['next','device']]};
 const change=(tool,input={},extra={})=>({tool,input,...extra}),action=(tool,input={},extra={})=>({tool,input,action:true,...extra});
@@ -21,7 +22,7 @@ try{
  const {createAbletonIntegration}=await import(file.href);
  const {CHANGES}=await import(new URL('changes.js',original));
  const {ACTIONS}=await import(new URL('actions.js',original));
- const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
+ const toolNames=[...new Set(['live_status','live_discover','live_run_python','live_session_emergency_stop','live_project_backup_preview','live_project_backup_apply','live_undo_step_begin','live_undo_step_end',...CHANGES.flatMap(k=>[k.preview,k.apply]),...ACTIONS.flatMap(k=>[k.preview,k.apply])])];
  async function run(label,provided,operations){
   const config={...base,...provided},calls=[],responses=[],events=[],actions=[],results=[],disks=[];let controller,integration;let listCalls=0;
   const endpoint={pid:null,serverInfo:{name:'fixture',version:config.version??'1.0.73'},async list(){listCalls++;return{tools:toolNames.filter(n=>!(config.missing??[]).includes(n)&&!(listCalls===1&&(config.initiallyMissing??[]).includes(n))).map(name=>({name,inputSchema:{type:'object'}}))};},async call(name,args,signal){
@@ -32,7 +33,7 @@ try{
     else if(stage==='discover')value=config.discover??{epoch:7,items:args.kind==='session-state'?[{transport:{playing:false}}]:args.kind==='parameter'?[{ref:'7:parameter:7:device:0:0:1',name:'Drive',min:0,max:1,value:.5,displayValue:'3 dB'}]:args.kind==='device'?[{ref:'7:device:0:0',name:'Effect',className:'AudioEffect'}]:[]};
     else if(stage==='preview')value=config.preview??{epoch:7,transactionId:'tx',confirmation:'yes',priorTempo:120,proposedTempo:130,prior:{tracks:[{},{}],scenes:[{}]},proposed:[]};
     else if(stage==='apply')value=config.applied??{state:'applied'};
-    else value={state:'stopped'};
+    else value=config.other??{state:'stopped'};
     response={reply:wrap(value)};
    }
    responses.push(structuredClone(response));if(response.cancel)controller.abort();if(response.bump)integration._bump();if(response.throw)throw Error(response.throw);return response.reply;
@@ -70,6 +71,19 @@ try{
  for(const alsoTrackRefs of [[],['track:2']])await run('disarm-before-record',{discover:{epoch:7,items:[{ref:'7:track:0',name:'Bass',armed:true},{ref:'7:track:1',name:'Lead',armed:true},{ref:'7:track:2',name:'Pad',armed:true}]}},[action('record',{action:'start',lane:'arrangement',destinationTrackRef:'track:1',alsoTrackRefs})]);
  await run('disarm-refused',{discover:{epoch:7,items:[{ref:'7:track:1',name:'Lead',armed:true}]},fail:{preview:{reply:{isError:true,content:[{type:'text',text:'refused'}]}}}},[action('record',{action:'start',destinationTrackRef:'track:1'})]);
  await run('record-saved-project',{project:{identity:'id',path:'/fixture/My Set.als',name:'My Set'}},[action('record',{action:'start'})]);
+
+ const service=(service,extra={})=>({service,...extra});
+ for(const named of ['file.wav','/audio/mix.wav','clip:88','clip:missing','arrangement_clip:10','clip:é',' 7:clip:0:1 ','7:arrangement_clip:0:2','7:clip:0:9'])await run('clip-file',{discover:{items:[{ref:'7:clip:0:1',isAudio:true,filePath:'/audio/Session.wav'},{ref:'7:arrangement_clip:0:2',filePath:'/audio/Arrangement.wav'}]}},[service('clip',{named})]);
+ for(const clip of [{ref:'7:clip:0:1',isAudio:false},{ref:'7:clip:0:1'},{ref:'7:clip:0:1',filePath:''},{ref:'7:clip:0:1',filePath:4},null])await run('clip-body',{discover:{items:[clip]},shorts:[...base.shorts,'7:clip:0:1']},[service('clip',{named:'clip:1'})]);
+ for(const config of [{available:false},{lost:true},{fail:{discover:{throw:'bridge failure'}}},{fail:{discover:{reply:{isError:true,content:[]}}}},{fail:{discover:{reply:{content:[{type:'text',text:'bad JSON'}]}}}}])await run('clip-unreachable',config,[service('clip',{named:'7:clip:0:1'})]);
+ await run('clip-paged',{responses:[{reply:wrap({kind:'session-clip',epoch:7,items:[],nextCursor:'second'})},{reply:wrap({kind:'session-clip',epoch:7,items:[{ref:'7:clip:0:1',filePath:'/audio/paged.wav'}]})}]},[service('clip',{named:'7:clip:0:1'})]);
+ for(const config of [{},{available:false},{fail:{apply:{reply:{isError:true,content:[{type:'text',text:'uncertain'}]}}}}])await run('internal-step',config,[service('step',{tool:'set_tempo',input:{tempo:130}}),service('step',{tool:'play',input:{action:'start'}})]);
+ await run('arrangement-changes',{},[service('arrange',{tool:'set_tempo',input:{tempo:130}}),service('arrange',{tool:'rename',input:{kind:'track',ref:'track:1',name:'Sub'}})]);
+ await run('arrangement-refusal',{fail:{preview:{reply:{isError:true,content:[{type:'text',text:'refused'}]}}}},[service('arrange',{tool:'set_tempo',input:{tempo:130}})]);
+ for(const config of [{},{version:'1.0.1'},{missing:['live_tempo_apply']}])await run('arrange-offers',config,['missing','set_tempo','delete_device'].map(tool=>service('offers',{tool})));
+ for(const config of [{},{other:{stepId:'step-1'}},{other:{stepId:''}},{missing:['live_undo_step_begin']},{fail:{other:{throw:'unavailable'}}}])await run('arrange-undo-step',config,[service('undoStep'),service('tell',{title:'Arrangement complete'})]);
+ for(const config of [{},{project:{identity:'p',name:'Set',path:fixture+'/Set.als'}},{project:{identity:'p',name:'Set',path:fixture+'/missing.als'}},{project:{identity:'p',name:'Set',path:fixture+'/Set.als'},missing:['live_project_backup_apply']}])await run('saved-copy',{applied:{backup:fixture+'/Set.backup.als'},...config},[service('copy'),service('copy')]);
+ for(const response of [{throw:'bridge failure'},{reply:{isError:true,content:[]}},{reply:wrap({})},{cancel:true,reply:wrap({transactionId:'tx'})}])await run('copy-failure',{project:{identity:'p',name:'Set',path:fixture+'/Set.als'},fail:{preview:response}},[service('copy')]);
  const values=[],ids=new Map();for(const c of cases)c.responses=c.responses.map(v=>{const key=JSON.stringify(v);if(!ids.has(key)){ids.set(key,values.length);values.push(v);}return ids.get(key);});
  writeFileSync(new URL('mutations-oracle.json',import.meta.url),JSON.stringify({toolNames,cases,values})+'\n');console.log(cases.length+' source change/action sequences');
-}finally{unlinkSync(file)}
+}finally{unlinkSync(file);rmSync(fixture,{recursive:true,force:true})}

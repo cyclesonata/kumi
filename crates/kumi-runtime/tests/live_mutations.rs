@@ -8,6 +8,7 @@ use kumi_runtime::{
     core::{contracts::JsonObject, errors::RuntimeError},
     integrations::ableton::{
         actions::ACTIONS,
+        arrange::ArrangeHost,
         changes::CHANGES,
         connection::LiveConnection,
         history::History,
@@ -22,6 +23,7 @@ use kumi_runtime::{
         types::{CallToolResult, Implementation, ListToolsResult},
     },
 };
+thread_local! { static FIXTURE_ROOT: RefCell<String> = const { RefCell::new(String::new()) }; }
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
@@ -99,6 +101,7 @@ fn canonical(value: &Value) -> Value {
 }
 fn normalized(value: &Value) -> String {
     let text = stringify(&canonical(value)).replace(&kumi_runtime::library::sources::homedir(), "<home>");
+    let text = FIXTURE_ROOT.with(|root| text.replace(root.borrow().as_str(), "<fixture>"));
     let text = regex::Regex::new(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}").unwrap().replace_all(&text, "<uuid>");
     regex::Regex::new(r"\bc\d+\b").unwrap().replace_all(&text, "<change>").into_owned()
 }
@@ -110,6 +113,10 @@ async fn preview_apply_history_reference_retirement_and_actions_match_source() {
     tokio::task::LocalSet::new().run_until(replay()).await;
 }
 async fn replay() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("Set.als"), "last saved Set").unwrap();
+    let root = directory.path().to_string_lossy().replace('\\', "/");
+    FIXTURE_ROOT.with(|value| *value.borrow_mut() = root.clone());
     let fixture: Value = serde_json::from_str(include_str!("support/mutations-oracle.json")).unwrap();
     for (case_index, original) in fixture["cases"].as_array().unwrap().iter().enumerate() {
         let mut case = original.clone();
@@ -179,7 +186,7 @@ async fn replay() {
         if let Some(project) = config.get("project") {
             *remember.current.borrow_mut() = Some(Rc::new(CurrentProject {
                 identity: project["identity"].as_str().unwrap().into(),
-                path: project["path"].as_str().map(str::to_owned),
+                path: project["path"].as_str().map(|s| s.replace("<fixture>", &root)),
                 name: project["name"].as_str().unwrap().into(),
             }));
         }
@@ -188,7 +195,8 @@ async fn replay() {
         let parameters = Rc::new(Parameters::new(history.clone(), options.fast));
         let observer = Rc::new(Observer::new(connection.clone(), remember.clone()));
         observer.tempo.set(Some(120.0));
-        let mutations = Mutations::new(parameters.clone(), observer.clone(), options);
+        let mutations = Rc::new(Mutations::new(parameters.clone(), observer.clone(), options));
+        let arrangement = mutations.arrange_host();
         for sample in config["samples"].as_array().into_iter().flatten() {
             mutations
                 .samples
@@ -203,7 +211,39 @@ async fn replay() {
             }
             *endpoint.original.borrow_mut() = signal.clone();
             let work = async {
-                let input = operation["input"].as_object().unwrap().clone();
+                let input = operation["input"].as_object().cloned().unwrap_or_default();
+                if let Some(service) = operation["service"].as_str() {
+                    let result: Result<Value, RuntimeError> = match service {
+                        "clip" => mutations.clip_file(operation["named"].as_str().unwrap(), signal).await.map(|v| json!(v)),
+                        "copy" => mutations.keep_copy(signal).await.map(|v| json!(v)),
+                        "step" => mutations.step(operation["tool"].as_str().unwrap(), input, signal).await.map(|v| json!(v)),
+                        "arrange" => arrangement.change(operation["tool"].as_str().unwrap(), input, signal).await.map(|made| {
+                            let mut value = json!({"id":made.id});
+                            if let Some(reference) = made.reference {
+                                value["ref"] = json!(reference);
+                            }
+                            value
+                        }),
+                        "offers" => Ok(json!(arrangement.offers(operation["tool"].as_str().unwrap()))),
+                        "undoStep" => match arrangement.undo_step().await {
+                            Err(e) => Err(e),
+                            Ok(step) => {
+                                let opened = step.opened;
+                                (step.close)().await.map(|_| json!(opened))
+                            }
+                        },
+                        "tell" => {
+                            arrangement.tell(operation["title"].as_str().unwrap());
+                            Ok(Value::Null)
+                        }
+                        _ => panic!("unknown service"),
+                    };
+                    return match result {
+                        Ok(v) => v,
+                        Err(RuntimeError::Aborted) => json!({"error":"cancelled"}),
+                        Err(e) => json!({"error":e.to_string()}),
+                    };
+                }
                 if operation["action"] == true {
                     let kind = ACTIONS.iter().find(|k| k.tool == operation["tool"].as_str().unwrap()).unwrap();
                     json!(mutations.act(kind, input, signal, operation["cleanup"] == true).await)

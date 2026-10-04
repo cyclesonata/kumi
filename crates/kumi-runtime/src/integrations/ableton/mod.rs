@@ -12,6 +12,7 @@ pub mod connection;
 pub mod command_tools;
 pub mod context;
 pub mod display;
+pub mod execution_services;
 pub mod fast;
 pub mod focus;
 pub mod history;

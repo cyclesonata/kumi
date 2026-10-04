@@ -22,17 +22,18 @@ use kumi_common::{
 };
 use regex::Regex;
 use serde_json::{json, Value};
-use std::{rc::Rc, sync::LazyLock};
+use std::{cell::RefCell, collections::HashSet, rc::Rc, sync::LazyLock};
 
 pub struct Mutations {
     pub parameters: Rc<Parameters>,
     pub observer: Rc<Observer>,
     pub options: Rc<AbletonOptions>,
     pub samples: SampleBank,
+    pub(crate) copied: RefCell<HashSet<String>>,
 }
 impl Mutations {
     pub fn new(parameters: Rc<Parameters>, observer: Rc<Observer>, options: Rc<AbletonOptions>) -> Self {
-        Self { parameters, observer, options, samples: SampleBank::default() }
+        Self { parameters, observer, options, samples: SampleBank::default(), copied: RefCell::new(HashSet::new()) }
     }
     pub fn supported(&self, since: Option<&str>) -> bool {
         since.is_none_or(|since| super::bridge_version::at_least(self.parameters.history.connection.version().as_deref(), since))
