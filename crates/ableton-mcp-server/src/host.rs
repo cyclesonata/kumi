@@ -7,6 +7,7 @@ mod arrangement;
 mod arrangement_clip;
 mod browser_render;
 pub mod audio;
+mod audio_clip;
 mod audition;
 mod capture;
 mod clip_duplicate;
