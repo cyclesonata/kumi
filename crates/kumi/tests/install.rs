@@ -418,3 +418,121 @@ async fn installed_update_migrates_equal_version_legacy_bridge_after_live_closes
         assert!(out.0.borrow().contains("includes the native bridge (1.0.73)"));
     }
 }
+
+#[tokio::test]
+async fn native_client_selects_target_from_legacy_compatible_release_index() {
+    let selected = manifest("99.0.0");
+    let mut index = json!({"kumi":"99.0.0","node":"24.0.0","bundle":"kumi.tar.gz","sha256":"b".repeat(64),"targets":{}});
+    index["targets"][native_target()] = selected.clone();
+    assert_eq!(serde_json::to_value(fetch_manifest(&Env::new(), Some(Serve::new(index.clone()))).await.unwrap()).unwrap(), selected);
+    index["targets"] = json!({"another-platform": selected});
+    assert_eq!(ask_release(&Env::new(), Some(Serve::new(index))).await, AskedRelease::Invalid);
+}
+
+#[tokio::test]
+async fn launcher_handoff_skips_probes_and_rollback_restores_legacy_app_without_moving_user_data() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = env(dir.path());
+    env.insert("KUMI_INSTALLED".into(), "1".into());
+    let home = Path::new(&env["KUMI_HOME"]);
+    let app = home.join("app");
+    let previous = home.join("app.previous");
+    let binary = app.join(executable_name("kumi"));
+    put(&binary, "native runtime fixture");
+    put(app.join("package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(previous.join("package.json"), json!({"version":"1.7.3"}).to_string());
+    put(previous.join("apps/kumi/bin/kumi.mjs"), "console.log('legacy')");
+    put(home.join("node/retained-marker"), "for explicit rollback");
+    let markers =
+        ["auth.json", "settings.json", "history.json", "library/catalog.json", "memory/producer.json", "conversations/prior.json"];
+    for marker in markers {
+        put(home.join(marker), format!("preserve {marker}"));
+    }
+    let launcher_file = home.join("bin").join(if cfg!(windows) { "kumi.cmd" } else { "kumi" });
+    put(&launcher_file, "old launcher");
+    let fresh = home.join("app.new").join(executable_name("kumi"));
+    put(&fresh, "probe fixture");
+    assert!(!ensure_native_launcher(&env, &fresh).unwrap());
+    assert_eq!(fs::read_to_string(&launcher_file).unwrap(), "old launcher");
+    assert!(ensure_native_launcher(&env, &binary).unwrap());
+    assert_eq!(fs::read_to_string(&launcher_file).unwrap(), launcher(cfg!(windows)));
+    assert_eq!(rollback_installed(io(&env).0).await.unwrap(), 0);
+    assert!(app.join("apps/kumi/bin/kumi.mjs").is_file());
+    assert!(previous.join(executable_name("kumi")).is_file());
+    assert!(home.join("node/retained-marker").exists());
+    for marker in markers {
+        assert_eq!(fs::read_to_string(home.join(marker)).unwrap(), format!("preserve {marker}"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(&launcher_file).unwrap().permissions().mode() & 0o777, 0o755);
+    }
+}
+
+#[tokio::test]
+async fn rollback_to_legacy_requires_closed_live_and_retained_legacy_bridge_generation() {
+    for scenario in ["open", "missing", "refused", "ok"] {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env(dir.path());
+        let home = Path::new(&env["KUMI_HOME"]);
+        let native = home.join("bridge/native/package");
+        let old = home.join("bridge/legacy/package");
+        let state = home.join("bridge/state");
+        let config = state.join("bridge-config.json");
+        let secret = state.join("bridge.secret");
+        let scripts = Path::new(&env["KUMI_REMOTE_SCRIPTS_DIR"]);
+        put(home.join("app").join(executable_name("kumi")), "native application");
+        put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+        put(home.join("app.previous/apps/kumi/bin/kumi.mjs"), "legacy application");
+        put(home.join("app.previous/package.json"), "{\"version\":\"1.7.3\"}");
+        put(native.join("package.json"), "{\"version\":\"1.0.73\"}");
+        put(native.join("release-manifest.json"), "{\"schema\":\"ableton-mcp-native-release/v1\"}");
+        if scenario != "missing" {
+            put(old.join("release-manifest.json"), "{\"schema\":\"ableton-mcp-release/v2\"}");
+        }
+        put(
+            &config,
+            json!({"server":{"command":native.join(executable_name("ableton-mcp-server")),"args":["--config",config]}}).to_string(),
+        );
+        put(scripts.join("AbletonMcpBridge/bridge-reference.json"), json!({"config":config}).to_string());
+        let receipt = state.join("install-receipt.json");
+        put(&receipt, json!({"version":1,"packageRoot":native,"stateDirectory":state,"configPath":config,"secretPath":secret,"remoteScriptsDirectory":scripts,"previous":{"packageRoot":old}}).to_string());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let (mut io, _) = io(&env);
+        io.live_running = Some(Rc::new(move || async move { scenario == "open" }.boxed_local()));
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        io.run = Some(Rc::new({
+            let calls = calls.clone();
+            move |command, args, _| {
+                calls.borrow_mut().push((command, args));
+                async move {
+                    if scenario == "refused" {
+                        Ran { code: 1, stdout: json!({"reason":"receipt drift"}).to_string(), stderr: String::new() }
+                    } else {
+                        Ran { code: 0, stdout: json!({"state":"completed"}).to_string(), stderr: String::new() }
+                    }
+                }
+                .boxed_local()
+            }
+        }));
+        let result = rollback_installed(io).await;
+        if scenario == "ok" {
+            assert_eq!(result.unwrap(), 0);
+            assert!(home.join("app/apps/kumi/bin/kumi.mjs").is_file());
+            let calls = calls.borrow();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(&calls[0].1[..2], ["lifecycle", "rollback"]);
+            assert!(calls[0].1.contains(&"--confirm-live-stopped".into()));
+        } else {
+            assert!(result.is_err());
+            assert!(home.join("app").join(executable_name("kumi")).is_file());
+            assert!(home.join("app.previous/apps/kumi/bin/kumi.mjs").is_file());
+            assert_eq!(calls.borrow().len(), usize::from(scenario == "refused"));
+        }
+    }
+}

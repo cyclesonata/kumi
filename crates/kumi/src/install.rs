@@ -1,4 +1,5 @@
 //! Port of `apps/kumi/src/install.ts` for native release bundles.
+mod migration;
 pub use crate::config::kumi_dir as kumi_home;
 pub use crate::update::newer as newer_version;
 use crate::{
@@ -24,6 +25,7 @@ use kumi_runtime::{
     system::{self, Env, SystemProgram},
     KUMI, KUMI_VERSION,
 };
+pub use migration::{ensure_native_launcher, finish_legacy_transition, launcher, write_launcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -78,6 +80,13 @@ pub async fn ask_release(env: &Env, fetch: Option<Rc<dyn Fetch>>) -> AskedReleas
         return AskedRelease::Offline;
     }
     let Ok(value) = response.json().await else { return AskedRelease::Invalid };
+    let value = match value.get("targets") {
+        Some(targets) => match targets.get(native_target()) {
+            Some(target) => target.clone(),
+            None => return AskedRelease::Invalid,
+        },
+        None => value,
+    };
     let Ok(manifest) = serde_json::from_value::<ReleaseManifest>(value) else { return AskedRelease::Invalid };
     let matches = |value: &str, pattern: &str| regex::Regex::new(pattern).unwrap().is_match(value);
     if !matches(&manifest.kumi, r"^[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9_.]+)?$")
@@ -340,6 +349,7 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
                 if probe.code != 0 || !probe.stdout.contains(&manifest.kumi) {
                     return Ok(Some("The new Kumi didn't start, so this one stays. Try again, or run the installer again.".into()));
                 }
+                write_launcher(&home).map_err(error)?;
                 if swap_in(&fresh, &app, &join(&home, "app.previous")).await.is_err() {
                     return Ok(Some(
                         if cfg!(windows) {
@@ -376,9 +386,15 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     let app = join(&home, "app");
     let previous = join(&home, "app.previous");
     let hold = join(&home, "app.rollback");
-    if !Path::new(&join(&previous, &executable_name("kumi"))).exists() {
+    if !migration::has_app(&previous) {
         say("There's no earlier Kumi to go back to.".into());
         return Ok(1);
+    }
+    let legacy = !Path::new(&join(&previous, &executable_name("kumi"))).is_file();
+    let bridge_rollback = if legacy { migration::prepare_legacy_rollback(&io, &home).await? } else { None };
+    write_launcher(&home).map_err(error)?;
+    if let Some(rollback) = &bridge_rollback {
+        rollback.apply().await?;
     }
     let version = fs::read(join(&previous, "package.json"))
         .ok()
@@ -393,14 +409,32 @@ pub async fn rollback_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     }
     .await;
     if switched.is_err() {
-        if !Path::new(&app).exists() && Path::new(&hold).exists() {
-            fs::rename(&hold, &app).map_err(error)?;
+        if Path::new(&hold).exists() {
+            if Path::new(&app).exists() && !Path::new(&previous).exists() {
+                rename(&app, &previous).await.map_err(error)?;
+            }
+            if !Path::new(&app).exists() {
+                rename(&hold, &app).await.map_err(error)?;
+            }
+        }
+        if let Some(rollback) = &bridge_rollback {
+            if let Err(error) = rollback.apply().await {
+                say(format!(
+                    "The application swap failed, and restoring its bridge also failed: {}. Keep Live closed and run: kumi bridge",
+                    error.message()
+                ));
+            }
         }
         say("Couldn't switch back; close every Kumi window and try again.".into());
         return Ok(1);
     }
     say(format!("Kumi is back to {version}. {} update --rollback again returns to {KUMI_VERSION}.", *KUMI));
-    Ok(bridge_after(&io, &home, &app).await)
+    if Path::new(&join(&app, &executable_name("kumi"))).exists() {
+        Ok(bridge_after(&io, &home, &app).await)
+    } else {
+        // The receipt-bound bridge rollback above restored the legacy command/config as well.
+        Ok(0)
+    }
 }
 pub const PATH_MARKER: &str = "# Added by the Kumi installer";
 pub fn startup_files(env: &Env) -> Vec<String> {

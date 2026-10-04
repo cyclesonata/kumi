@@ -327,7 +327,12 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
             login_with(&config, io).await?;
             Ok(0)
         }
-        AppConfig::InferenceOnly { .. } | AppConfig::Live { .. } => session::run_session(io.clone(), config, secrets, factory).await,
+        AppConfig::InferenceOnly { .. } | AppConfig::Live { .. } => {
+            if io.installed() && matches!(config, AppConfig::Live { .. }) {
+                install::finish_legacy_transition(&installed_io(io)).await?;
+            }
+            session::run_session(io.clone(), config, secrets, factory).await
+        }
     }
 }
 async fn update_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
@@ -345,7 +350,11 @@ async fn update_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     if let Some(reopen) = &io.reopen {
         return Ok(reopen().await);
     }
-    let exe = std::env::current_exe().map_err(|e| RuntimeError::plain(e.to_string()))?;
+    let exe = if io.installed() {
+        std::path::Path::new(&install::kumi_home(&io.env)).join("app").join(bridge_setup::executable_name("kumi"))
+    } else {
+        std::env::current_exe().map_err(|e| RuntimeError::plain(e.to_string()))?
+    };
     let ignored = io.signals.then(|| {
         tokio::task::spawn_local(async {
             loop {
@@ -377,6 +386,11 @@ pub fn main_with(factory: AbletonFactory) -> i32 {
     );
     io.args = std::env::args().skip(1).collect();
     io.signals = true;
+    if let Ok(executable) = std::env::current_exe() {
+        if let Err(error) = install::ensure_native_launcher(&io.env, &executable) {
+            io.err.write(&format!("Kumi: could not update its launcher: {error}\n"));
+        }
+    }
     let code = tokio::task::LocalSet::new().block_on(&runtime, run(io, factory));
     runtime.shutdown_timeout(std::time::Duration::from_secs(2));
     code

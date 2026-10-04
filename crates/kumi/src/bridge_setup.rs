@@ -281,7 +281,7 @@ fn digest(file: &str) -> std::io::Result<String> {
 fn last(ran: &Ran, most: usize) -> String {
     head(trim(if ran.stderr.is_empty() { &ran.stdout } else { &ran.stderr }).split('\n').next_back().unwrap_or(""), most)
 }
-fn lifecycle_answer(ran: Ran) -> Result<Value, String> {
+pub(crate) fn lifecycle_answer(ran: Ran) -> Result<Value, String> {
     let json = |text: &str| serde_json::from_str::<Value>(trim(text).split('\n').filter(|s| !s.is_empty()).next_back().unwrap_or("")).ok();
     let Some(value) = json(&ran.stdout).or_else(|| json(&ran.stderr)).filter(|v| !v.is_null() && v != &Value::Bool(false)) else {
         let reason = last(&ran, 300);
@@ -381,7 +381,7 @@ async fn live_open(io: &BridgeSetupIo, run: Run) -> bool {
 }
 /// Locate existing ownership without inventing paths for custom configurations.
 /// The lifecycle executable performs complete receipt/hash validation before applying anything.
-fn owner_paths(config: &str, package: &str, home: &str) -> Option<(String, String, String)> {
+pub(crate) fn owner_paths(config: &str, package: &str, home: &str) -> Option<(String, String, String)> {
     let candidates = [join(&dirname(config), "install-receipt.json"), join(home, "bridge/state/install-receipt.json")];
     for file in candidates {
         let Ok(metadata) = fs::symlink_metadata(&file) else { continue };
