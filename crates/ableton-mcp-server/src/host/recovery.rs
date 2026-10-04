@@ -205,6 +205,16 @@ helpers::js_string(reference)?)))
             "Nothing changed in Live, and the change is still in place. A later undo checks it again from the start.",
         ))
     }
+    pub(super) fn push_undo_recovery_step(&self, record: &TransactionRecord, value: Value) -> Result<Rc<RefCell<Value>>, LiveError> {
+        let mut plans = self.undo_recovery_plans.borrow_mut();
+        let plan = plans
+            .iter_mut()
+            .find(|p| p.record.upgrade().is_some_and(|r| Rc::ptr_eq(&r, record)))
+            .ok_or_else(|| LiveError::error("undo recovery plan is unavailable"))?;
+        let step = Rc::new(RefCell::new(value));
+        plan.steps.push(step.clone());
+        Ok(step)
+    }
     pub(super) fn delete_undo_plan(&self, record: &TransactionRecord) {
         self.undo_recovery_plans.borrow_mut().retain(|p| p.record.upgrade().is_some_and(|r| !Rc::ptr_eq(&r, record)));
     }

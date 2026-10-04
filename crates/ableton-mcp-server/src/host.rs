@@ -30,6 +30,10 @@ pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
 mod mixer;
+mod midi_plan;
+#[cfg(test)]
+mod midi_plan_tests;
+mod midi_transform;
 pub mod mutations;
 mod note_edit;
 mod note_target;
