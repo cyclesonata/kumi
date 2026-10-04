@@ -55,6 +55,7 @@ mod session_capture;
 mod structure;
 mod tempo;
 mod transport;
+mod tuning;
 mod ui;
 mod willington;
 
