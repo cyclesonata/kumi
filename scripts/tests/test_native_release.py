@@ -3,6 +3,8 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import re
+import tomllib
 from pathlib import Path
 import tarfile
 import tempfile
@@ -30,6 +32,33 @@ class NativeRelease(unittest.TestCase):
     def build(self, out):
         return release.build_release(release.ROOT, self.binaries, out, "x86_64-unknown-linux-gnu", self.source,
                                      self.builder, "test fixture payload (not a compiled runtime)")
+
+    def test_application_and_bridge_versions_match_all_release_inputs(self):
+        root = release.ROOT
+        read_json = lambda name: json.loads((root / name).read_text())
+        cargo_version = lambda name: tomllib.loads((root / name).read_text())["package"]["version"]
+        version = cargo_version("crates/kumi/Cargo.toml")
+        for name in ("package.json", "apps/kumi/package.json", "packages/runtime/package.json"):
+            self.assertEqual(read_json(name)["version"], version, name)
+        self.assertEqual(read_json("apps/kumi/package.json")["dependencies"]["@kumi/runtime"], version)
+        for name in ("crates/kumi-common/Cargo.toml", "crates/kumi-runtime/Cargo.toml"):
+            self.assertEqual(cargo_version(name), version, name)
+        for name in ("packages/runtime/src/version.ts", "crates/kumi-runtime/src/version.rs"):
+            declared = re.search(r'KUMI_VERSION[^=]*=\s*"([^"\n]+)"', (root / name).read_text())
+            self.assertIsNotNone(declared, name)
+            self.assertEqual(declared[1], version, name)
+        npm_lock = read_json("package-lock.json")
+        self.assertEqual(npm_lock["version"], version)
+        for name in ("", "apps/kumi", "packages/runtime"):
+            self.assertEqual(npm_lock["packages"][name]["version"], version, name)
+        self.assertEqual(npm_lock["packages"]["apps/kumi"]["dependencies"]["@kumi/runtime"], version)
+        cargo_lock = tomllib.loads((root / "Cargo.lock").read_text())["package"]
+        for package in cargo_lock:
+            if package["name"] in ("kumi", "kumi-runtime", "kumi-common"):
+                self.assertEqual(package["version"], version, package["name"])
+        bridge = cargo_version("crates/ableton-mcp-server/Cargo.toml")
+        self.assertEqual(read_json("apps/mcp-server/package.json")["version"], bridge)
+        self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)
 
     def test_native_bundle_has_exact_manifest_bound_bridge_and_no_node_runtime(self):
         out = self.root / "release"
