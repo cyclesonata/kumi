@@ -36,6 +36,7 @@ mod midi_plan;
 #[cfg(test)]
 mod midi_plan_tests;
 mod midi_transform;
+mod looper;
 pub mod mutations;
 mod note_edit;
 mod note_target;
@@ -54,6 +55,7 @@ pub mod retention;
 mod routing;
 mod session_capture;
 mod structure;
+mod specialized_devices;
 mod simpler;
 mod tempo;
 mod transport;
