@@ -62,6 +62,7 @@ mod session_capture;
 mod structure;
 mod specialized_devices;
 mod simpler;
+mod song_settings;
 mod tempo;
 mod transport;
 mod tuning;
