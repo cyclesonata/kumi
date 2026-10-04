@@ -113,10 +113,17 @@ fn queue_empty(console: &File) {
     }
 }
 
-fn receive(input: &Stdin, count: usize, pause: bool) -> tokio::sync::oneshot::Receiver<Vec<u8>> {
+struct InputProbe {
+    receive: tokio::sync::oneshot::Receiver<Vec<u8>>,
+    bytes: Rc<RefCell<Vec<u8>>>,
+    count: usize,
+}
+
+fn receive(input: &Stdin, count: usize, pause: bool) -> InputProbe {
     let (send, receive) = tokio::sync::oneshot::channel();
     let send = RefCell::new(Some(send));
-    let bytes = RefCell::new(Vec::new());
+    let bytes = Rc::new(RefCell::new(Vec::new()));
+    let captured = bytes.clone();
     let input_copy = input.clone();
     input.resume(Rc::new(move |chunk| {
         bytes.borrow_mut().extend_from_slice(chunk);
@@ -125,15 +132,24 @@ fn receive(input: &Stdin, count: usize, pause: bool) -> tokio::sync::oneshot::Re
                 input_copy.pause();
             }
             if let Some(send) = send.borrow_mut().take() {
-                let _ = send.send(std::mem::take(&mut *bytes.borrow_mut()));
+                let _ = send.send(bytes.borrow().clone());
             }
         }
     }));
-    receive
+    InputProbe { receive, bytes: captured, count }
 }
 
-async fn received(receive: tokio::sync::oneshot::Receiver<Vec<u8>>) -> Vec<u8> {
-    tokio::time::timeout(Duration::from_secs(5), receive).await.expect("parent input stalled").unwrap()
+async fn received(probe: InputProbe, stage: &str) -> Vec<u8> {
+    match tokio::time::timeout(Duration::from_secs(5), probe.receive).await {
+        Ok(Ok(bytes)) => bytes,
+        result => panic!(
+            "{stage}: parent input stalled or closed ({result:?}); expected {} bytes, received {} bytes: {:?}; UTF-8 {:?}",
+            probe.count,
+            probe.bytes.borrow().len(),
+            probe.bytes.borrow(),
+            String::from_utf8_lossy(&probe.bytes.borrow()),
+        ),
+    }
 }
 
 fn child_reads(console: &File, text: &str) {
@@ -188,11 +204,15 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(tokio::task::LocalSet::new().run_until(
             async {
                 let input = Stdin::new();
+                input.on_error(Rc::new(|error| panic!("raw console reader failed: {error}")));
                 input.set_raw_mode(true).unwrap();
                 let ended = Rc::new(Cell::new(false));
                 input.on_end(Rc::new({
                     let ended = ended.clone();
-                    move || ended.set(true)
+                    move || {
+                        eprintln!("raw console reader emitted EOF");
+                        ended.set(true)
+                    }
                 }));
                 let first = receive(&input, "aaa😀\x1b[D\0é".len(), true);
                 let mut focus = INPUT_RECORD { EventType: FOCUS_EVENT as u16, ..INPUT_RECORD::default() };
@@ -213,7 +233,7 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                     alt_release.Event.KeyEvent.wVirtualKeyCode = 0x12;
                 }
                 write_records(&console, &[key(0xde00, 1), key(27, 1), key(91, 1), key(68, 1), key(0, 1), alt_release]);
-                assert_eq!(received(first).await, "aaa😀\x1b[D\0é".as_bytes());
+                assert_eq!(received(first, "initial raw VT/Unicode/repeat payload").await, "aaa😀\x1b[D\0é".as_bytes());
                 input.set_raw_mode(false).unwrap();
                 child_reads(&console, "raw-child");
 
@@ -223,7 +243,7 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                 let mut records = vec![key(b'x' as u16, 1); 127];
                 records.extend([key(0xd83d, 2), key(0xde00, 2)]);
                 write_records(&console, &records);
-                assert_eq!(received(boundary).await, expected.as_bytes());
+                assert_eq!(received(boundary, "raw surrogate batch128 boundary").await, expected.as_bytes());
                 input.set_raw_mode(false).unwrap();
                 child_reads(&console, "surrogate-boundary-child");
 
@@ -237,7 +257,7 @@ fn raw_console_preserves_vt_unicode_repeats_and_queued_parent_input() {
                     input.pause();
                     input.set_raw_mode(false).unwrap();
                     child_reads(&console, &format!("buffered-child-{round}"));
-                    assert_eq!(received(receive(&input, 1, true)).await, b"p");
+                    assert_eq!(received(receive(&input, 1, true), &format!("raw buffered parent round {round}")).await, b"p");
                 }
                 assert!(!ended.get());
             },
@@ -251,6 +271,7 @@ fn cooked_console_pause_preserves_os_editing_and_partial_text() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(tokio::task::LocalSet::new().run_until(
             async {
                 let input = Stdin::new();
+                input.on_error(Rc::new(|error| panic!("cooked console reader failed: {error}")));
                 for round in 0..3 {
                     // An inherited VT flag is legal with cooked input and is restored
                     // exactly by the mode owner; cancellation must work in both modes.
@@ -264,7 +285,10 @@ fn cooked_console_pause_preserves_os_editing_and_partial_text() {
                     queue_empty(&console);
                     input.pause();
                     child_reads(&console, &format!("cooked-child-{round}"));
-                    assert_eq!(received(receive(&input, 2, true)).await, b"aC");
+                    assert_eq!(
+                        received(receive(&input, 2, true), &format!("cooked edited partial round {round}, mode {mode}")).await,
+                        b"aC"
+                    );
                 }
                 // Dropping a pending cooked read must release console ownership too.
                 input.resume(Rc::new(|_| panic!("unexpected parent input")));
@@ -329,7 +353,7 @@ fn natural_newline_racing_pause_never_reaches_the_child() {
                     write_text(&console, "\r");
                     input.pause();
                     child_reads(&console, &format!("race-child-{round}"));
-                    assert_eq!(received(receive(&input, 8, true)).await, b"parent\r\n");
+                    assert_eq!(received(receive(&input, 8, true), &format!("natural newline race round {round}")).await, b"parent\r\n");
                 }
             },
         ));
@@ -356,7 +380,10 @@ fn cooked_pause_finishes_buffered_line_tails_before_child_handoff() {
                         }
                         input.pause();
                         child_reads(&console, &format!("tail-child-{case}-{newline}"));
-                        assert_eq!(received(receive(&input, expected.len(), true)).await, expected.as_bytes());
+                        assert_eq!(
+                            received(receive(&input, expected.len(), true), &format!("long cooked case {case}, newline {newline}")).await,
+                            expected.as_bytes()
+                        );
                     }
                 }
             },
