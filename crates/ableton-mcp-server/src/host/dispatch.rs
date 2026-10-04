@@ -147,6 +147,8 @@ impl McpHost {
             optional!(dispatch_device_lifecycle_tool);
             optional!(dispatch_device_copy_tool);
             optional!(dispatch_device_basic_tool);
+            optional!(dispatch_clip_properties_tool);
+            optional!(dispatch_extended_mixer_tool);
             optional!(dispatch_audio_clip_tool);
             optional!(dispatch_audio_import_tool);
             optional!(dispatch_note_target_tool);
@@ -336,6 +338,12 @@ impl McpHost {
             }
             if tx.starts_with("mixer_") {
                 return Ok(self.undo_mixer_async(id, params, signal).await);
+            }
+            if tx.starts_with("clipset_") {
+                return Ok(self.undo_clip_properties_async(id, params, signal).await);
+            }
+            if ["mixerext_", "chainmix_", "devio_"].iter().any(|prefix| tx.starts_with(prefix)) {
+                return Ok(self.undo_extended_mixer_async(id, params, signal).await);
             }
             if tx.starts_with("device_") {
                 return Ok(self.undo_device_basic_async(id, params, signal).await);
