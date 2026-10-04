@@ -29,6 +29,7 @@ mod dispatch;
 mod device_edit;
 mod dialog;
 mod object_view;
+mod selection;
 mod events;
 mod extended_mixer;
 mod import_files;
