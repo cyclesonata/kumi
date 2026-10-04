@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 mod arrangement;
+mod arrangement_clip;
 mod browser_render;
 pub mod audio;
 mod audition;
@@ -11,8 +12,8 @@ mod capture;
 mod clip_duplicate;
 mod clip_launch;
 mod device_parameter;
-mod dispatch;
 pub mod device_state;
+mod dispatch;
 mod events;
 pub mod helpers;
 pub mod json_diagnostics;
