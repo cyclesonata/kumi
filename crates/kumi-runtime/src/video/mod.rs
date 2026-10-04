@@ -193,7 +193,9 @@ async fn write_json(path: &str, value: &impl Serialize) -> Result<(), VideoFailu
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
     options.mode(0o600);
-    options.open(path).await?.write_all(text.as_bytes()).await?;
+    let mut file = options.open(path).await?;
+    file.write_all(text.as_bytes()).await?;
+    file.flush().await?;
     Ok(())
 }
 async fn prune(folder: &str) -> Result<(), VideoFailure> {

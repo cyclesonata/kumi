@@ -464,7 +464,10 @@ pub async fn write_down(heard: Heard, options: WriteDownOptions) -> Result<Strin
         #[cfg(unix)]
         create.mode(0o600);
         use tokio::io::AsyncWriteExt;
-        create.open(&wav).await?.write_all(&wav_file(&heard.pcm)).await?;
+        let mut file = create.open(&wav).await?;
+        file.write_all(&wav_file(&heard.pcm)).await?;
+        file.flush().await?;
+        drop(file);
         let write = |vad: Option<String>| {
             transcribe(
                 &whisper,
