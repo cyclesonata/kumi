@@ -72,8 +72,14 @@ fn running(pid: Option<u32>) -> bool {
         .output()
         .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&pid.to_string()))
 }
+// Source node:test cases run sequentially. Keep independent SDK startups and the
+// 65 MB buffer check from competing, while preserving concurrency within each case.
+static MCP_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 macro_rules! local_test {
-    ($name:ident, $body:block) => { #[tokio::test] async fn $name() { LocalSet::new().run_until(async $body).await } };
+    ($name:ident, $body:block) => { #[tokio::test] async fn $name() {
+        let _case = MCP_CASE.lock().await;
+        LocalSet::new().run_until(async $body).await
+    } };
 }
 
 local_test!(real_sdk_stdio_initialization_bounded_pagination_and_exact_four_tool_schema_intersection, {
@@ -397,6 +403,7 @@ local_test!(a_bridge_message_of_megabytes_a_big_sets_page_arrives_whole_read_in_
 });
 #[test]
 fn the_bridges_read_buffer_looks_at_each_byte_once_however_the_message_is_cut_into_chunks() {
+    let _case = MCP_CASE.blocking_lock();
     let mut buffer = LinearReadBuffer::new(128 * 1024 * 1024);
     let chunk = vec![b' '; 64 * 1024];
     let start = Instant::now();
