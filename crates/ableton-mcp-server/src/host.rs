@@ -4,9 +4,9 @@
 
 #![allow(dead_code)]
 mod arrangement;
-mod capture;
 pub mod audio;
 mod audition;
+mod capture;
 mod clip_launch;
 mod device_parameter;
 pub mod device_state;
@@ -15,6 +15,7 @@ pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
 pub mod mutations;
+mod note_edit;
 mod probe_library;
 mod probes;
 mod project;

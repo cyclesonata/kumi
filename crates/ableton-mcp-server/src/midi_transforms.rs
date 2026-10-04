@@ -273,7 +273,7 @@ fn string_param(params: &Params, name: &str, allowed: &[&str], fallback: Option<
 /// names are: punctuation, then digits, then letters compared without case, and lower case before
 /// upper case when nothing else differs.
 // TS: localeCompare; characters outside ASCII sort after it by code point.
-fn locale_compare(a: &str, b: &str) -> Ordering {
+pub(crate) fn locale_compare(a: &str, b: &str) -> Ordering {
     const PUNCTUATION: &str = "_-,;:!?.'\"()[]{}@*/\\&#%`^+<=>|~$";
     let primary = |character: char| -> (u8, u32) {
         if character.is_ascii_whitespace() || character.is_ascii_control() {

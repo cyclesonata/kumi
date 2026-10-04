@@ -4899,7 +4899,8 @@ impl DeterministicLiveSimulator {
                     }
                 }
                 for patch in patches {
-                    let note = clip["notes"].as_array_mut().unwrap().iter_mut().find(|note| note["id"] == patch["id"]).unwrap();
+                    let note =
+                        clip["notes"].as_array_mut().unwrap().iter_mut().find(|note| note["id"].as_f64() == patch["id"].as_f64()).unwrap();
                     for key in ["pitch", "start", "duration", "velocity", "mute", "probability", "velocityDeviation", "releaseVelocity"] {
                         if let Some(value) = patch.get(key) {
                             note[key] = value.clone();
