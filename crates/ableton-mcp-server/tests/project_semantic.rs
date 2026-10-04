@@ -128,3 +128,23 @@ fn rehashed_adversarial_and_large_paging_source_oracle() {
         );
     }
 }
+
+#[test]
+fn canonical_boundaries_keep_source_validation_order() {
+    let f = fixture();
+    let cases: Vec<Value> = serde_json::from_str(include_str!("support/project_semantic_bounds_oracle.json")).unwrap();
+    for row in cases {
+        let count = row["count"].as_u64().unwrap() as usize;
+        let value = match row["kind"].as_str().unwrap() {
+            "ascii" => json!("x".repeat(count)),
+            "astral" => json!("🎹".repeat(count)),
+            "key" => json!({"x".repeat(count):true}),
+            "object" => Value::Object((0..count).map(|i| (format!("field{i}"), json!(true))).collect()),
+            "depth" => (0..count).fold(Value::Null, |value, _| json!([value])),
+            _ => unreachable!(),
+        };
+        let mut artifact = f["cases"][0]["result"]["ok"].clone();
+        artifact["records"][0]["data"]["extra"] = value;
+        assert_eq!(json!(validate_semantic_project_artifact(&artifact).unwrap_err().to_string()), row["error"], "{row}");
+    }
+}

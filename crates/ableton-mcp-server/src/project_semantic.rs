@@ -36,73 +36,202 @@ fn utf16_len(s: &str) -> usize {
         string::utf16_len(s)
     }
 }
-pub fn canonical_semantic_json(value: &Value) -> Result<String, ProjectError> {
-    fn quote(s: &str, out: &mut String) {
-        if s.bytes().any(|b| b < 32 || b == b'"' || b == b'\\') {
-            json::escape(s, out);
-        } else {
-            out.push('"');
-            out.push_str(s);
-            out.push('"');
+fn canonical_quote(s: &str, out: &mut String) {
+    if s.bytes().any(|b| b < 32 || b == b'"' || b == b'\\') {
+        json::escape(s, out);
+    } else {
+        out.push('"');
+        out.push_str(s);
+        out.push('"');
+    }
+}
+fn canonical_visit(value: &Value, depth: usize, nodes: &mut usize, out: &mut String) -> Result<(), ProjectError> {
+    *nodes += 1;
+    if *nodes > 100_000_000 {
+        return Err(fail("semantic artifact exceeds the canonical node bound"));
+    }
+    if depth > 24 {
+        return Err(fail("semantic artifact exceeds the canonical depth bound"));
+    }
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&json::number(n)),
+        Value::String(s) => {
+            if utf16_len(s) > 4096 {
+                return Err(fail("semantic artifact string exceeds the bound"));
+            }
+            canonical_quote(s, out);
+        }
+        Value::Array(rows) => {
+            if rows.len() > 10_000_000 {
+                return Err(fail("semantic artifact array exceeds the bound"));
+            }
+            out.push('[');
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_visit(row, depth + 1, nodes, out)?;
+            }
+            out.push(']');
+        }
+        Value::Object(object) => {
+            if object.len() > 64 || object.keys().any(|key| utf16_len(key) > 128) {
+                return Err(fail("semantic artifact object exceeds field or key bounds"));
+            }
+            let mut entries: Vec<_> = object.iter().collect();
+            entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
+            out.push('{');
+            for (i, (key, value)) in entries.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                canonical_quote(key, out);
+                out.push(':');
+                canonical_visit(value, depth + 1, nodes, out)?;
+            }
+            out.push('}');
         }
     }
-    fn visit(value: &Value, depth: usize, nodes: &mut usize, out: &mut String) -> Result<(), ProjectError> {
-        *nodes += 1;
-        if *nodes > 100_000_000 {
-            return Err(fail("semantic artifact exceeds the canonical node bound"));
+    Ok(())
+}
+pub fn canonical_semantic_json(value: &Value) -> Result<String, ProjectError> {
+    let mut out = String::new();
+    canonical_visit(value, 0, &mut 0, &mut out)?;
+    Ok(out)
+}
+fn canonical_digest(json: &str) -> String {
+    format!("sha256:{}", hex::encode(Sha256::digest(json)))
+}
+pub(crate) fn digest(value: &Value) -> Result<String, ProjectError> {
+    Ok(canonical_digest(&canonical_semantic_json(value)?))
+}
+// Hash borrowed projections: constructing a temporary serde_json::Value would deep-copy
+// every record in a section or artifact before immediately serializing it again.
+fn digest_fields(fields: &[(&str, &Value)]) -> Result<String, ProjectError> {
+    if fields.len() > 64 || fields.iter().any(|(key, _)| utf16_len(key) > 128) {
+        return Err(fail("semantic artifact object exceeds field or key bounds"));
+    }
+    let mut entries = fields.to_vec();
+    entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
+    let mut out = String::from("{");
+    let mut nodes = 1;
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            out.push(',');
         }
-        if depth > 24 {
-            return Err(fail("semantic artifact exceeds the canonical depth bound"));
+        canonical_quote(key, &mut out);
+        out.push(':');
+        canonical_visit(value, 1, &mut nodes, &mut out)?;
+    }
+    out.push('}');
+    Ok(canonical_digest(&out))
+}
+fn digest_array(values: &[&Value]) -> Result<String, ProjectError> {
+    if values.len() > 10_000_000 {
+        return Err(fail("semantic artifact array exceeds the bound"));
+    }
+    let mut out = String::from("[");
+    let mut nodes = 1;
+    for (i, value) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
         }
-        match value {
-            Value::Null => out.push_str("null"),
-            Value::Bool(v) => out.push_str(if *v { "true" } else { "false" }),
-            Value::Number(n) => out.push_str(&json::number(n)),
-            Value::String(s) => {
-                if utf16_len(s) > 4096 {
-                    return Err(fail("semantic artifact string exceeds the bound"));
-                }
-                quote(s, out);
+        canonical_visit(value, 1, &mut nodes, &mut out)?;
+    }
+    out.push(']');
+    Ok(canonical_digest(&out))
+}
+// Offsets into one canonical serialization are local to this immutable artifact's
+// validation. Every schema, record fingerprint, manifest and identity check still runs.
+struct CanonicalArtifact<'a> {
+    json: String,
+    fields: Vec<(&'a str, std::ops::Range<usize>)>,
+    records: Vec<std::ops::Range<usize>>,
+}
+impl<'a> CanonicalArtifact<'a> {
+    fn new(artifact: &'a Value) -> Result<Self, ProjectError> {
+        let object = artifact.as_object().expect("artifact object shape checked before canonical validation");
+        if object.len() > 64 || object.keys().any(|key| utf16_len(key) > 128) {
+            return Err(fail("semantic artifact object exceeds field or key bounds"));
+        }
+        let mut entries: Vec<_> = object.iter().collect();
+        entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
+        let mut result = Self { json: String::from("{"), fields: Vec::with_capacity(entries.len()), records: vec![] };
+        let mut nodes = 1;
+        for (i, (key, value)) in entries.into_iter().enumerate() {
+            if i > 0 {
+                result.json.push(',');
             }
-            Value::Array(rows) => {
+            canonical_quote(key, &mut result.json);
+            result.json.push(':');
+            let start = result.json.len();
+            if key == "records" {
+                let rows = value.as_array().expect("record array shape checked before canonical validation");
+                nodes += 1;
+                if nodes > 100_000_000 {
+                    return Err(fail("semantic artifact exceeds the canonical node bound"));
+                }
                 if rows.len() > 10_000_000 {
                     return Err(fail("semantic artifact array exceeds the bound"));
                 }
-                out.push('[');
-                for (i, row) in rows.iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
+                result.records.reserve(rows.len());
+                result.json.push('[');
+                for (index, record) in rows.iter().enumerate() {
+                    if index > 0 {
+                        result.json.push(',');
                     }
-                    visit(row, depth + 1, nodes, out)?;
+                    let start = result.json.len();
+                    canonical_visit(record, 2, &mut nodes, &mut result.json)?;
+                    result.records.push(start..result.json.len());
                 }
-                out.push(']');
+                result.json.push(']');
+            } else {
+                canonical_visit(value, 1, &mut nodes, &mut result.json)?;
             }
-            Value::Object(object) => {
-                if object.len() > 64 || object.keys().any(|key| utf16_len(key) > 128) {
-                    return Err(fail("semantic artifact object exceeds field or key bounds"));
-                }
-                let mut entries: Vec<_> = object.iter().collect();
-                entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
-                out.push('{');
-                for (i, (key, value)) in entries.into_iter().enumerate() {
-                    if i > 0 {
-                        out.push(',');
-                    }
-                    quote(key, out);
-                    out.push(':');
-                    visit(value, depth + 1, nodes, out)?;
-                }
-                out.push('}');
-            }
+            result.fields.push((key, start..result.json.len()));
         }
-        Ok(())
+        result.json.push('}');
+        Ok(result)
     }
-    let mut out = String::new();
-    visit(value, 0, &mut 0, &mut out)?;
-    Ok(out)
+    fn field(&self, key: &str) -> &str {
+        let range = &self.fields.iter().find(|(name, _)| *name == key).expect("validated artifact field").1;
+        &self.json[range.clone()]
+    }
+    fn record(&self, index: usize) -> &str {
+        &self.json[self.records[index].clone()]
+    }
 }
-pub(crate) fn digest(value: &Value) -> Result<String, ProjectError> {
-    Ok(format!("sha256:{}", hex::encode(Sha256::digest(canonical_semantic_json(value)?))))
+fn digest_canonical_fields(fields: &[(&str, &str)]) -> String {
+    let mut entries = fields.to_vec();
+    entries.sort_by(|a, b| compare_semantic_strings(a.0, b.0));
+    let mut digest = Sha256::new();
+    digest.update(b"{");
+    for (i, (key, value)) in entries.into_iter().enumerate() {
+        if i > 0 {
+            digest.update(b",");
+        }
+        let mut quoted = String::new();
+        canonical_quote(key, &mut quoted);
+        digest.update(quoted);
+        digest.update(b":");
+        digest.update(value);
+    }
+    digest.update(b"}");
+    format!("sha256:{}", hex::encode(digest.finalize()))
+}
+fn digest_canonical_array<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"[");
+    for (i, value) in values.enumerate() {
+        if i > 0 {
+            digest.update(b",");
+        }
+        digest.update(value);
+    }
+    digest.update(b"]");
+    format!("sha256:{}", hex::encode(digest.finalize()))
 }
 fn short_digest(value: &Value) -> Result<String, ProjectError> {
     Ok(digest(value)?[7..27].to_owned())
@@ -919,12 +1048,6 @@ fn authority_audit(value: &Value, depth: usize) -> Result<(), ProjectError> {
         Ok(())
     }
     visit(value, depth, &mut HashSet::new(), &mut HashSet::new())
-}
-fn artifact_digest_input(artifact: &Value) -> Value {
-    let mut input = pick(artifact, &["schema", "policy", "provenance", "set", "manifest", "safety", "records"]);
-    input["exporterVersion"] = artifact["artifact"]["exporterVersion"].clone();
-    input["semanticHash"] = artifact["artifact"]["semanticHash"].clone();
-    input
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SemanticPageOptions {

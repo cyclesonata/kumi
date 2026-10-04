@@ -93,10 +93,13 @@ fn maximum_duplicate_ambiguity_source_oracle() {
     options.live.as_object_mut().unwrap().remove("registryHash");
     let artifact = create_semantic_project_snapshot(&snapshot, &options).unwrap();
     equal(&artifact["artifact"], &f["large"]["artifact"], "large artifact");
+    // Independently allocated inputs exercise the same validation work as loaded artifacts.
+    let after = artifact.clone();
     let start = std::time::Instant::now();
-    let diff = diff_semantic_project_snapshots(&artifact, &artifact).unwrap();
+    let diff = diff_semantic_project_snapshots(&artifact, &after).unwrap();
     equal(&diff, &f["large"]["result"], "maximum duplicate ambiguity");
     let page = page_semantic_project_diff(&diff, &SemanticPageOptions { limit: Some(200.), cursor: None }).unwrap();
     assert!(canonical_semantic_json(&page).unwrap().len() < 512 * 1024);
-    assert!(start.elapsed().as_secs_f64() < 10., "indexed 11,995-record comparison exceeded the source 10-second bound");
+    let elapsed = start.elapsed();
+    assert!(elapsed.as_secs_f64() < 10., "indexed 11,995-record comparison exceeded the source 10-second bound: {elapsed:?}");
 }

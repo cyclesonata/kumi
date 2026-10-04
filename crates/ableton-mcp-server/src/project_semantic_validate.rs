@@ -14,7 +14,7 @@ pub(super) fn required(value: &Value, keys: &[&str], label: &str) -> Result<(), 
     Ok(())
 }
 fn string_value(v: &Value, label: &str, pattern: Option<&Regex>) -> Result<(), ProjectError> {
-    if v.as_str().is_none_or(|s| s.is_empty() || string::utf16_len(s) > 4096 || pattern.is_some_and(|p| !p.is_match(s))) {
+    if v.as_str().is_none_or(|s| s.is_empty() || utf16_len(s) > 4096 || pattern.is_some_and(|p| !p.is_match(s))) {
         return Err(fail(format!("semantic snapshot {label} is invalid")));
     }
     Ok(())
@@ -24,7 +24,7 @@ fn shape(v: &Value, label: &str, depth: usize) -> Result<(), ProjectError> {
         return Err(fail(format!("semantic snapshot {label} exceeds depth")));
     }
     match v {
-        Value::String(s) if string::utf16_len(s) > 4096 => return Err(fail(format!("semantic snapshot {label} string exceeds bound"))),
+        Value::String(s) if utf16_len(s) > 4096 => return Err(fail(format!("semantic snapshot {label} string exceeds bound"))),
         Value::Array(rows) => {
             if rows.len() > 256 {
                 return Err(fail(format!("semantic snapshot {label} array exceeds bound")));
@@ -34,7 +34,7 @@ fn shape(v: &Value, label: &str, depth: usize) -> Result<(), ProjectError> {
             }
         }
         Value::Object(o) => {
-            if o.len() > 64 || o.keys().any(|k| string::utf16_len(k) > 128) {
+            if o.len() > 64 || o.keys().any(|k| utf16_len(k) > 128) {
                 return Err(fail(format!("semantic snapshot {label} object exceeds bound")));
             }
             for child in o.values() {
@@ -443,7 +443,7 @@ pub fn validate_semantic_project_artifact(artifact: &Value) -> Result<(), Projec
         return Err(fail("semantic snapshot safety contract is invalid"));
     }
     authority_audit(artifact, 0)?;
-    canonical_semantic_json(artifact)?;
+    let canonical = CanonicalArtifact::new(artifact)?;
     required(&artifact["manifest"], &SECTION_ORDER, "manifest")?;
     let mut ids = HashSet::new();
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -467,7 +467,7 @@ pub fn validate_semantic_project_artifact(artifact: &Value) -> Result<(), Projec
         }
         if let Some(name) = record.get("name") {
             string_value(name, "record name", None)?;
-            if string::utf16_len(name.as_str().unwrap()) > 512 {
+            if utf16_len(name.as_str().unwrap()) > 512 {
                 return Err(fail("semantic snapshot record name exceeds the bound"));
             }
             if policy["profile"] == "strict" && !ALIAS.is_match(name.as_str().unwrap()) {
@@ -479,9 +479,10 @@ pub fn validate_semantic_project_artifact(artifact: &Value) -> Result<(), Projec
             return Err(fail("semantic snapshot IDs must be unique"));
         }
         nested(record)?;
-        if record["contentFingerprint"] != digest(&json!({"kind":record["kind"],"name":record["name"],"data":record["data"]}))?
+        if record["contentFingerprint"]
+            != digest_fields(&[("kind", &record["kind"]), ("name", &record["name"]), ("data", &record["data"])])?
             || record["semanticFingerprint"] != digest(&record["matching"])?
-            || record["nameFingerprint"] != digest(&json!([record["kind"], record["name"]]))?
+            || record["nameFingerprint"] != digest_array(&[&record["kind"], &record["name"]])?
         {
             return Err(fail("semantic snapshot record fingerprint is invalid"));
         }
@@ -493,14 +494,14 @@ pub fn validate_semantic_project_artifact(artifact: &Value) -> Result<(), Projec
         }
     }
     for section in SECTION_ORDER {
-        let rows: Vec<_> = records.iter().filter(|r| r["section"] == section).collect();
+        let rows: Vec<_> = records.iter().enumerate().filter(|(_, r)| r["section"] == section).map(|(i, _)| i).collect();
         let manifest = &artifact["manifest"][section];
         required(manifest, &["observed", "included", "omitted", "complete", "digest"], &format!("{section} manifest"))?;
         if !["observed", "included", "omitted"].iter().all(|k| nonnegative_integer(&manifest[k]))
             || !manifest["complete"].is_boolean()
             || !hash(&manifest["digest"])
             || manifest["included"].as_f64() != Some(rows.len() as f64)
-            || manifest["digest"] != digest(&json!(rows))?
+            || manifest["digest"] != digest_canonical_array(rows.iter().map(|index| canonical.record(*index)))
             || manifest["observed"].as_f64() != Some(manifest["included"].as_f64().unwrap() + manifest["omitted"].as_f64().unwrap())
             || manifest["complete"].as_bool() != Some(manifest["omitted"].as_f64() == Some(0.))
         {
@@ -520,8 +521,28 @@ pub fn validate_semantic_project_artifact(artifact: &Value) -> Result<(), Projec
     {
         return Err(fail("semantic snapshot Set summary does not match its record"));
     }
-    let hash = digest(&pick(artifact, &["schema", "policy", "set", "manifest", "safety", "records"]))?;
-    if artifact["artifact"]["semanticHash"] != hash || artifact["artifact"]["id"] != digest(&artifact_digest_input(artifact))? {
+    let hash =
+        digest_canonical_fields(&["schema", "policy", "set", "manifest", "safety", "records"].map(|key| (key, canonical.field(key))));
+    // These fields move one level outward in the identity projection. Their earlier
+    // canonical validation is stricter; reusing their bytes cannot bypass a bound.
+    if artifact["artifact"]["semanticHash"] != hash {
+        return Err(fail("semantic snapshot artifact digest is invalid"));
+    }
+    let exporter_version = canonical_semantic_json(&artifact["artifact"]["exporterVersion"])?;
+    let semantic_hash = canonical_semantic_json(&artifact["artifact"]["semanticHash"])?;
+    if artifact["artifact"]["id"]
+        != digest_canonical_fields(&[
+            ("schema", canonical.field("schema")),
+            ("policy", canonical.field("policy")),
+            ("provenance", canonical.field("provenance")),
+            ("set", canonical.field("set")),
+            ("manifest", canonical.field("manifest")),
+            ("safety", canonical.field("safety")),
+            ("records", canonical.field("records")),
+            ("exporterVersion", &exporter_version),
+            ("semanticHash", &semantic_hash),
+        ])
+    {
         return Err(fail("semantic snapshot artifact digest is invalid"));
     }
     Ok(())
