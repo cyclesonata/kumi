@@ -281,7 +281,7 @@ impl McpHost {
             if let Some(ports) = p.get("sourcePorts") {
                 payload["sourcePorts"] = ports.clone();
             }
-            let t = json!({"id":tempo::transaction_id("realtime_"),"epoch":status.epoch,"kind":"realtime-arm","fence":realtime_fence(&status,&targets),"payload":payload,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
+            let t = json!({"id":tempo::transaction_id("realtime"),"epoch":status.epoch,"kind":"realtime-arm","fence":realtime_fence(&status,&targets),"payload":payload,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "realtime arm")?;
             Ok(success_text(id, &json!({"transactionId":t["id"],"epoch":t["epoch"],"ttlMs":payload["ttlMs"],"channels":payload["channels"],"parameterTargets":targets,"sourcePorts":payload.get("sourcePorts").cloned().unwrap_or(json!([])),"outputSafety":payload["outputSafety"],"impact":"temporarily-authorizes-bounded-realtime-control","packetLimitBytes":512,"sustainedRatePerSecond":64,"burst":16,"confirmation":"apply","expiresAt":t["expiresAt"]})))
         }

@@ -79,7 +79,7 @@ impl McpHost {
             if !also.is_empty() {
                 payload["also"] = json!(also);
             }
-            let t = json!({"id":tempo::transaction_id("recording_"),"epoch":status.epoch,"kind":"recording","fence":recording_fence(transport),"payload":payload,"prior":fields(transport,&["sessionRecord","arrangementRecord"]),"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
+            let t = json!({"id":tempo::transaction_id("recording"),"epoch":status.epoch,"kind":"recording","fence":recording_fence(transport),"payload":payload,"prior":fields(transport,&["sessionRecord","arrangementRecord"]),"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "recording")?;
             Ok(success_text(id, &json!({"transactionId":t["id"],"epoch":t["epoch"],"action":p["action"],"lane":p["lane"],"intent":p["intent"],"prior":t["prior"],"impact":if p["action"]=="start" {"starts-recording"}else{"stops-recording"},"confirmation":"apply","expiresAt":t["expiresAt"]})))
         }

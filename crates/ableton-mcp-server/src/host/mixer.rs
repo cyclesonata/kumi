@@ -139,7 +139,7 @@ impl McpHost {
             let mut payload = json!({"ref":p["trackRef"]});
             payload.as_object_mut().unwrap().extend(proposed.as_object().unwrap().clone());
             payload.as_object_mut().unwrap().extend(mixer_authority(&target)?.as_object().unwrap().clone());
-            let t = json!({"id":tempo::transaction_id("mixer_"),"epoch":status.epoch,"kind":"mixer-set","fence":mixer_fence(&target,&p["trackRef"]),"clipRef":p["trackRef"],"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
+            let t = json!({"id":tempo::transaction_id("mixer"),"epoch":status.epoch,"kind":"mixer-set","fence":mixer_fence(&target,&p["trackRef"]),"clipRef":p["trackRef"],"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "mixer")?;
             let mut body = json!({"transactionId":t["id"],"epoch":t["epoch"],"trackRef":p["trackRef"],"prior":prior});
             if let Some(display) = display {

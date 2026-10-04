@@ -26,6 +26,17 @@ fn clean(mut v: Value) -> Value {
             Value::Object(o) => {
                 for (k, v) in o {
                     if v.as_str().is_some_and(|s| s.starts_with("view_") || s.starts_with("locjump_")) {
+                        let raw = v.as_str().unwrap();
+                        let prefix = ["recording", "realtime", "mixer", "view", "locjump", "clipset"]
+                            .iter()
+                            .find(|p| raw.starts_with(&format!("{p}_")))
+                            .unwrap();
+                        let suffix = raw.strip_prefix(&format!("{prefix}_")).unwrap();
+                        assert_eq!(suffix.len(), 24, "exact transaction ID width: {raw}");
+                        assert!(
+                            suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'),
+                            "base64url transaction ID: {raw}"
+                        );
                         *v = json!("$transaction");
                     } else if k == "expiresAt" {
                         *v = json!("$time");

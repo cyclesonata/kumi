@@ -96,7 +96,7 @@ impl McpHost {
             let prior = json!({"view":snapshot["view"]});
             let mut payload = json!({"operation":operation});
             payload.as_object_mut().unwrap().extend(proposed.as_object().unwrap().clone());
-            let t = json!({"id":tempo::transaction_id("view_"),"epoch":status.epoch,"kind":"view","fence":js_json::stringify(&json!({"operation":operation,"proposed":proposed,"epoch":status.epoch})),"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
+            let t = json!({"id":tempo::transaction_id("view"),"epoch":status.epoch,"kind":"view","fence":js_json::stringify(&json!({"operation":operation,"proposed":proposed,"epoch":status.epoch})),"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "view")?;
             Ok(success_text(id, &json!({"transactionId":t["id"],"epoch":t["epoch"],"operation":operation,"proposed":proposed,"prior":prior,"impact":"changes-live-ui","confirmation":"apply","expiresAt":t["expiresAt"]})))
         }
@@ -210,7 +210,7 @@ impl McpHost {
                 };
                 (json!({"direction":p["direction"]}), json!({"position":position,"target":target}), js_json::stringify(&json!({"direction":p["direction"],"position":position,"locators":times})), json!({"direction":p["direction"],"current":position,"target":target}))
             };
-            let t = json!({"id":tempo::transaction_id("locjump_"),"epoch":status.epoch,"kind":"locator-jump","fence":fence,"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
+            let t = json!({"id":tempo::transaction_id("locjump"),"epoch":status.epoch,"kind":"locator-jump","fence":fence,"payload":payload,"prior":prior,"expiresAt":now_ms_f64()+TRANSACTION_TTL_MS,"state":"previewed"});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "locator jump")?;
             body["transactionId"] = t["id"].clone();
             body["epoch"] = t["epoch"].clone();
