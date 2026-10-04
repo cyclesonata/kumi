@@ -1,5 +1,6 @@
 //! Command dispatch and native process I/O from `apps/kumi/src/cli.ts`.
 mod session;
+mod shutdown;
 use crate::{
     bridge_setup::{self, BridgeSetupIo},
     config::*,
@@ -21,7 +22,10 @@ use kumi_common::{
 use kumi_runtime::{
     core::contracts::Integration, integrations::ableton::AbletonOptions, providers::ProviderId, system::Env, RuntimeError, KUMI_VERSION,
 };
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 pub type AbletonFactory = Rc<dyn Fn(AbletonOptions) -> Rc<dyn Integration>>;
 #[derive(Clone)]
 pub struct CliIo {
@@ -32,10 +36,11 @@ pub struct CliIo {
     pub args: Vec<String>,
     pub signals: bool,
     pub reopen: Option<Rc<dyn Fn() -> LocalBoxFuture<'static, i32>>>,
+    exit_after_reopen: Rc<Cell<bool>>,
 }
 impl CliIo {
     pub fn new(input: Rc<dyn TerminalInput>, out: Rc<dyn TtyOutput>, err: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { input, out, err, env, args: vec![], signals: false, reopen: None }
+        Self { input, out, err, env, args: vec![], signals: false, reopen: None, exit_after_reopen: Rc::new(Cell::new(false)) }
     }
     pub fn installed(&self) -> bool {
         self.env.get("KUMI_INSTALLED").is_some_and(|s| s == "1")
@@ -164,6 +169,7 @@ async fn login_with(config: &AppConfig, io: &CliIo) -> Result<(), RuntimeError> 
     .await
 }
 pub async fn run(io: CliIo, factory: AbletonFactory) -> i32 {
+    io.exit_after_reopen.set(false);
     let mut secrets: Vec<String> = ["AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "LM_API_TOKEN"]
         .into_iter()
         .filter_map(|s| io.env.get(s).filter(|s| !s.is_empty()).cloned())
@@ -344,6 +350,12 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
     }
 }
 async fn update_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
+    let result = reopen_after_update(io).await;
+    // An exception follows the source catch/normal-exit path instead.
+    io.exit_after_reopen.set(result.is_ok());
+    result
+}
+async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     io.out.write("\n");
     let updated = if io.installed() {
@@ -401,7 +413,9 @@ pub fn main_with(factory: AbletonFactory) -> i32 {
             io.err.write(&format!("Kumi: could not update its launcher: {error}\n"));
         }
     }
-    let code = tokio::task::LocalSet::new().block_on(&runtime, run(io, factory));
-    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
-    code
+    let err = io.err.clone();
+    let explicit_exit = io.exit_after_reopen.clone();
+    let local = tokio::task::LocalSet::new();
+    let code = local.block_on(&runtime, run(io, factory));
+    shutdown::finish(runtime, local, code, explicit_exit.get(), err.as_ref())
 }
