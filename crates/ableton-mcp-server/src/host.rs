@@ -6,6 +6,7 @@
 mod arrangement;
 mod arrangement_clip;
 mod browser_render;
+mod clip_properties;
 pub mod audio;
 mod audio_clip;
 mod audio_import;
