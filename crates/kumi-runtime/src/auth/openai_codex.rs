@@ -36,6 +36,7 @@ pub const DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device"
 const SCOPE: &str = "openid profile email offline_access";
 const REFRESH_MARGIN_MS: f64 = 5.0 * 60_000.0;
 const DEVICE_TIMEOUT_MS: i64 = 15 * 60_000;
+pub static LOGIN_HINT: std::sync::LazyLock<String> = std::sync::LazyLock::new(login_hint);
 pub fn login_hint() -> String {
     format!("Sign in with /login in Kumi, or: {} login openai-codex", *crate::command::KUMI)
 }

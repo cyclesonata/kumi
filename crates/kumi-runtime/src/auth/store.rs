@@ -23,11 +23,21 @@ pub struct OAuthCredential {
     pub expires: f64,
     pub account_id: String,
 }
+/// A provider API key; converting to `Credential` adds its serialized discriminator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiKeyCredential {
+    pub key: String,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Credential {
     Oauth(OAuthCredential),
     ApiKey { key: String },
+}
+impl From<ApiKeyCredential> for Credential {
+    fn from(value: ApiKeyCredential) -> Self {
+        Self::ApiKey { key: value.key }
+    }
 }
 impl From<OAuthCredential> for Credential {
     fn from(value: OAuthCredential) -> Self {
