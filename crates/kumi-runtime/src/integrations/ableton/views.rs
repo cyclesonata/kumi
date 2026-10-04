@@ -224,12 +224,7 @@ pub async fn device_tree(host: &dyn ViewHost, track_ref: &str, signal: Signal) -
         }
     }
 }
-pub async fn session_strip(
-    host: &dyn ViewHost,
-    track_ref: &str,
-    scene: f64,
-    signal: Signal,
-) -> Result<Option<SessionStrip>, RuntimeError> {
+pub async fn session_strip(host: &dyn ViewHost, track_ref: &str, scene: f64, signal: Signal) -> Result<Option<SessionStrip>, RuntimeError> {
     if !readable(host) || !TRACK.is_match(track_ref) {
         return Ok(None);
     }

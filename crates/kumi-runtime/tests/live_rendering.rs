@@ -167,7 +167,9 @@ async fn replay() {
     let source = include_str!("support/rendering-oracle.json").replace("$AUDIO", folder.path().to_str().unwrap());
     let fixture: Value = serde_json::from_str(&source).unwrap();
     for (case_index, case) in fixture["cases"].as_array().unwrap().iter().enumerate() {
-        if std::env::var("KUMI_RENDERING_CASE").is_ok_and(|label|case["label"].as_str()!=Some(&label)){continue;}
+        if std::env::var("KUMI_RENDERING_CASE").is_ok_and(|label| case["label"].as_str() != Some(&label)) {
+            continue;
+        }
         eprintln!("rendering case {case_index}: {}", case["label"]);
         let config = &case["config"];
         let endpoint = Rc::new(Fixture {

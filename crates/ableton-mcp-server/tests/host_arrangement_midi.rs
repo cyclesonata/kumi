@@ -302,9 +302,12 @@ async fn arrangement_midi_partial_recovery_and_clear_flows_match_source() {
         let mut results = vec![clean(preview)];
         let mut states = vec![];
         if let Some(txid) = body.get("transactionId") {
-            let raw=txid.as_str().unwrap(); let prefix=if clear {"clearrange_"} else {"arrmidi_"};
-            assert!(raw.starts_with(prefix)); let suffix=&raw[prefix.len()..];
-            assert_eq!(suffix.len(),24);assert!(suffix.bytes().all(|b| b.is_ascii_alphanumeric()||b==b'_'||b==b'-'));
+            let raw = txid.as_str().unwrap();
+            let prefix = if clear { "clearrange_" } else { "arrmidi_" };
+            assert!(raw.starts_with(prefix));
+            let suffix = &raw[prefix.len()..];
+            assert_eq!(suffix.len(), 24);
+            assert!(suffix.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'));
             let record = host.transaction_record(txid.as_str().unwrap()).unwrap();
             if scenario == "expire" {
                 record.borrow_mut()["expiresAt"] = json!(0);

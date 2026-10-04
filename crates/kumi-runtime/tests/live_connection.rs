@@ -158,7 +158,9 @@ impl McpEndpoint for LifeEndpoint {
             if body["error"] == true {
                 return Ok(serde_json::from_value(json!({"isError":true,"content":[{"type":"text","text":"refused"}]})).unwrap());
             }
-            return Ok(serde_json::from_value(json!({"content":[{"type":"text","text":stringify(body)}],"structuredContent":body})).unwrap());
+            return Ok(
+                serde_json::from_value(json!({"content":[{"type":"text","text":stringify(body)}],"structuredContent":body})).unwrap()
+            );
         }
         let mut body = json!({"connected":true,"adapter":"remote-script","epoch":7,"provenance":"fake-live"}).as_object().unwrap().clone();
         if let Some(status) = self.config["statuses"].as_array().and_then(|a| a.get(at.min(a.len().saturating_sub(1)))) {

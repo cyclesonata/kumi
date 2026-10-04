@@ -7,79 +7,79 @@ mod advanced_devices;
 mod arrangement;
 mod arrangement_clip;
 mod arrangement_midi;
-mod browser_render;
-mod clip_properties;
 pub mod audio;
 mod audio_clip;
 mod audio_import;
 mod audition;
 mod automation;
+mod browser_render;
 mod capture;
 mod clip_action;
 mod clip_duplicate;
 mod clip_launch;
 mod clip_move;
-mod device_parameter;
-mod device_lifecycle;
-mod device_copy;
-mod device_basic;
+mod clip_properties;
 mod data;
 mod deletion;
-pub mod device_state;
-mod dispatch;
+mod device_basic;
+mod device_copy;
 mod device_edit;
+mod device_lifecycle;
+mod device_parameter;
+pub mod device_state;
 mod dialog;
-mod object_view;
-mod selection;
-mod events;
+mod dispatch;
 mod drum_pad;
+mod events;
 mod extended_mixer;
-mod import_files;
-mod follow;
 mod fire_button;
+mod follow;
 mod groove;
 pub mod helpers;
+mod import_files;
 pub mod json_diagnostics;
+mod looper;
 mod managed;
-mod mixer;
 mod midi_plan;
 #[cfg(test)]
 mod midi_plan_tests;
 mod midi_transform;
-mod looper;
+mod mixer;
 pub mod mutations;
 mod note_edit;
 mod note_target;
+mod object_view;
 mod probe_library;
 mod probes;
 mod project;
 mod protocol;
+mod racks;
 mod reads;
 mod realtime;
 mod record_operation;
 mod recording;
 mod recovery;
-mod racks;
 mod rename;
 mod resources;
 pub mod retention;
 mod routing;
 mod scene;
+mod selection;
 mod session_capture;
-mod structure;
-mod specialized_devices;
 mod simpler;
 mod song_settings;
+mod specialized_devices;
+mod structure;
 mod tempo;
+mod track_properties;
+mod track_structure;
+mod track_view;
 mod transport;
 mod transport_action;
 mod tuning;
 mod ui;
-mod track_view;
-mod track_structure;
-mod track_properties;
-mod willington;
 mod warp;
+mod willington;
 
 use crate::{
     live::*,
@@ -203,10 +203,13 @@ impl McpHost {
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         let import_files = Rc::new(import_files::ImportFiles::new(&options));
         let cleanup_imports = import_files.clone();
-        let clip_lifecycle_transactions = BoundedTransactionMap::new(retention.clone(), Some(Rc::new(move |value| {
-            cleanup_imports.release_for(&value.borrow());
-            Ok(())
-        })));
+        let clip_lifecycle_transactions = BoundedTransactionMap::new(
+            retention.clone(),
+            Some(Rc::new(move |value| {
+                cleanup_imports.release_for(&value.borrow());
+                Ok(())
+            })),
+        );
         Ok(Self {
             browser_search_cache: RefCell::new(VecDeque::new()),
             fused_changes: RefCell::new(VecDeque::new()),

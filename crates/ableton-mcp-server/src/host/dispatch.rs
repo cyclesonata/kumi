@@ -143,6 +143,7 @@ impl McpHost {
             optional!(dispatch_warp_marker_tool);
             optional!(dispatch_clip_action_tool);
             optional!(dispatch_drum_pad_tool);
+            optional!(dispatch_automation_tool);
 
             optional!(dispatch_clip_launch_tool);
             optional!(dispatch_managed_tool);
@@ -426,6 +427,9 @@ impl McpHost {
             }
             if tx.starts_with("drumpad_") {
                 return Ok(self.undo_drum_pad_async(id, params, signal).await);
+            }
+            if tx.starts_with("automation_") {
+                return Ok(self.undo_automation_async(id, params, signal).await);
             }
             if tx.starts_with("firebutton_") {
                 return Ok(self.undo_fire_button(id));
