@@ -6,6 +6,8 @@
 mod arrangement;
 pub mod audio;
 pub mod device_state;
+mod device_parameter;
+mod rename;
 mod events;
 pub mod helpers;
 pub mod json_diagnostics;
