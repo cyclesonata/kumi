@@ -903,9 +903,10 @@ pub type ClipGroove = ObservedObject<ClipGrooveFields>;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipGrooveFields {
-    #[serde(rename = "ref")]
-    pub ref_: LiveRef,
-    pub name: String,
+    #[serde(rename = "ref", default, skip_serializing_if = "Maybe::is_absent")]
+    pub ref_: Maybe<Value>,
+    #[serde(default, skip_serializing_if = "Maybe::is_absent")]
+    pub name: Maybe<Value>,
     #[serde(default, flatten)]
     pub extra: Map<String, Value>,
 }
