@@ -7,10 +7,10 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use windows_sys::Win32::Foundation::{ERROR_BROKEN_PIPE, ERROR_HANDLE_EOF, HANDLE, INVALID_HANDLE_VALUE, WAIT_FAILED, WAIT_OBJECT_0};
-use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_PIPE, GetFileType, ReadFile};
+use windows_sys::Win32::Storage::FileSystem::{GetFileType, ReadFile, FILE_TYPE_PIPE};
 use windows_sys::Win32::System::Console::*;
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
-use windows_sys::Win32::System::Threading::{CreateEventW, INFINITE, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
+use windows_sys::Win32::System::Threading::{CreateEventW, ResetEvent, SetEvent, WaitForMultipleObjects, WaitForSingleObject, INFINITE};
 
 use super::super::Message;
 
@@ -247,7 +247,11 @@ enum Read {
 fn console_mode(input: HANDLE) -> io::Result<u32> {
     let mut mode = 0;
     // SAFETY: input is a borrowed live handle, mode is writable.
-    if unsafe { GetConsoleMode(input, &mut mode) } == 0 { Err(io::Error::last_os_error()) } else { Ok(mode) }
+    if unsafe { GetConsoleMode(input, &mut mode) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(mode)
+    }
 }
 
 fn read_raw(control: &Control, decoder: &mut ConsoleText) -> io::Result<Read> {
