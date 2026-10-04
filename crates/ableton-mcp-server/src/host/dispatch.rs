@@ -141,6 +141,8 @@ impl McpHost {
             optional!(dispatch_note_edit_tool);
             optional!(dispatch_routing_tool);
             optional!(dispatch_session_capture_tool);
+            optional!(dispatch_browser_render_tool);
+            optional!(dispatch_clip_duplicate_tool);
             // Kept explicit until every source family has landed: a missing port is never reported
             // as a successful operation or silently routed to another mutation.
             Err(LiveError::error(format!("MCP tool implementation is not ported yet: {}", call.name)))
@@ -301,6 +303,9 @@ impl McpHost {
             }
             if tx.starts_with("routing_") {
                 return Ok(self.undo_routing_async(id, params, signal).await);
+            }
+            if tx.starts_with("clipdup_") {
+                return Ok(self.undo_clip_duplicate_async(id, params, signal).await);
             }
             if tx.starts_with("parameter_") {
                 return Ok(self.undo_device_parameter_async(id, params, signal).await);

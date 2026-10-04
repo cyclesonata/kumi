@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 mod arrangement;
+mod browser_render;
 pub mod audio;
 mod audition;
 mod capture;
@@ -77,6 +78,7 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    browser_search_cache: RefCell<VecDeque<(String, browser_render::BrowserCache)>>,
     fused_changes: RefCell<VecDeque<(String, Value)>>,
     record_operations: RefCell<Vec<record_operation::RecordOperation>>,
     undo_recovery_plans: RefCell<Vec<recovery::RecoveryPlan>>,
@@ -153,6 +155,7 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            browser_search_cache: RefCell::new(VecDeque::new()),
             fused_changes: RefCell::new(VecDeque::new()),
             record_operations: RefCell::new(Vec::new()),
             undo_recovery_plans: RefCell::new(Vec::new()),
