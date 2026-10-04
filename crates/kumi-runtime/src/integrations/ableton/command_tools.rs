@@ -736,7 +736,7 @@ fn raw_keyframe(value: &Value) -> Result<Keyframe, CommandError> {
     if value.is_null() {
         return Err(CommandError::Other("Cannot read properties of null (reading 'harmonics')".into()));
     }
-    let harmonics = value.get("harmonics").and_then(raw_harmonics);
+    let harmonics = value.get("harmonics").map(raw_harmonics).transpose()?.flatten();
     let shape = match value.get("shape").filter(|v| !v.is_null()) {
         None => Some(Shape::Sine),
         Some(Value::String(s)) => match s.as_str() {
@@ -773,14 +773,16 @@ fn js_number(value: &Value) -> f64 {
     }
 }
 
-fn raw_harmonics(value: &Value) -> Option<Vec<f64>> {
-    match value {
+fn raw_harmonics(value: &Value) -> Result<Option<Vec<f64>>, CommandError> {
+    Ok(match value {
         Value::Array(values) if !values.is_empty() => Some(values.iter().map(js_number).collect()),
         Value::String(value) if !value.is_empty() => {
             Some(value.encode_utf16().map(|unit| js_number(&json!(String::from_utf16_lossy(&[unit])))).collect())
         }
         Value::Object(value) => {
-            let length = value.get("length")?;
+            let Some(length) = value.get("length") else {
+                return Ok(None);
+            };
             let truthy = match length {
                 Value::Null => false,
                 Value::Bool(v) => *v,
@@ -789,15 +791,18 @@ fn raw_harmonics(value: &Value) -> Option<Vec<f64>> {
                 _ => true,
             };
             if !truthy {
-                return None;
+                return Ok(None);
             }
             let length = js_number(length);
             // Array.from converts a spectrum's length with ToLength before reading its indexed properties.
+            if length.floor() > u32::MAX as f64 {
+                return Err(CommandError::Other("Invalid array length".into()));
+            }
             let length = if length.is_nan() || length <= 0.0 { 0 } else { length.floor() as usize };
             let values =
                 (0..length).map(|i| value.get(&i.to_string()).filter(|v| !v.is_null()).map(js_number).unwrap_or(0.0)).collect::<Vec<_>>();
             Some(if values.is_empty() { vec![0.0] } else { values })
         }
         _ => None,
-    }
+    })
 }
