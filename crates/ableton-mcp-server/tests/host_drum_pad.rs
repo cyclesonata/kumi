@@ -1,4 +1,6 @@
 //! Replay full source-host file/transaction workflows against real native file staging.
+#[path = "../../../tests/support/fixture_paths.rs"]
+mod fixture_paths;
 use ableton_mcp_server::{
     host::{helpers::canonical_mutation_identity, McpHost, McpHostOptions},
     live::*,
@@ -38,15 +40,19 @@ fn clean(mut value: Value, root: &str) -> Value {
         }
         match value {
             Value::String(text) => {
+                if let Ok(mut inner @ (Value::Object(_) | Value::Array(_))) = serde_json::from_str::<Value>(text) {
+                    let original = inner.clone();
+                    walk(&mut inner, "", root);
+                    if inner != original {
+                        *text = kumi_common::js::json::stringify(&inner);
+                    }
+                    return;
+                }
                 if text.starts_with("drumpad_") {
                     *text = "$transaction".into();
                     return;
                 }
-                *text = text.replace(root, "$root");
-                #[cfg(windows)]
-                if text.contains("$root") || text.contains("$stage") {
-                    *text = text.replace('\\', "/");
-                }
+                *text = fixture_paths::normalize_root(text, root, "$root");
                 *text = text.replace("$root/managed", "$stage");
                 *text = STAGE.replace_all(text, "$$stage/$$copy/").into_owned();
                 *text = PRESET.replace_all(text, " $$nonce.adv").into_owned();
@@ -67,6 +73,14 @@ fn clean(mut value: Value, root: &str) -> Value {
     }
     walk(&mut value, "", root);
     value
+}
+#[test]
+fn windows_staged_paths_inside_json_fences_are_normalized_after_decoding() {
+    let root = r"C:\Users\fixture\Temp\drum";
+    let payload = json!({"samplePath":format!(r"{root}\managed\nonce\demo.wav"),"name":r"quoted \ name"});
+    let actual = clean(json!({"payload":payload,"fence":kumi_common::js::json::stringify(&payload)}), root);
+    let expected = json!({"samplePath":"$stage/$copy/demo.wav","name":r"quoted \ name"});
+    assert_eq!(actual, json!({"payload":expected,"fence":kumi_common::js::json::stringify(&expected)}));
 }
 fn expand(value: &Value, root: &str) -> Value {
     match value {
