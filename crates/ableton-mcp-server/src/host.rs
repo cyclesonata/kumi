@@ -14,6 +14,7 @@ mod audio_clip;
 mod audio_import;
 mod audition;
 mod capture;
+mod clip_action;
 mod clip_duplicate;
 mod clip_launch;
 mod clip_move;
