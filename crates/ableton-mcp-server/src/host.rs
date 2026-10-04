@@ -27,6 +27,7 @@ mod events;
 mod extended_mixer;
 mod import_files;
 mod follow;
+mod fire_button;
 pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
