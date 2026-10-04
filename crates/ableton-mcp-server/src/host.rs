@@ -4,8 +4,10 @@
 
 #![allow(dead_code)]
 pub mod audio;
+pub mod device_state;
 mod events;
 pub mod helpers;
+pub mod json_diagnostics;
 mod managed;
 pub mod mutations;
 mod project;
