@@ -148,7 +148,8 @@ static PHASES: LazyLock<[[f64; 12]; 4]> = LazyLock::new(|| {
 /// 4× oversampling for true peak (BS.1770 annex 2), as a windowed-sinc polyphase filter.
 #[derive(Default, Clone)]
 pub struct TruePeak {
-    history: [f64; 12],
+    // Mirror the ring so the latest twelve samples are always one contiguous slice.
+    history: [f64; 24],
     at: usize,
 }
 impl TruePeak {
@@ -157,25 +158,74 @@ impl TruePeak {
     }
     pub fn push(&mut self, sample: f64) {
         self.history[self.at] = sample;
+        self.history[self.at + 12] = sample;
         self.at = (self.at + 1) % 12;
     }
     pub fn peak(&self) -> f64 {
-        // Each phase uses the same delayed samples. Walk the ring once for all four phases;
-        // retaining each phase's tap order also retains the source's floating-point result.
+        let history: &[f64; 12] = self.history[self.at..self.at + 12].try_into().unwrap();
+        // Fixed tap accesses remove per-sample ring arithmetic and bounds checks.
+        // Keep the source's tap order and separate additions for identical rounding.
+        let dot = |coefficients: &[f64; 12]| {
+            let mut sum = 0.0_f64;
+            sum += coefficients[0] * history[11];
+            sum += coefficients[1] * history[10];
+            sum += coefficients[2] * history[9];
+            sum += coefficients[3] * history[8];
+            sum += coefficients[4] * history[7];
+            sum += coefficients[5] * history[6];
+            sum += coefficients[6] * history[5];
+            sum += coefficients[7] * history[4];
+            sum += coefficients[8] * history[3];
+            sum += coefficients[9] * history[2];
+            sum += coefficients[10] * history[1];
+            sum += coefficients[11] * history[0];
+            sum.abs()
+        };
         let phases = &*PHASES;
-        let mut values = [0.0_f64; 4];
-        let mut at = self.at;
-        for tap in 0..12 {
-            at = if at == 0 { 11 } else { at - 1 };
-            let sample = self.history[at];
-            values[0] += phases[0][tap] * sample;
-            values[1] += phases[1][tap] * sample;
-            values[2] += phases[2][tap] * sample;
-            values[3] += phases[3][tap] * sample;
-        }
-        values[0].abs().max(values[1].abs()).max(values[2].abs()).max(values[3].abs())
+        dot(&phases[0]).max(dot(&phases[1])).max(dot(&phases[2])).max(dot(&phases[3]))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contiguous_true_peak_taps_match_the_reference_ring_at_every_position() {
+        let mut peak = TruePeak::new();
+        let mut history = [0.0; 12];
+        let mut at = 0;
+        let mut seed = 123456789_u32;
+        assert_eq!(peak.peak(), 0.0);
+        for index in 0..10_000 {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            let sample = match index % 5 {
+                0 => 0.0,
+                1 => 1.0,
+                2 => -1.0,
+                3 => f64::MIN_POSITIVE,
+                _ => seed as f64 / u32::MAX as f64 * 2.0 - 1.0,
+            };
+            history[at] = sample;
+            at = (at + 1) % 12;
+            peak.push(sample);
+            // Direct convolution from dsp.ts, independent of the mirrored-ring layout.
+            let mut expected = 0.0_f64;
+            for coefficients in PHASES.iter() {
+                let mut sum = 0.0;
+                for tap in 0..12 {
+                    sum += coefficients[tap] * history[(at + 12 - 1 - tap) % 12];
+                }
+                expected = expected.max(sum.abs());
+            }
+            assert_eq!(peak.peak().to_bits(), expected.to_bits(), "sample {index}, ring position {at}");
+            if index % 12 == 0 {
+                peak = peak.clone();
+            }
+        }
+    }
+}
+
 pub fn db(power: f64) -> f64 {
     if power > 1e-20 {
         10.0 * power.log10()
