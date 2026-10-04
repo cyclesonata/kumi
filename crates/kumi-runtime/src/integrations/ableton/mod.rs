@@ -18,6 +18,8 @@ pub mod focus;
 pub mod history;
 pub mod fold;
 mod inference;
+pub mod integration;
+pub use integration::create_ableton_integration;
 pub mod pins;
 pub mod references;
 pub mod remember;

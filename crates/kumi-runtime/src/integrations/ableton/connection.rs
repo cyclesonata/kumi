@@ -480,12 +480,16 @@ impl LiveConnection {
     pub fn notify_connected(&self) {
         (self.options.on_connection)(ConnectionState::Connected, None);
     }
+    /// Stop reconnecting while the integration writes its final bounded project snapshot.
+    pub fn prepare_close(&self) {
+        self.closing_started.set(true);
+        Self::stop_timer(&self.watcher);
+    }
     pub fn close(&self) -> Closing {
         if let Some(closing) = self.closing.borrow().clone() {
             return closing;
         }
-        self.closing_started.set(true);
-        Self::stop_timer(&self.watcher);
+        self.prepare_close();
         self.closed.set(true);
         self.available.set(false);
         self.lifetime.cancel();
