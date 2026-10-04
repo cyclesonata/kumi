@@ -185,7 +185,7 @@ async fn developer_bridge_artifact_is_prepared_then_native_lifecycle_plans_befor
     let apply = &calls[3];
     assert_eq!(plan.args[1], "install");
     assert_eq!(flag(plan, "--remote-scripts-dir"), w.scripts.to_str().unwrap());
-    assert_eq!(flag(plan, "--state-dir"), w.root.path().join("kumi/bridge/state").to_str().unwrap());
+    assert_eq!(flag(plan, "--state-dir"), w.root.path().join("kumi").join("bridge").join("state").to_str().unwrap());
     assert_eq!(flag(plan, "--artifact-sha256").len(), 64);
     assert!(!plan.args.contains(&"--apply".into()));
     assert!(apply.args.contains(&"--apply".into()));

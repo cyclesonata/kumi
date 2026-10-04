@@ -94,11 +94,11 @@ mod tests {
         let f = Fixture::new();
         let managed = f.binary("custom home/node/node.exe");
         let env = HashMap::from([("Kumi_Home".into(), f.0.join("custom home").to_string_lossy().into_owned())]);
-        assert_eq!(find_node(&env, &f.0, "win32"), Some(managed));
+        assert_eq!(find_node(&env, &f.0, "win32").map(PathBuf::from), Some(PathBuf::from(managed)));
         std::fs::remove_file(f.0.join("custom home/node/node.exe")).unwrap();
         let path = f.binary("tools/node.exe");
         let env = HashMap::from([("Path".into(), format!("{};{}", f.0.join("missing").display(), f.0.join("tools").display()))]);
-        assert_eq!(find_node(&env, &f.0, "win32"), Some(path));
+        assert_eq!(find_node(&env, &f.0, "win32").map(PathBuf::from), Some(PathBuf::from(path)));
     }
     #[cfg(unix)]
     #[test]

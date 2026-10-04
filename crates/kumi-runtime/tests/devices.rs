@@ -596,7 +596,7 @@ async fn make_device_reads_guide_makes_a_device_and_waits_for_live_browser() {
     assert!(!made.is_error, "{}", made.text);
     let result: Value = serde_json::from_str(&made.text).unwrap();
     assert_eq!(result["itemId"], "user_library/Kumi/Lowest Note");
-    assert_eq!(result["file"], folder.path().join("Kumi/Lowest Note.amxd").to_string_lossy().as_ref());
+    assert_eq!(result["file"], folder.path().join("Kumi").join("Lowest Note.amxd").to_string_lossy().as_ref());
     assert_eq!(result["controls"], json!(["Window (1–50 ms; 15)"]));
     assert!(result["checks"].as_str().unwrap().contains("4 of 4"));
     assert!(result.get("note").is_none());

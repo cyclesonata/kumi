@@ -488,7 +488,7 @@ async fn off_a_mac_ffmpeg_is_fetched_once_checked_against_its_release_checksum_a
     assert!(asked.lock().unwrap().is_empty());
     options.installed_only = false;
     let found = find_ffmpeg(options.clone()).await.unwrap().unwrap();
-    assert_eq!(found, tools.join("ffmpeg/ffmpeg").to_string_lossy());
+    assert_eq!(found, tools.join("ffmpeg").join("ffmpeg").to_string_lossy());
     assert_eq!(std::fs::read_dir(tools.join("ffmpeg")).unwrap().count(), 1);
     #[cfg(unix)]
     {
@@ -556,7 +556,7 @@ async fn the_device_goes_into_the_user_librarys_kumi_folder_once_and_again_only_
     let library = tempfile::tempdir().unwrap();
     let first = install_ears(library.path()).await.unwrap();
     assert!(first.written);
-    assert_eq!(first.file, library.path().join("Kumi/Kumi Ears.amxd").to_string_lossy());
+    assert_eq!(first.file, library.path().join("Kumi").join("Kumi Ears.amxd").to_string_lossy());
     assert!(!install_ears(library.path()).await.unwrap().written);
     std::fs::write(&first.file, "changed").unwrap();
     assert!(install_ears(library.path()).await.unwrap().written);

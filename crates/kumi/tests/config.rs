@@ -207,11 +207,10 @@ fn live_preferences_find_moved_libraries_and_unescape_xml_once() {
     std::fs::create_dir_all(&preferences).unwrap();
     let key = if cfg!(windows) { "APPDATA" } else { "HOME" };
     let env = Env::from([(key.into(), folder.path().to_string_lossy().into_owned())]);
-    for name in ["Big Drive/Music & Samples", "Takes &quot;live&quot;"] {
-        let moved = folder.path().join(name);
+    for moved in [folder.path().join("Big Drive").join("Music & Samples"), folder.path().join("Takes &quot;live&quot;")] {
         std::fs::write(preferences.join("Library.cfg"),format!(r#"<?xml version="1.0"?><Ableton><ContentLibrary><UserLibrary><LibraryProject Id="0"><ProjectLocation /><ProjectName Value="User Library" /><ProjectPath Value="{}" /></LibraryProject></UserLibrary></ContentLibrary></Ableton>"#,moved.to_string_lossy().replace('&',"&amp;"))).unwrap();
         assert_eq!(live_user_library(&env), Some(moved.join("User Library").to_string_lossy().into()));
-        assert_eq!(remote_scripts_dir(&env), moved.join("User Library/Remote Scripts").to_string_lossy());
+        assert_eq!(remote_scripts_dir(&env), moved.join("User Library").join("Remote Scripts").to_string_lossy());
     }
     let mut explicit = env.clone();
     explicit.insert("KUMI_REMOTE_SCRIPTS_DIR".into(), "/chosen/Remote Scripts".into());

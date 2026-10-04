@@ -13,13 +13,24 @@ fn extension_folders_only_use_the_given_environment() {
     assert_eq!(live_extensions_dir(&Env::new(), "darwin"), None);
     assert_eq!(
         live_extensions_dir(&Env::from([("HOME".into(), "/Users/p".into())]), "darwin"),
-        Some("/Users/p/Library/Application Support/Ableton/Extensions".into())
+        // The source's platform argument selects the layout; node:path.join still uses the host's separators.
+        Some(
+            if cfg!(windows) {
+                r"\Users\p\Library\Application Support\Ableton\Extensions"
+            } else {
+                "/Users/p/Library/Application Support/Ableton/Extensions"
+            }
+            .into()
+        )
     );
     let env =
         Env::from([("LOCALAPPDATA".into(), "C:/Users/p/AppData/Local".into()), ("APPDATA".into(), "C:/Users/p/AppData/Roaming".into())]);
     assert_eq!(
         live_extensions_dir(&env, "win32"),
-        Some(kumi_runtime::library::sources::join("C:/Users/p/AppData/Local", "Ableton/Extensions"))
+        Some(
+            if cfg!(windows) { r"C:\Users\p\AppData\Local\Ableton\Extensions" } else { "C:/Users/p/AppData/Local/Ableton/Extensions" }
+                .into()
+        )
     );
     assert_eq!(live_extensions_dir(&Env::from([("APPDATA".into(), "x".into())]), "win32"), None);
     assert_eq!(live_extensions_dir(&Env::from([("HOME".into(), "/home/p".into())]), "linux"), None);
@@ -56,7 +67,7 @@ fn former_windows_extension_is_removed_preserving_other_extensions() {
 #[test]
 fn extension_install_copy_update_noop_and_remove_keep_source_contents() {
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("bridge/live-extension");
+    let source = dir.path().join("bridge").join("live-extension");
     extension(&source, "module.exports = {};\n");
     let source = source.to_str().unwrap();
     let extensions = dir.path().join("Ableton/Extensions");
