@@ -126,19 +126,27 @@ pub async fn ask_yes_no(input: Option<Rc<dyn TerminalInput>>, out: Rc<dyn TtyOut
     input.on_end(Rc::new({
         let send = send.clone();
         let bytes = bytes.clone();
+        let input = Rc::downgrade(&input);
         move || {
             if let Some(send) = send.borrow_mut().take() {
+                if let Some(input) = input.upgrade() {
+                    input.pause();
+                }
                 let _ = send.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
             }
         }
     }));
     input.resume(Rc::new({
         let send = send.clone();
+        let input = Rc::downgrade(&input);
         move |chunk| {
             let end = chunk.iter().position(|b| matches!(b, b'\n' | b'\r'));
             bytes.borrow_mut().extend_from_slice(&chunk[..end.unwrap_or(chunk.len())]);
             if end.is_some() {
                 if let Some(send) = send.borrow_mut().take() {
+                    if let Some(input) = input.upgrade() {
+                        input.pause();
+                    }
                     let _ = send.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
                 }
             }

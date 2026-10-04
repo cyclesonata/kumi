@@ -107,17 +107,25 @@ async fn read_answer(io: &CliIo, prompt: &str) -> String {
     io.input.on_end(Rc::new({
         let tx = tx.clone();
         let bytes = bytes.clone();
+        let input = Rc::downgrade(&io.input);
         move || {
             if let Some(tx) = tx.borrow_mut().take() {
+                if let Some(input) = input.upgrade() {
+                    input.pause();
+                }
                 let _ = tx.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
             }
         }
     }));
+    let input = Rc::downgrade(&io.input);
     io.input.resume(Rc::new(move |data| {
         let end = data.iter().position(|b| matches!(b, b'\n' | b'\r'));
         bytes.borrow_mut().extend_from_slice(&data[..end.unwrap_or(data.len())]);
         if end.is_some() {
             if let Some(tx) = tx.borrow_mut().take() {
+                if let Some(input) = input.upgrade() {
+                    input.pause();
+                }
                 let _ = tx.send(String::from_utf8_lossy(&bytes.borrow()).into_owned());
             }
         }
@@ -336,6 +344,7 @@ async fn dispatch(io: &CliIo, factory: AbletonFactory, secrets: &mut Vec<String>
     }
 }
 async fn update_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
+    io.input.pause();
     io.out.write("\n");
     let updated = if io.installed() {
         install::update_installed(installed_io(io)).await?
@@ -347,6 +356,7 @@ async fn update_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
         return Ok(updated);
     }
     io.out.write("\nOpening Kumi again…\n");
+    io.input.pause();
     if let Some(reopen) = &io.reopen {
         return Ok(reopen().await);
     }

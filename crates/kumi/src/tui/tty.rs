@@ -10,7 +10,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once};
@@ -21,6 +21,9 @@ pub use crate::input::TerminalInput as TtyInput;
 use crate::input::{ByteListener, ErrorListener, RawModeRestorer, Utf8Decoder};
 
 use super::keys::{InputEvent, InputParser};
+
+#[cfg(unix)]
+mod stdin_reader;
 
 #[cfg(any(windows, test))]
 mod windows_input;
@@ -183,8 +186,8 @@ impl Inner {
         } else {
             output.write(RESTORE);
         }
-        let _ = input.set_raw_mode(self.was_raw.get());
         input.pause();
+        let _ = input.set_raw_mode(self.was_raw.get());
     }
 }
 
@@ -272,14 +275,16 @@ struct StdinInner {
     ends: RefCell<Vec<Rc<dyn Fn()>>>,
     errors: RefCell<Vec<ErrorListener>>,
     paused: Cell<bool>,
-    resumed: tokio::sync::Notify,
+    resumed: Arc<tokio::sync::Notify>,
     pending: RefCell<VecDeque<Message>>,
     pump: RefCell<Option<JoinHandle<()>>>,
+    #[cfg(unix)]
+    reader: RefCell<Option<stdin_reader::Reader>>,
 }
 
 /// The process's standard input (Node's `process.stdin`): a thread reads it and bytes reach the
-/// listener on the runtime thread, so a read never blocks Kumi. Pausing holds bytes back, as a
-/// paused Node stream does, until the next `resume`.
+/// listener on the runtime thread, so a read never blocks Kumi. Pausing releases kernel input
+/// ownership; bytes already read wait for the next `resume`.
 #[derive(Clone)]
 pub struct Stdin {
     inner: Rc<StdinInner>,
@@ -301,9 +306,11 @@ impl Stdin {
                 ends: RefCell::new(Vec::new()),
                 errors: RefCell::new(Vec::new()),
                 paused: Cell::new(true),
-                resumed: tokio::sync::Notify::new(),
+                resumed: Arc::new(tokio::sync::Notify::new()),
                 pending: RefCell::new(VecDeque::new()),
                 pump: RefCell::new(None),
+                #[cfg(unix)]
+                reader: RefCell::new(None),
             }),
         }
     }
@@ -336,9 +343,17 @@ impl Stdin {
             return;
         }
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Message>();
+        #[cfg(unix)]
+        {
+            *self.inner.reader.borrow_mut() = Some(stdin_reader::Reader::new(sender).expect("a thread to read the terminal"));
+        }
+        // Windows keeps its existing reader until the console-aware ownership
+        // implementation is integrated. It must not use Unix descriptor polling.
+        #[cfg(windows)]
         std::thread::Builder::new()
             .name("kumi-stdin".into())
             .spawn(move || {
+                use std::io::Read;
                 let mut stdin = std::io::stdin().lock();
                 let mut buffer = [0u8; 4096];
                 loop {
@@ -355,25 +370,37 @@ impl Stdin {
                 }
             })
             .expect("a thread to read the terminal");
-        let inner = Rc::clone(&self.inner);
+        let weak = Rc::downgrade(&self.inner);
+        let resumed = self.inner.resumed.clone();
         let pump = tokio::task::spawn_local(async move {
+            let mut closed = false;
             loop {
-                while !inner.paused.get() {
-                    let next = inner.pending.borrow_mut().pop_front();
-                    match next {
-                        Some(message) => Stdin::deliver(&inner, message),
-                        None => break,
+                {
+                    let Some(inner) = weak.upgrade() else { break };
+                    while !inner.paused.get() {
+                        let next = inner.pending.borrow_mut().pop_front();
+                        let Some(message) = next else { break };
+                        Stdin::deliver(&inner, message);
+                        #[cfg(unix)]
+                        if let Some(reader) = inner.reader.borrow().as_ref() {
+                            reader.acknowledge();
+                        }
+                    }
+                    if closed && inner.pending.borrow().is_empty() {
+                        break;
                     }
                 }
-                if inner.paused.get() {
-                    inner.resumed.notified().await;
-                    continue;
-                }
-                let Some(message) = receiver.recv().await else { break };
-                if inner.paused.get() {
-                    inner.pending.borrow_mut().push_back(message);
-                } else {
-                    Stdin::deliver(&inner, message);
+                tokio::select! {
+                    _ = resumed.notified() => {},
+                    message = receiver.recv(), if !closed => {
+                        match message {
+                            Some(message) => {
+                                let Some(inner) = weak.upgrade() else { break };
+                                inner.pending.borrow_mut().push_back(message);
+                            }
+                            None => closed = true,
+                        }
+                    }
                 }
             }
         });
@@ -400,30 +427,47 @@ impl TtyInput for Stdin {
     }
 
     fn set_raw_mode(&self, enabled: bool) -> std::io::Result<()> {
-        #[cfg(windows)]
-        {
-            self.inner.raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).set(enabled)
-        }
-        #[cfg(not(windows))]
-        {
-            if enabled {
-                crossterm::terminal::enable_raw_mode()
-            } else {
-                crossterm::terminal::disable_raw_mode()
+        let change = || {
+            #[cfg(windows)]
+            {
+                self.inner.raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).set(enabled)
             }
+            #[cfg(not(windows))]
+            {
+                if enabled {
+                    crossterm::terminal::enable_raw_mode()
+                } else {
+                    crossterm::terminal::disable_raw_mode()
+                }
+            }
+        };
+        #[cfg(unix)]
+        match self.inner.reader.borrow().as_ref() {
+            Some(reader) => reader.with_mode(change),
+            None => change(),
         }
+        #[cfg(windows)]
+        change()
     }
 
     fn resume(&self, listener: ByteListener) {
         *self.inner.listener.borrow_mut() = Some(listener);
         self.inner.paused.set(false);
         self.start_pump();
+        #[cfg(unix)]
+        if let Some(reader) = self.inner.reader.borrow().as_ref() {
+            reader.resume();
+        }
         self.inner.resumed.notify_one();
     }
 
     fn pause(&self) {
         self.inner.paused.set(true);
         *self.inner.listener.borrow_mut() = None;
+        #[cfg(unix)]
+        if let Some(reader) = self.inner.reader.borrow().as_ref() {
+            reader.pause();
+        }
     }
 
     fn on_end(&self, listener: Rc<dyn Fn()>) {
@@ -444,10 +488,24 @@ impl TtyInput for Stdin {
         }
         #[cfg(not(windows))]
         {
-            Some(Arc::new(|enabled| {
+            let restore: RawModeRestorer = Arc::new(|enabled| {
                 let _ = if enabled { crossterm::terminal::enable_raw_mode() } else { crossterm::terminal::disable_raw_mode() };
-            }))
+            });
+            Some(match self.inner.reader.borrow().as_ref() {
+                Some(reader) => reader.guard_restorer(restore),
+                None => restore,
+            })
         }
+    }
+}
+
+impl Drop for StdinInner {
+    fn drop(&mut self) {
+        if let Some(pump) = self.pump.get_mut().take() {
+            pump.abort();
+        }
+        #[cfg(unix)]
+        self.reader.get_mut().take();
     }
 }
 
