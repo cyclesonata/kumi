@@ -2,6 +2,15 @@ use super::*;
 fn fixture() -> Value {
     serde_json::from_str(include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/host-capture-oracle.json"))).unwrap()
 }
+#[test]
+fn capture_fixture_normalizes_the_temporary_path_separator() {
+    for (root, path) in [("/tmp/capture", "/tmp/capture/Capture.wav"), (r"C:\Temp\capture", r"C:\Temp\capture\Capture.wav")] {
+        assert_eq!(
+            clean(json!({"clip":{"filePath":path},"other":"keep\\this"}), root),
+            json!({"clip":{"filePath":"$root/Capture.wav"},"other":"keep\\this"})
+        );
+    }
+}
 fn clean(mut value: Value, root: &str) -> Value {
     if let Some(text) = value["result"]["content"][0]["text"].as_str() {
         if let Ok(body) = serde_json::from_str::<Value>(text) {
@@ -19,7 +28,7 @@ fn clean(mut value: Value, root: &str) -> Value {
                 for (k, v) in o {
                     if let Some(s) = v.as_str() {
                         if !root.is_empty() && s.contains(root) {
-                            *v = json!(s.replace(root, "$root"));
+                            *v = json!(s.replace(root, "$root").replace("$root\\", "$root/"));
                         } else if s.starts_with("audio_capture_") {
                             *v = json!("$transaction");
                         } else if s.starts_with("capture_") {
