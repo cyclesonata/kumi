@@ -22,6 +22,9 @@ use crate::input::{ByteListener, ErrorListener, RawModeRestorer, Utf8Decoder};
 
 use super::keys::{InputEvent, InputParser};
 
+#[cfg(any(windows, test))]
+mod windows_input;
+
 /// Writes to the terminal from a crash or exit path, from any thread.
 pub type EmergencyWriter = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -263,6 +266,8 @@ enum Message {
 }
 
 struct StdinInner {
+    #[cfg(windows)]
+    raw_mode: Arc<Mutex<windows_input::RawMode>>,
     listener: RefCell<Option<ByteListener>>,
     ends: RefCell<Vec<Rc<dyn Fn()>>>,
     errors: RefCell<Vec<ErrorListener>>,
@@ -290,6 +295,8 @@ impl Stdin {
     pub fn new() -> Stdin {
         Stdin {
             inner: Rc::new(StdinInner {
+                #[cfg(windows)]
+                raw_mode: Arc::new(Mutex::new(windows_input::RawMode::default())),
                 listener: RefCell::new(None),
                 ends: RefCell::new(Vec::new()),
                 errors: RefCell::new(Vec::new()),
@@ -380,14 +387,30 @@ impl TtyInput for Stdin {
     }
 
     fn is_raw(&self) -> bool {
-        crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
+        #[cfg(windows)]
+        {
+            // Node's stream starts with isRaw=false, even if its inherited console
+            // already has raw flags. The owner preserves that exact inherited mode.
+            self.inner.raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_raw()
+        }
+        #[cfg(not(windows))]
+        {
+            crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
+        }
     }
 
     fn set_raw_mode(&self, enabled: bool) -> std::io::Result<()> {
-        if enabled {
-            crossterm::terminal::enable_raw_mode()
-        } else {
-            crossterm::terminal::disable_raw_mode()
+        #[cfg(windows)]
+        {
+            self.inner.raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).set(enabled)
+        }
+        #[cfg(not(windows))]
+        {
+            if enabled {
+                crossterm::terminal::enable_raw_mode()
+            } else {
+                crossterm::terminal::disable_raw_mode()
+            }
         }
     }
 
@@ -412,9 +435,19 @@ impl TtyInput for Stdin {
     }
 
     fn emergency_raw_mode(&self) -> Option<RawModeRestorer> {
-        Some(Arc::new(|enabled| {
-            let _ = if enabled { crossterm::terminal::enable_raw_mode() } else { crossterm::terminal::disable_raw_mode() };
-        }))
+        #[cfg(windows)]
+        {
+            let raw_mode = self.inner.raw_mode.clone();
+            Some(Arc::new(move |was_raw| {
+                let _ = raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).restore(was_raw);
+            }))
+        }
+        #[cfg(not(windows))]
+        {
+            Some(Arc::new(|enabled| {
+                let _ = if enabled { crossterm::terminal::enable_raw_mode() } else { crossterm::terminal::disable_raw_mode() };
+            }))
+        }
     }
 }
 
