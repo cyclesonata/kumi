@@ -22,7 +22,6 @@ use crate::input::{ByteListener, ErrorListener, RawModeRestorer, Utf8Decoder};
 
 use super::keys::{InputEvent, InputParser};
 
-#[cfg(unix)]
 mod stdin_reader;
 
 #[cfg(any(windows, test))]
@@ -278,7 +277,6 @@ struct StdinInner {
     resumed: Arc<tokio::sync::Notify>,
     pending: RefCell<VecDeque<Message>>,
     pump: RefCell<Option<JoinHandle<()>>>,
-    #[cfg(unix)]
     reader: RefCell<Option<stdin_reader::Reader>>,
 }
 
@@ -309,7 +307,6 @@ impl Stdin {
                 resumed: Arc::new(tokio::sync::Notify::new()),
                 pending: RefCell::new(VecDeque::new()),
                 pump: RefCell::new(None),
-                #[cfg(unix)]
                 reader: RefCell::new(None),
             }),
         }
@@ -343,33 +340,15 @@ impl Stdin {
             return;
         }
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Message>();
-        #[cfg(unix)]
-        {
-            *self.inner.reader.borrow_mut() = Some(stdin_reader::Reader::new(sender).expect("a thread to read the terminal"));
+        match stdin_reader::Reader::new(sender.clone()) {
+            Ok(reader) => *self.inner.reader.borrow_mut() = Some(reader),
+            Err(error) => {
+                // A missing/disconnected standard handle is a stream error, just
+                // like a failed read. Deliver it once through the ordinary pump.
+                let _ = sender.send(Message::Error(error));
+            }
         }
-        // Windows keeps its existing reader until the console-aware ownership
-        // implementation is integrated. It must not use Unix descriptor polling.
-        #[cfg(windows)]
-        std::thread::Builder::new()
-            .name("kumi-stdin".into())
-            .spawn(move || {
-                use std::io::Read;
-                let mut stdin = std::io::stdin().lock();
-                let mut buffer = [0u8; 4096];
-                loop {
-                    let message = match stdin.read(&mut buffer) {
-                        Ok(0) => Message::End,
-                        Ok(count) => Message::Data(buffer[..count].to_vec()),
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(error) => Message::Error(error),
-                    };
-                    let done = !matches!(message, Message::Data(_));
-                    if sender.send(message).is_err() || done {
-                        break;
-                    }
-                }
-            })
-            .expect("a thread to read the terminal");
+        drop(sender);
         let weak = Rc::downgrade(&self.inner);
         let resumed = self.inner.resumed.clone();
         let pump = tokio::task::spawn_local(async move {
@@ -381,7 +360,6 @@ impl Stdin {
                         let next = inner.pending.borrow_mut().pop_front();
                         let Some(message) = next else { break };
                         Stdin::deliver(&inner, message);
-                        #[cfg(unix)]
                         if let Some(reader) = inner.reader.borrow().as_ref() {
                             reader.acknowledge();
                         }
@@ -441,20 +419,16 @@ impl TtyInput for Stdin {
                 }
             }
         };
-        #[cfg(unix)]
         match self.inner.reader.borrow().as_ref() {
             Some(reader) => reader.with_mode(change),
             None => change(),
         }
-        #[cfg(windows)]
-        change()
     }
 
     fn resume(&self, listener: ByteListener) {
         *self.inner.listener.borrow_mut() = Some(listener);
         self.inner.paused.set(false);
         self.start_pump();
-        #[cfg(unix)]
         if let Some(reader) = self.inner.reader.borrow().as_ref() {
             reader.resume();
         }
@@ -464,7 +438,6 @@ impl TtyInput for Stdin {
     fn pause(&self) {
         self.inner.paused.set(true);
         *self.inner.listener.borrow_mut() = None;
-        #[cfg(unix)]
         if let Some(reader) = self.inner.reader.borrow().as_ref() {
             reader.pause();
         }
@@ -480,22 +453,20 @@ impl TtyInput for Stdin {
 
     fn emergency_raw_mode(&self) -> Option<RawModeRestorer> {
         #[cfg(windows)]
-        {
+        let restore: RawModeRestorer = {
             let raw_mode = self.inner.raw_mode.clone();
-            Some(Arc::new(move |was_raw| {
+            Arc::new(move |was_raw| {
                 let _ = raw_mode.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).restore(was_raw);
-            }))
-        }
-        #[cfg(not(windows))]
-        {
-            let restore: RawModeRestorer = Arc::new(|enabled| {
-                let _ = if enabled { crossterm::terminal::enable_raw_mode() } else { crossterm::terminal::disable_raw_mode() };
-            });
-            Some(match self.inner.reader.borrow().as_ref() {
-                Some(reader) => reader.guard_restorer(restore),
-                None => restore,
             })
-        }
+        };
+        #[cfg(not(windows))]
+        let restore: RawModeRestorer = Arc::new(|enabled| {
+            let _ = if enabled { crossterm::terminal::enable_raw_mode() } else { crossterm::terminal::disable_raw_mode() };
+        });
+        Some(match self.inner.reader.borrow().as_ref() {
+            Some(reader) => reader.guard_restorer(restore),
+            None => restore,
+        })
     }
 }
 
@@ -504,7 +475,6 @@ impl Drop for StdinInner {
         if let Some(pump) = self.pump.get_mut().take() {
             pump.abort();
         }
-        #[cfg(unix)]
         self.reader.get_mut().take();
     }
 }

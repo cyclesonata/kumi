@@ -1,5 +1,3 @@
-#![cfg(unix)] // The common pipe cases will also run on Windows with its reader integration.
-
 use std::cell::{Cell, RefCell};
 use std::io::{BufRead, Read, Write};
 use std::process::{Child, Command, Stdio};
