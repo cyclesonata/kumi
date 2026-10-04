@@ -934,7 +934,7 @@ pub struct Clip {
     pub kind: ClipKind,
     pub start: f64,
     pub length: f64,
-    pub notes: Vec<Note>,
+    pub notes: Vec<ObservedObject<Note>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_revision: Option<String>,
     pub warp: bool,
