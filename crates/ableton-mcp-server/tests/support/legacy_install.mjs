@@ -17,6 +17,9 @@ function compile(name){
 }
 for(const name of ['delivery','live','lifecycle'])compile(name+'.ts');
 let source=fs.readFileSync('apps/mcp-server/test/lifecycle.test.ts','utf8').split('test("lifecycle plan is')[0];
+// Use the source's secure writer for the preexisting user-owned secret too.
+// A mode of 0600 alone does not remove inherited Windows access rules.
+source=source.replace('import { secretPermissions }','import { secretPermissions, writeSecretFile }');
 for(const name of ['delivery','live','lifecycle'])source=source.replaceAll(`"../src/${name}.js"`,JSON.stringify(pathToFileURL(path.join(packageRoot,`dist/src/${name}.js`)).href));
 source=source.replace('new URL("../../../../LICENSE.md", import.meta.url)',JSON.stringify(path.join(root,'LICENSE.md')));
 source+=`
@@ -33,7 +36,7 @@ if(input.clean){
 const stateDirectory=join(input.root,'State ü space');
 const custom=join(input.root,'Custom configuration ü');mkdirSync(custom,{recursive:true});chmodSync(custom,0o700);
 const overrides=input.custom?{configPath:join(custom,'owner config.json'),secretPath:join(custom,'owner secret.key')}:{};
-if(input.custom){writeFileSync(overrides.secretPath,'a'.repeat(64)+'\\n',{mode:0o600});}
+if(input.custom){writeSecretFile(overrides.secretPath,'a'.repeat(64));assert.equal(secretPermissions(overrides.secretPath),'owner-only');}
 const options=await withPorts(lifecycleOptions(input.root,packageRoot,'install',{timeoutMs:1379,enableBridgeDiagnostics:true,allowDirtyPrivateBuild:!input.clean,...overrides}));
 const installed=await runLifecycle(options);
 export default {options,installed,receipt:receipt(options)};
