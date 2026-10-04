@@ -1,5 +1,6 @@
 //! Port of `packages/runtime/src/hands/index.ts`.
 pub mod mac;
+mod paths;
 pub mod windows;
 use crate::system;
 use async_trait::async_trait;
@@ -147,7 +148,7 @@ fn compiler_present() -> bool {
 pub fn can_build_hands() -> bool {
     system::platform() == "darwin" && compiler_present()
 }
-/// A release carries the signed helper beside its executable in `hands/`; the cache uses the same source hash.
+/// Keep the carried helper at its legacy path; the cache uses the same source hash.
 pub async fn mac_helper(options: MacHelperOptions) -> Result<Option<String>, HandsError> {
     if let Ok(path) = std::env::var("KUMI_HANDS") {
         if !path.is_empty() {
@@ -156,7 +157,7 @@ pub async fn mac_helper(options: MacHelperOptions) -> Result<Option<String>, Han
     }
     let hash = digest(mac::MAC_SOURCE);
     let name = format!("kumi-hands-{hash}");
-    let carried = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.join("hands").join(&name)));
+    let carried = std::env::current_exe().ok().and_then(|p| paths::carried_helper(&p, &name));
     if let Some(carried) = carried.filter(|p| p.exists()) {
         #[cfg(unix)]
         {

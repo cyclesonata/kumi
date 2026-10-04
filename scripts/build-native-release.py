@@ -197,6 +197,21 @@ def archive(folder: Path, destination: Path, prefix: str, timestamp: int) -> str
                         tar.addfile(entry, content)
     return digest(destination)
 
+def stage_hands(root: Path, bundle: Path, target: str) -> None:
+    name = "kumi-hands-" + digest(root / "crates/kumi-runtime/src/hands/KumiHands.swift")[:12]
+    hands = root / "packages/runtime/hands"
+    files = inventory(hands) if hands.exists() else {}
+    if any(candidate != name for candidate in files):
+        raise ValueError(f"hands helper payload must match the current source: {name}")
+    if name not in files:
+        if target.endswith("-apple-darwin"):
+            raise ValueError(f"macOS release requires {hands / name}; run python3 scripts/build-hands.py first")
+        return
+    # Keep the installed path used by the JavaScript release's Accessibility helper.
+    destination = bundle / "packages/runtime/hands" / name
+    copy(hands / name, destination)
+    destination.chmod(0o755)
+
 def build_release(root: Path, binaries: Path, out: Path, target: str, source: dict, builder: dict, recipe: str, bridge_only=False) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     extension = ".exe" if "windows" in target else ""
@@ -222,13 +237,7 @@ def build_release(root: Path, binaries: Path, out: Path, target: str, source: di
             (bundle / f"{name}{extension}").chmod(0o755)
         for folder in ("remote-script", "live-extension"):
             shutil.copytree(package / folder, bundle / folder)
-        hands = root / "packages/runtime/hands"
-        if hands.exists():
-            for name in inventory(hands):
-                if not re.fullmatch(r"kumi-hands-[0-9a-f]{12}", name):
-                    raise ValueError(f"unknown hands helper payload: {name}")
-                copy(hands / name, bundle / "hands" / name)
-                (bundle / "hands" / name).chmod(0o755)
+        stage_hands(root, bundle, target)
         version = tomllib.loads((root / "crates/kumi/Cargo.toml").read_text())["package"]["version"]
         metadata = {"name": "kumi", "version": version, "bridge": manifest["package"]["version"], "runtime": "rust-native", "target": target}
         json_write(bundle / "package.json", metadata)

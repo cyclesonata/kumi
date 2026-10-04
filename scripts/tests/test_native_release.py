@@ -3,12 +3,14 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import tomllib
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("native_release", Path(__file__).parents[1] / "build-native-release.py")
 release = importlib.util.module_from_spec(SPEC)
@@ -60,6 +62,55 @@ class NativeRelease(unittest.TestCase):
         self.assertEqual(read_json("apps/mcp-server/package.json")["version"], bridge)
         self.assertEqual(next(p["version"] for p in cargo_lock if p["name"] == "ableton-mcp-server"), bridge)
 
+    def helper_source(self):
+        source = self.root / "crates/kumi-runtime/src/hands/KumiHands.swift"
+        source.parent.mkdir(parents=True)
+        source.write_text("source fixture")
+        return "kumi-hands-" + release.digest(source)[:12]
+
+    def test_mac_release_requires_current_source_helper_and_preserves_legacy_path(self):
+        name = self.helper_source()
+        bundle = self.root / "bundle"
+        with self.assertRaisesRegex(ValueError, "run python3 scripts/build-hands.py first"):
+            release.stage_hands(self.root, bundle, "aarch64-apple-darwin")
+        helper = self.root / "packages/runtime/hands" / name
+        helper.parent.mkdir(parents=True)
+        helper.write_bytes(b"signed universal fixture")
+        release.stage_hands(self.root, bundle, "aarch64-apple-darwin")
+        destination = bundle / "packages/runtime/hands" / name
+        self.assertEqual(destination.read_bytes(), helper.read_bytes())
+        if os.name != "nt":
+            self.assertEqual(destination.stat().st_mode & 0o777, 0o755)
+        self.assertFalse((bundle / "hands").exists())
+
+    def test_mac_release_rejects_stale_source_names_and_linked_helpers(self):
+        name = self.helper_source()
+        hands = self.root / "packages/runtime/hands"
+        hands.mkdir(parents=True)
+        stale = hands / "kumi-hands-000000000000"
+        stale.write_bytes(b"old helper")
+        with self.assertRaisesRegex(ValueError, "current source"):
+            release.stage_hands(self.root, self.root / "bundle", "x86_64-apple-darwin")
+        stale.unlink()
+        target = self.root / "linked-target"
+        target.write_bytes(b"linked helper")
+        try:
+            (hands / name).symlink_to(target)
+        except OSError:
+            return  # Windows runners may not grant symlink creation.
+        with self.assertRaisesRegex(ValueError, "link or special file"):
+            release.stage_hands(self.root, self.root / "bundle", "aarch64-apple-darwin")
+
+    def test_non_mac_and_bridge_only_releases_do_not_require_hands(self):
+        self.helper_source()
+        for target in ("x86_64-unknown-linux-gnu", "aarch64-pc-windows-msvc"):
+            release.stage_hands(self.root, self.root / "bundle", target)
+        self.assertFalse((self.root / "bundle").exists())
+        with patch.object(release, "stage_hands", side_effect=AssertionError("bridge-only called hands staging")):
+            result = release.build_release(release.ROOT, self.binaries, self.root / "bridge", "aarch64-apple-darwin",
+                                           self.source, self.builder, "fixture", bridge_only=True)
+        self.assertEqual(result["manifest"]["build"]["target"], "aarch64-apple-darwin")
+
     def test_native_bundle_has_exact_manifest_bound_bridge_and_no_node_runtime(self):
         out = self.root / "release"
         result = self.build(out)
@@ -72,6 +123,13 @@ class NativeRelease(unittest.TestCase):
             names = tar.getnames()
             self.assertTrue(all(binary in names for binary in release.BINARIES))
             self.assertIn("apps/kumi/bin/kumi.mjs", names)
+            helper_name = "kumi-hands-" + release.digest(release.ROOT / "crates/kumi-runtime/src/hands/KumiHands.swift")[:12]
+            source_helper = release.ROOT / "packages/runtime/hands" / helper_name
+            if source_helper.is_file():
+                helper_path = "packages/runtime/hands/" + helper_name
+                self.assertEqual(tar.extractfile(helper_path).read(), source_helper.read_bytes())
+                self.assertEqual(tar.getmember(helper_path).mode, 0o755)
+                self.assertNotIn("hands/" + helper_name, names)
             self.assertEqual(json.load(tar.extractfile("apps/mcp-server/package.json"))["version"], result["bridge"])
             self.assertFalse(any("node_modules" in name or name.startswith("node/") for name in names))
             prepared = json.load(tar.extractfile("bridge/prepared.json"))

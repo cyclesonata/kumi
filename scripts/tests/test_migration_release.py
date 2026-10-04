@@ -264,6 +264,17 @@ class MigrationRelease(unittest.TestCase):
         self.assertNotIn("sk-ant-existing", status)
         self.assertFalse((home / "node").exists(), "native commands must work without a bundled Node runtime")
         self.check_existing_data(home, markers)
+        if platform.system() == "Darwin":
+            source = release.native.ROOT / "crates/kumi-runtime/src/hands/KumiHands.swift"
+            helper = app / "packages/runtime/hands" / ("kumi-hands-" + release.native.digest(source)[:12])
+            self.assertTrue(helper.is_file(), "the signed helper retains its legacy installed path")
+            subprocess.run(["codesign", "--verify", "--strict", str(helper)], check=True, capture_output=True)
+            self.assertEqual(set(subprocess.check_output(["lipo", "-archs", str(helper)], text=True).split()), {"arm64", "x86_64"})
+            replies = [json.loads(line) for line in self.launched(helper, env, input=
+                '{"id":1,"op":"version"}\n{"id":2,"op":"trusted","prompt":false}\n').splitlines()]
+            self.assertEqual([(reply["id"], reply["ok"]) for reply in replies], [(1, True), (2, True)])
+            self.assertEqual(replies[0]["version"], 2)
+            self.assertIsInstance(replies[1]["trusted"], bool)  # No prompt or Live operation; permission continuity needs a real terminal.
         suffix = ".exe" if os.name == "nt" else ""
         self.assertIn(manifest["bridge"], self.launched(app / ("ableton-mcp-server" + suffix), env, "--version"))
         requests = [
