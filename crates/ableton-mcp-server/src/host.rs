@@ -10,13 +10,15 @@ pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
 pub mod mutations;
-mod project;
-mod probes;
 mod probe_library;
+mod probes;
+mod project;
 mod protocol;
 mod reads;
+mod recovery;
 mod resources;
 pub mod retention;
+mod tempo;
 
 use crate::{
     live::*,
@@ -61,6 +63,9 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    undo_recovery_plans: RefCell<Vec<recovery::RecoveryPlan>>,
+    undo_refusals: RefCell<std::collections::HashMap<String, recovery::UndoRefusal>>,
+    undo_watches: RefCell<Vec<Rc<Cell<usize>>>>,
     in_flight_mutations: RefCell<std::collections::HashMap<String, Rc<mutations::MutationFlight>>>,
     open_undo_step: RefCell<Option<Value>>,
     song_history_calls: RefCell<VecDeque<(String, Value)>>,
@@ -131,6 +136,9 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            undo_recovery_plans: RefCell::new(Vec::new()),
+            undo_refusals: RefCell::new(Default::default()),
+            undo_watches: RefCell::new(Vec::new()),
             in_flight_mutations: RefCell::new(Default::default()),
             open_undo_step: RefCell::new(None),
             song_history_calls: RefCell::new(VecDeque::new()),

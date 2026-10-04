@@ -75,6 +75,9 @@ fn file_authority(path: &Value, root: &Value) -> Result<(PathBuf, PathBuf), Live
     Ok((path, root))
 }
 impl McpHost {
+    pub(super) fn has_semantic_export(&self, id: &str) -> bool {
+        self.semantic_exports.borrow().iter().any(|row| row.artifact["artifact"]["id"] == id)
+    }
     pub async fn dispatch_project_tool(&self, call: &ToolCall, signal: Option<&Signal>) -> Option<Result<Value, LiveError>> {
         if !call.asynchronous {
             return None;
