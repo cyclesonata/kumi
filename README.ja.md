@@ -6,7 +6,7 @@
   <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
   <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
-  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <img alt="Native Rust runtime" src="https://img.shields.io/badge/runtime-native%20Rust-555555">
   <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -37,7 +37,7 @@
 
 ## はじめかた
 
-macOS 13 以降、または Windows 10・11 上の Ableton Live 12 が必要です。Live 12.4 以降では、右クリックメニュー、アレンジメントへの MIDI の直接書き込み、オフラインレンダリングが加わります。Max for Live デバイスを作るには Max for Live（Live Suite、またはアドオンを追加した Standard）が必要です。Node は Kumi が自分で用意します。
+macOS 13 以降、または Windows 10・11 上の Ableton Live 12 が必要です。Live 12.4 以降では、右クリックメニュー、アレンジメントへの MIDI の直接書き込み、オフラインレンダリングが加わります。Max for Live デバイスを作るには Max for Live（Live Suite、またはアドオンを追加した Standard）が必要です。Kumi はネイティブアプリとして動作します。
 
 **macOS：** ターミナルを開いて貼り付けます。
 
@@ -75,20 +75,27 @@ Kumi 1.7.4 は macOS 上の Ableton Live 12.4（ベータ）で確認してい�
 
 ## 開発
 
-このリポジトリのコピーで、Node.js 22 または 24 を使います。
+このチェックアウトは Rust と Cargo でビルドします。
 
 ```sh
-npm run setup     # インストールとビルド
-npm run kumi      # 実行（npm run kumi -- bridge、-- doctor など）
-npm run typecheck
-npm test          # Live もサインインも不要
+cargo build --release --locked --workspace --bins
+cargo run --release -p kumi --        # -- の後に bridge、doctor などを追加
+sh scripts/test-isolated.sh          # Live もサインインも不要
 ```
+
+従来の `npm run setup` と `npm run kumi -- ...` も使えます。Cargo がある場合はこのチェックアウトを
+ビルドして実行します。Cargo がない場合は、同じバージョンの公開済みネイティブ版をインストールして
+実行します。`~/.kumi` の設定、サインイン、会話、ライブラリーはそのままです。
+以後は `kumi` でネイティブ版を直接起動できます。
+
+TypeScript は互換性を検証する参照実装として残しています。その `npm ci`、`npm run build`、
+`npm run typecheck`、`npm test` には Node.js 22 または 24 を使います。
 
 | フォルダー | 内容 |
 | --- | --- |
-| `apps/kumi` | ターミナルアプリと `kumi` コマンド |
-| `packages/runtime` | Kumi のエージェントコア：モデルのプロバイダー、メモリー、音声解析、ビデオ、ウェブ、Live との連携 |
-| `apps/mcp-server` | ブリッジ：Kumi が起動するローカルの MCP サーバー。ほかの MCP クライアントからも単独で使えます（[ブリッジのガイド（英語）](apps/mcp-server/README.md)） |
+| `crates/kumi` | ターミナルアプリと `kumi` コマンド |
+| `crates/kumi-runtime` | Kumi のエージェントコア：モデルのプロバイダー、メモリー、音声解析、ビデオ、ウェブ、Live との連携 |
+| `crates/ableton-mcp-server` | ブリッジ：Kumi が起動するローカルの MCP サーバー。ほかの MCP クライアントからも単独で使えます（[ブリッジのガイド（英語）](apps/mcp-server/README.md)） |
 | `remote-script` | Live の中で動く、ブリッジの Remote Script |
 | `apps/live-extension` | Kumi の Live 拡張機能（Live 12.4 以降） |
 | `protocol` | ブリッジと Remote Script が共有する操作の一覧 |

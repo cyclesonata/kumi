@@ -103,6 +103,59 @@ class MigrationRelease(unittest.TestCase):
             server.server_close()
             thread.join()
 
+    def test_npm_command_with_cargo_builds_this_checkout_and_forwards_arguments(self):
+        tools = self.root / "tools"
+        tools.mkdir()
+        fixture = self.root / "cargo.rs"
+        fixture.write_text('''use std::{env,fs::OpenOptions,io::Write}; fn main() { let args: Vec<_> = env::args().skip(1).collect(); let mut file = OpenOptions::new().create(true).append(true).open(env::var("KUMI_SHIM_LOG").unwrap()).unwrap(); writeln!(file,"{}",args.join("|" )).unwrap(); if args.first().map(String::as_str)==Some("run") { println!("checkout native fixture"); assert!(env::var("KUMI_INSTALLED").is_err()); } }''')
+        cargo = tools / ("cargo.exe" if os.name == "nt" else "cargo")
+        subprocess.run(["rustc", str(fixture), "-C", "debuginfo=0", "-o", str(cargo)], check=True)
+        log = self.root / "cargo.log"
+        env = dict(os.environ, PATH=str(tools) + os.pathsep + os.environ["PATH"], KUMI_SHIM_LOG=str(log), KUMI_INSTALLED="1")
+        env.pop("KUMI_REFERENCE_RUNTIME", None)
+        result = subprocess.run(["node", str(release.native.ROOT / "scripts/native-kumi.mjs"), "--model", "a model with spaces"], env=env, cwd=self.root, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("checkout native fixture", result.stdout)
+        self.assertEqual(log.read_text().splitlines(), ["--version", "build|--quiet|--release|--locked|--workspace|--bins", "run|--quiet|--release|--locked|-p|kumi|--|--model|a model with spaces"])
+
+    def test_reference_switch_is_confined_to_npm_shim_and_skips_native_acquisition(self):
+        checkout = self.root / "reference checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copyfile(release.native.ROOT / "scripts/native-kumi.mjs", checkout / "scripts/native-kumi.mjs")
+        entry = checkout / "apps/kumi/bin/kumi.mjs"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("console.log('reference fixture: ' + process.argv.slice(2).join('|'))")
+        result = subprocess.run(["node", str(checkout / "scripts/native-kumi.mjs"), "--help"], env=dict(os.environ, KUMI_REFERENCE_RUNTIME="1"), capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "reference fixture: --help\n")
+
+    @unittest.skipIf(os.name == "nt", "PowerShell acquisition is exercised by installer CI")
+    def test_npm_only_handoff_installs_native_without_rust_or_moving_credentials(self):
+        class Quiet(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(Quiet, directory=str(self.out)))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            home = self.root / "npm-only home"
+            home.mkdir()
+            (home / "auth.json").write_text('{"version":1,"credentials":{"fixture":"unchanged"}}')
+            env = dict(os.environ, KUMI_HOME=str(home), KUMI_RELEASES=f"http://127.0.0.1:{server.server_port}",
+                       KUMI_NO_MODIFY_PATH="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+            env.pop("KUMI_REFERENCE_RUNTIME", None)
+            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "--setup"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("switching this npm installation to the native release", result.stdout)
+            self.assertEqual((home / "auth.json").read_text(), '{"version":1,"credentials":{"fixture":"unchanged"}}')
+            result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "argument with spaces"], env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "native fixture: argument with spaces\n")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join()
+
     @unittest.skipUnless(os.environ.get("KUMI_NATIVE_RELEASES"), "built release interoperability runs in installer CI")
     def test_actual_built_release_with_authoritative_old_updater(self):
         reference = Path(os.environ.get("KUMI_TS_REFERENCE", release.native.ROOT)) / "apps/kumi/dist/src/install.js"
