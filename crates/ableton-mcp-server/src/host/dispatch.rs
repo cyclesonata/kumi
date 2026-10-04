@@ -152,6 +152,10 @@ impl McpHost {
             optional!(dispatch_midi_transform_tool);
             optional!(dispatch_advanced_device_tool);
             optional!(dispatch_willington_tool);
+            optional!(dispatch_fire_button_tool);
+            optional!(dispatch_specialized_device_tool);
+            optional!(dispatch_looper_tool);
+            optional!(dispatch_groove_tool);
             optional!(dispatch_tuning_tool);
             optional!(dispatch_simpler_tool);
             optional!(dispatch_clip_properties_tool);
@@ -363,6 +367,18 @@ impl McpHost {
             }
             if tx.starts_with("willington_") {
                 return Ok(self.undo_willington_async(id, params, signal).await);
+            }
+            if tx.starts_with("firebutton_") {
+                return Ok(self.undo_fire_button(id));
+            }
+            if tx.starts_with("devspec_") {
+                return Ok(self.undo_specialized_device_async(id, params, signal).await);
+            }
+            if tx.starts_with("looper_") {
+                return Ok(self.undo_looper_async(id, params, signal).await);
+            }
+            if tx.starts_with("groove_") {
+                return Ok(self.undo_groove_async(id, params, signal).await);
             }
             if tx.starts_with("tuning_") {
                 return Ok(self.undo_tuning_async(id, params, signal).await);
