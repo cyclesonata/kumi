@@ -64,27 +64,49 @@ class MigrationRelease(unittest.TestCase):
             archive.extractall(folder, filter="data")
         return folder / "apps/kumi/bin/kumi.mjs"
 
+    def shim(self, entry, *args, releases):
+        return subprocess.run(["node", str(entry), *args], capture_output=True, text=True, encoding="utf-8",
+                              env=dict(os.environ, KUMI_RELEASES=releases))
+
     def test_index_and_archive_are_bound_and_old_probe_materializes_native_once(self):
         self.assertEqual(release.native.digest(self.out / "kumi.tar.gz"), self.index["sha256"])
         self.assertEqual(self.index["node"], self.node)
         self.assertEqual(json.loads((self.out / f"kumi-release-{self.target}.json").read_text(encoding="utf-8")), self.index["targets"][self.target])
         app = self.root / "app.new"
         entry = self.unpack(app)
-        first = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(first.stdout, "Kumi 99.0.0\n")
-        self.assertTrue((app / self.binary).is_file())
-        self.assertFalse((app / "native").exists())
-        again = subprocess.run(["node", str(entry), "argument with spaces", "--model=example"], capture_output=True, text=True, encoding="utf-8")
+        with self.release_server(self.out) as base:
+            first = self.shim(entry, "--version", releases=base)
+            self.assertEqual(first.returncode, 0, first.stderr)
+            self.assertEqual(first.stdout, "Kumi 99.0.0\n")
+            self.assertTrue((app / self.binary).is_file())
+            self.assertEqual(sorted(path.name for path in app.iterdir() if path.name.startswith(".native")), [])
+            # Materialized once: a second launch neither downloads nor needs the server.
+            again = self.shim(entry, "argument with spaces", "--model=example", releases="http://127.0.0.1:9")
         self.assertEqual(again.stdout, "native fixture: argument with spaces|--model=example\n")
         self.assertEqual(again.returncode, 0, again.stderr)
+
+    def test_compatibility_bundle_carries_where_targets_are_not_the_targets(self):
+        # Old updaters read kumi.tar.gz whole into memory under a fixed timeout: it stays small.
+        with tarfile.open(self.out / "kumi.tar.gz") as archive:
+            names = archive.getnames()
+            targets = json.load(archive.extractfile("native-targets.json"))
+        self.assertFalse([name for name in names if name.endswith(".tar.gz") or name.startswith("native/")], names)
+        self.assertEqual(targets["releases"], "https://github.com/user1303836/kumi/releases/download/v99.0.0")
+        self.assertEqual(targets["targets"], self.index["targets"])
+        self.assertLess((self.out / "kumi.tar.gz").stat().st_size, 64 * 1024)
+        mirrored = release.build([self.manifest], self.root / "mirror", self.node, release_base="https://mirror.example/kumi/")
+        with tarfile.open(self.root / "mirror" / "kumi.tar.gz") as archive:
+            self.assertEqual(json.load(archive.extractfile("native-targets.json"))["releases"], "https://mirror.example/kumi")
+        self.assertEqual(mirrored["targets"], self.index["targets"])
 
     def test_checksum_failure_keeps_unstaged_app_and_aggregator_rejects_tampered_input(self):
         app = self.root / "app.new"
         entry = self.unpack(app)
-        archive = next((app / "native").iterdir())
-        archive.write_bytes(b"tampered")
-        result = subprocess.run(["node", str(entry), "--version"], capture_output=True, text=True, encoding="utf-8")
+        served = self.root / "served"
+        shutil.copytree(self.out, served)
+        (served / self.index["targets"][self.target]["bundle"]).write_bytes(b"tampered")
+        with self.release_server(served) as base:
+            result = self.shim(entry, "--version", releases=base)
         self.assertEqual(result.returncode, 1)
         self.assertIn("checksum", result.stderr)
         self.assertFalse((app / self.binary).exists())
@@ -92,6 +114,21 @@ class MigrationRelease(unittest.TestCase):
         (self.manifest.parent / original["bundle"]).write_bytes(b"tampered")
         with self.assertRaisesRegex(ValueError, "checksum"):
             release.build([self.manifest], self.out, self.node)
+
+    def test_unreachable_archive_keeps_unstaged_app_and_says_so(self):
+        app = self.root / "app.new"
+        entry = self.unpack(app)
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.release_server(empty) as base:
+            missing = self.shim(entry, "--version", releases=base)
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("Could not download the native Kumi (HTTP 404)", missing.stderr)
+        offline = self.shim(entry, "--version", releases="http://127.0.0.1:9")
+        self.assertEqual(offline.returncode, 1)
+        self.assertIn("Could not download the native Kumi", offline.stderr)
+        self.assertFalse((app / self.binary).exists())
+        self.assertEqual(sorted(path.name for path in app.iterdir() if path.name.startswith(".native")), [])
 
     @unittest.skipIf(os.name == "nt", "Unix installer; Windows PowerShell runs in the installer workflow")
     def test_fresh_unix_installer_uses_native_target_without_node_and_preserves_repair_rollback(self):

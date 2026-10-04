@@ -263,8 +263,8 @@ proof also needs the built TypeScript app and bridge reference; for the
 1.7.5-to-native transition, its compiled `packages/runtime/dist/src/version.js`
 must retain `KUMI_VERSION = "1.7.5"` as the workflow does. Run this proof with
 Node 24 and require all artifact tests to run. Fresh installs select a native
-target and do not download Node. Existing Node 24 installations unpack the native
-bundle through a compatibility bootstrap during `kumi update`. The managed Node
+target and do not download Node. Existing Node 24 installations get a small compatibility
+bootstrap during `kumi update`, which downloads and unpacks only their platform's native bundle. The managed Node
 remains for rollback, optional YouTube challenges and the existing Windows
 launcher, which forwards commands to native Kumi until the installer is rerun. Older Node majors may require rerunning the
 installer with the same `KUMI_HOME`.

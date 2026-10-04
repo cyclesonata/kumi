@@ -15,7 +15,10 @@ native = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(native)
 
 
-def build(inputs: list[Path], out: Path, node: str, timestamp: int = 0) -> dict:
+def build(inputs: list[Path], out: Path, node: str, timestamp: int = 0, release_base: str | None = None) -> dict:
+    """The compatibility bundle holds only the adapter and where each target's archive is published:
+    old updaters download kumi.tar.gz whole into memory, so it stays the size of a JavaScript release,
+    and the adapter fetches the one archive its platform needs."""
     if not re.fullmatch(r"\d+\.\d+\.\d+", node):
         raise ValueError("legacy updater compatibility requires an exact Node version")
     releases = {}
@@ -41,6 +44,9 @@ def build(inputs: list[Path], out: Path, node: str, timestamp: int = 0) -> dict:
         raise ValueError("all targets must have the same Kumi and bridge versions")
     version, bridge = versions.pop()
     targets = {target: item[0] for target, item in sorted(releases.items())}
+    base = (release_base or f"https://github.com/user1303836/kumi/releases/download/v{version}").rstrip("/")
+    if not re.fullmatch(r"https?://[^\s]+", base):
+        raise ValueError("unsafe release base")
     out.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="kumi-migration-", dir=out) as directory:
         stage = Path(directory)
@@ -48,9 +54,8 @@ def build(inputs: list[Path], out: Path, node: str, timestamp: int = 0) -> dict:
         native.copy(native.ROOT / "scripts/migration/kumi.mjs", payload / "apps/kumi/bin/kumi.mjs")
         native.json_write(payload / "package.json", {"name": "kumi", "version": version, "bridge": bridge, "runtime": "native-migration"})
         native.json_write(payload / "apps/mcp-server/package.json", {"version": bridge})
-        native.json_write(payload / "native-targets.json", {"targets": targets})
+        native.json_write(payload / "native-targets.json", {"releases": base, "targets": targets})
         for target, (release, archive) in releases.items():
-            native.copy(archive, payload / "native" / release["bundle"])
             shutil.copyfile(archive, stage / release["bundle"])
             native.json_write(stage / f"kumi-release-{target}.json", release)
         digest = native.archive(payload, stage / "kumi.tar.gz", "", timestamp)
@@ -69,8 +74,9 @@ def main():
     parser.add_argument("manifests", type=Path, nargs="+")
     parser.add_argument("--out", type=Path, default=native.ROOT / "release")
     parser.add_argument("--node", required=True, help="current legacy installer's bundled Node version")
+    parser.add_argument("--releases", help="where the target archives are published (default: this version's GitHub release)")
     args = parser.parse_args()
-    manifest = build(args.manifests, args.out, args.node)
+    manifest = build(args.manifests, args.out, args.node, release_base=args.releases)
     print(json.dumps({key: value for key, value in manifest.items() if key != "targets"}, indent=2))
 
 if __name__ == "__main__":
