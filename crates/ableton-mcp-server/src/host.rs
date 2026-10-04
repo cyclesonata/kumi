@@ -3,6 +3,7 @@
 //! Host helpers are shared by the exact request and transaction families.
 
 #![allow(dead_code)]
+mod arrangement;
 pub mod audio;
 pub mod device_state;
 mod events;
