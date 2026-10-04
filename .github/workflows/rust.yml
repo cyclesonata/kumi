@@ -42,11 +42,11 @@ jobs:
       - name: Install the reference MCP SDK for interoperability tests
         run: npm ci --ignore-scripts
       - run: cargo fmt --all --check
-      - run: cargo build --workspace --all-targets --locked
       - name: Windows terminal ownership and console regressions
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/test-isolated.ps1 --test stdin_handoff --test windows_stdin --test windows_tty
+        run: ./scripts/test-isolated.ps1 --test stdin_handoff --test windows_console_control --test windows_stdin --test windows_tty --no-fail-fast -- --nocapture
+      - run: cargo build --workspace --all-targets --locked
       - name: Tests, in a home of their own (no test reaches this machine's Live folders or ~/.kumi)
         if: runner.os != 'Windows'
         run: sh scripts/test-isolated.sh --no-fail-fast
