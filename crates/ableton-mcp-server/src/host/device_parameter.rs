@@ -123,7 +123,8 @@ impl McpHost {
     }
     pub(super) fn parameter_authority(&self, snapshot: &LiveSnapshot, reference: &str) -> Result<Value, LiveError> {
         let error = || LiveError::error("parameter lacks complete exact hierarchy authority");
-        let authority = batch::parameter_authority(&serde_json::to_value(snapshot).unwrap(), reference).map_err(|_| error())?;
+        let targets = self.realtime_parameter_targets(&serde_json::to_value(snapshot).unwrap(), &[reference.to_string()])?;
+        let authority = targets.first().and_then(|t| t.get("authority")).cloned().ok_or_else(error)?;
         if authority["ref"] != reference
             || ["parameterIdentity", "ownerRef", "ownerIdentity", "trackRef", "trackIdentity"]
                 .iter()
