@@ -6,6 +6,7 @@
 mod advanced_devices;
 mod arrangement;
 mod arrangement_clip;
+mod arrangement_midi;
 mod browser_render;
 mod clip_properties;
 pub mod audio;

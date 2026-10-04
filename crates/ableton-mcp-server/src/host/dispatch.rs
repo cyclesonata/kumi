@@ -166,6 +166,7 @@ impl McpHost {
             optional!(dispatch_mixer_tool);
             optional!(dispatch_ui_tool);
             optional!(dispatch_arrangement_clip_tool);
+            optional!(dispatch_arrangement_midi_tool);
             optional!(dispatch_recording_tool);
             optional!(dispatch_realtime_tool);
             // Kept explicit until every source family has landed: a missing port is never reported
@@ -328,6 +329,9 @@ impl McpHost {
             }
             if tx.starts_with("routing_") {
                 return Ok(self.undo_routing_async(id, params, signal).await);
+            }
+            if tx.starts_with("arrmidi_") {
+                return Ok(self.undo_arrangement_midi_async(id, params, signal).await);
             }
             if tx.starts_with("arrclip_") {
                 return Ok(self.undo_arrangement_clip_async(id, params, signal).await);
