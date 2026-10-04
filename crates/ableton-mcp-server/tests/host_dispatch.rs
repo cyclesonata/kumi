@@ -8,7 +8,7 @@ use std::{rc::Rc, sync::LazyLock};
 fn clean(value: &Value) -> Value {
     static ID: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(
-            r"^(browserload|devdup|device|mixer|tempo|parameter|parameters|structure|arrangement|rename|transport|change|noteupdate|notedelete|routing|capturemidi|scenecapture|clipdup|arrclip|clipmove)_[A-Za-z0-9_-]+$",
+            r"^(data|browserload|devdup|device|mixer|tempo|parameter|parameters|structure|arrangement|rename|transport|change|noteupdate|notedelete|routing|capturemidi|scenecapture|clipdup|arrclip|clipmove)_[A-Za-z0-9_-]+$",
         )
         .unwrap()
     });

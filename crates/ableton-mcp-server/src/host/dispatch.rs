@@ -147,6 +147,8 @@ impl McpHost {
             optional!(dispatch_device_lifecycle_tool);
             optional!(dispatch_device_copy_tool);
             optional!(dispatch_device_basic_tool);
+            optional!(dispatch_data_tool);
+            optional!(dispatch_follow_tool);
             optional!(dispatch_clip_properties_tool);
             optional!(dispatch_extended_mixer_tool);
             optional!(dispatch_audio_clip_tool);
@@ -344,6 +346,12 @@ impl McpHost {
             }
             if ["mixerext_", "chainmix_", "devio_"].iter().any(|prefix| tx.starts_with(prefix)) {
                 return Ok(self.undo_extended_mixer_async(id, params, signal).await);
+            }
+            if tx.starts_with("data_") {
+                return Ok(self.undo_data_async(id, params, signal).await);
+            }
+            if tx.starts_with("follow_") {
+                return Ok(self.undo_follow_actions_async(id, params, signal).await);
             }
             if tx.starts_with("device_") {
                 return Ok(self.undo_device_basic_async(id, params, signal).await);

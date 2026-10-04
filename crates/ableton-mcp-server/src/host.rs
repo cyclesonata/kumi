@@ -19,6 +19,7 @@ mod device_parameter;
 mod device_lifecycle;
 mod device_copy;
 mod device_basic;
+mod data;
 pub mod device_state;
 mod dispatch;
 mod events;
