@@ -344,7 +344,12 @@ fn natural_newline_racing_pause_never_reaches_the_child() {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(tokio::task::LocalSet::new().run_until(
             async {
                 let input = Stdin::new();
-                for round in 0..16 {
+                for round in 0..32 {
+                    let mode = ENABLE_LINE_INPUT
+                        | ENABLE_ECHO_INPUT
+                        | ENABLE_PROCESSED_INPUT
+                        | if round >= 16 { ENABLE_VIRTUAL_TERMINAL_INPUT } else { 0 };
+                    assert_ne!(unsafe { SetConsoleMode(console.as_raw_handle(), mode) }, 0);
                     let _waiting = receive(&input, 8, false);
                     write_text(&console, "parent");
                     queue_empty(&console);
@@ -353,7 +358,10 @@ fn natural_newline_racing_pause_never_reaches_the_child() {
                     write_text(&console, "\r");
                     input.pause();
                     child_reads(&console, &format!("race-child-{round}"));
-                    assert_eq!(received(receive(&input, 8, true), &format!("natural newline race round {round}")).await, b"parent\r\n");
+                    assert_eq!(
+                        received(receive(&input, 8, true), &format!("natural newline race round {round}, mode {mode}")).await,
+                        b"parent\r\n"
+                    );
                 }
             },
         ));
