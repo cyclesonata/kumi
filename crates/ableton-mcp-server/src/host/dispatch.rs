@@ -143,6 +143,8 @@ impl McpHost {
             optional!(dispatch_session_capture_tool);
             optional!(dispatch_browser_render_tool);
             optional!(dispatch_clip_duplicate_tool);
+            optional!(dispatch_clip_move_tool);
+            optional!(dispatch_device_lifecycle_tool);
             optional!(dispatch_arrangement_clip_tool);
             optional!(dispatch_recording_tool);
             optional!(dispatch_realtime_tool);
@@ -312,6 +314,12 @@ impl McpHost {
             }
             if tx.starts_with("recording_") {
                 return Ok(self.undo_recording_async(id, params).await);
+            }
+            if tx.starts_with("clipmove_") {
+                return Ok(self.undo_clip_move_async(id, params, signal).await);
+            }
+            if tx.starts_with("browserload_") {
+                return Ok(self.undo_browser_load_async(id, params, signal).await);
             }
             if tx.starts_with("clipdup_") {
                 return Ok(self.undo_clip_duplicate_async(id, params, signal).await);
