@@ -760,8 +760,8 @@ pub struct Device {
     pub macros: Option<Vec<Macro>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variation_count: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain_selector: Option<Value>,
+    #[serde(default, skip_serializing_if = "Maybe::is_absent")]
+    pub chain_selector: Maybe<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<DeviceView>,
     #[serde(default, skip_serializing_if = "Maybe::is_absent")]
@@ -820,7 +820,7 @@ impl Device {
             drum_pads: None,
             macros: None,
             variation_count: None,
-            chain_selector: None,
+            chain_selector: Maybe::Absent,
             view: None,
             latency_samples: Maybe::Absent,
             latency_ms: Maybe::Absent,

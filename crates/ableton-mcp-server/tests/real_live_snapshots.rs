@@ -1,6 +1,7 @@
-//! Snapshots as the real Remote Script answers them, recorded in Live 12.4 with Session and
-//! Arrangement clips (MIDI and audio) and a take lane. The simulator's clips carry fields the
-//! Remote Script never sends, so only frames like these show what the adapter must accept.
+//! Snapshots as the real Remote Script answers them, recorded in Live 12.4: Session and Arrangement
+//! clips (MIDI and audio), a take lane, racks with chains, a Drum Rack, a clip envelope and Max for
+//! Live devices. The simulator's rows carry fields the Remote Script never sends, so only frames like
+//! these show what the adapter must accept.
 use ableton_mcp_server::{
     bridge::remote_adapter::expand_pad_chains,
     live::{check_snapshot_answer, LiveSnapshot, LiveSnapshotRequest},
@@ -36,9 +37,10 @@ fn difference(expected: &Value, actual: &Value, path: &str) -> Option<String> {
 
 #[test]
 fn real_remote_script_snapshots_parse_and_keep_exactly_their_fields() {
-    let fixture: Value = serde_json::from_str(include_str!("fixtures/real-live-snapshots.json")).unwrap();
+    let fixture: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(&include_bytes!("fixtures/real-live-snapshots.json.gz")[..])).unwrap();
     let frames = fixture["frames"].as_array().unwrap();
-    assert_eq!(frames.len(), 4);
+    assert_eq!(frames.len(), 8);
     for frame in frames {
         let args = &frame["args"];
         let request: LiveSnapshotRequest = serde_json::from_value(args.clone()).unwrap();
