@@ -498,6 +498,59 @@ pub struct Stdout {
     inner: Rc<StdoutInner>,
 }
 
+/// Escape sequences on a Windows console are text unless its virtual-terminal processing is on, which
+/// Node's libuv turned on for every terminal stream. This turns it on for standard output and error
+/// while it lives, and puts the consoles back as they were when dropped. Elsewhere it does nothing.
+pub struct VtOutput {
+    #[cfg(windows)]
+    restore: Vec<(windows_sys::Win32::Foundation::HANDLE, u32)>,
+}
+
+impl VtOutput {
+    pub fn enable() -> VtOutput {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+            let handles = [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE].map(|which| unsafe { GetStdHandle(which) });
+            VtOutput { restore: Self::enable_on(&handles) }
+        }
+        #[cfg(not(windows))]
+        VtOutput {}
+    }
+
+    /// Each console among `handles` without VT processing gets it; returns what to put back.
+    #[cfg(windows)]
+    fn enable_on(handles: &[windows_sys::Win32::Foundation::HANDLE]) -> Vec<(windows_sys::Win32::Foundation::HANDLE, u32)> {
+        use windows_sys::Win32::{
+            Foundation::INVALID_HANDLE_VALUE,
+            System::Console::{GetConsoleMode, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING},
+        };
+        let mut restore = Vec::new();
+        for &handle in handles {
+            let mut mode = 0;
+            // Not a console (a pipe or a file): nothing to turn on.
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE || unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+                continue;
+            }
+            if mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING == 0
+                && unsafe { SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) } != 0
+            {
+                restore.push((handle, mode));
+            }
+        }
+        restore
+    }
+}
+
+impl Drop for VtOutput {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        for &(handle, mode) in self.restore.iter().rev() {
+            unsafe { windows_sys::Win32::System::Console::SetConsoleMode(handle, mode) };
+        }
+    }
+}
+
 impl Default for Stdout {
     fn default() -> Self {
         Self::new()
@@ -610,5 +663,40 @@ impl TtyOutput for Stdout {
         Some(Arc::new(move |data| {
             let _ = Stdout::write_now(stream, data);
         }))
+    }
+}
+
+#[cfg(all(test, windows))]
+mod vt_tests {
+    use super::VtOutput;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Console::{GetConsoleMode, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_PROCESSING};
+
+    #[test]
+    fn output_that_is_not_a_console_is_left_alone() {
+        let file = tempfile::tempfile().unwrap();
+        assert!(VtOutput::enable_on(&[file.as_raw_handle() as _]).is_empty());
+    }
+
+    #[test]
+    fn a_console_gets_vt_processing_and_its_mode_back() {
+        // The console this test runs in, if any (CI runs without one).
+        let Ok(console) = std::fs::OpenOptions::new().read(true).write(true).open("CONOUT$") else { return };
+        let handle = console.as_raw_handle() as _;
+        let mut before = 0;
+        if unsafe { GetConsoleMode(handle, &mut before) } == 0 {
+            return;
+        }
+        let off = before & !ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        assert_ne!(unsafe { SetConsoleMode(handle, off) }, 0);
+        let enabled = VtOutput { restore: VtOutput::enable_on(&[handle]) };
+        let mut on = 0;
+        unsafe { GetConsoleMode(handle, &mut on) };
+        assert_ne!(on & ENABLE_VIRTUAL_TERMINAL_PROCESSING, 0);
+        drop(enabled);
+        let mut after = 0;
+        unsafe { GetConsoleMode(handle, &mut after) };
+        assert_eq!(after, off);
+        unsafe { SetConsoleMode(handle, before) };
     }
 }

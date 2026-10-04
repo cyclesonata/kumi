@@ -393,6 +393,8 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
 }
 /// Bind the command loop to the process after supplying the native Ableton factory.
 pub fn main_with(factory: AbletonFactory) -> i32 {
+    // Before anything is written: Windows consoles need VT processing for Kumi's escape sequences.
+    let _vt = crate::tui::tty::VtOutput::enable();
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
