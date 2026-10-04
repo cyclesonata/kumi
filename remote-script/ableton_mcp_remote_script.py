@@ -248,6 +248,24 @@ def _live_module() -> Any:
         return None
 
 
+# Live's pre-11 calls that remove notes. Live stops a Remote Script that calls one to ask the producer
+# ("A custom MIDI Remote Script uses an older process to modify MIDI notes…"), holding the bridge until
+# someone answers, and notes rewritten that way lose their MPE, probability and velocity data.
+_LEGACY_NOTE_CALLS = ("remove_notes", "replace_selected_notes")
+
+
+def _legacy_note_calls(code: Any) -> list[str]:
+    """The legacy note calls a compiled script names (as attributes or strings), its functions included."""
+    found: set[str] = set(); pending = [code]
+    while pending:
+        current = pending.pop()
+        found.update(name for name in current.co_names if name in _LEGACY_NOTE_CALLS)
+        for constant in current.co_consts:
+            if isinstance(constant, str) and constant in _LEGACY_NOTE_CALLS: found.add(constant)
+            elif hasattr(constant, "co_consts"): pending.append(constant)
+    return sorted(found)
+
+
 def _lom_audit(live: Any, max_depth: int = 8) -> dict[str, Any]:
     """Every class reachable from Live's module, with its members' names, kinds and docstrings: what
     the Live Object Model offers on this Live, for checking what the bridge covers (developers only)."""
@@ -9502,6 +9520,12 @@ class LiveObjectMapper:
             try:
                 sys.settrace(trace)
                 compiled = compile(code, "<python.run>", mode)
+                legacy = _legacy_note_calls(compiled)
+                if legacy:
+                    raise ValueError(f"{' and '.join(legacy)} {'is' if len(legacy) == 1 else 'are'} Live's old way to remove notes: Live would stop to ask the producer before it ran, and the notes would lose their MPE, probability and velocity data. Nothing ran. "
+                                     "Use Live 11's calls: remove_notes_extended(from_pitch, pitch_span, from_time, time_span) or remove_notes_by_id(ids) to remove; "
+                                     "add_new_notes([Live.Clip.MidiNoteSpecification(pitch=60, start_time=0.0, duration=1.0, velocity=100.0)]) to add; "
+                                     "to change notes, edit the ones get_all_notes_extended() or get_notes_extended(from_pitch, pitch_span, from_time, time_span) returns in place, then pass that same result to apply_note_modifications.")
                 if mode == "eval": value = eval(compiled, env, env)
                 else:
                     exec(compiled, env, env)

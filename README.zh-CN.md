@@ -67,7 +67,7 @@ kumi            # 在你的工程旁打开 Kumi
 
 有新版本时，Kumi 会在启动时告诉你。在 Kumi 中输入 `/update`，或在终端运行 `kumi update`，即可获取新版本，桥接也会一并更新；`kumi update --check` 只检查、不安装，`kumi update --rollback` 回到上一个版本。如果不想让它检查，在 `~/.kumi/settings.json` 中加入 `"updateCheck": false`。
 
-从当前的 1.7.4 安装版升级时，关闭 Live，运行 `kumi update`，然后照常打开 Kumi。
+从当前的 1.7.5 安装版升级时，关闭 Live，运行 `kumi update`，然后照常打开 Kumi。
 设置、登录信息、对话和素材库都保留原位。首次启动原生应用时，现有桥接也会切换到原生版本。
 [迁移与回滚说明](docs/zh-CN/KUMI_GUIDE.md#更新报告与卸载)。
 
@@ -75,8 +75,8 @@ kumi            # 在你的工程旁打开 Kumi
 
 ## 当前状态
 
-最后的 TypeScript 版本 Kumi 1.7.4 已在 macOS 的 Ableton Live 12.4（测试版）中验证，Windows 验证覆盖安装和连接。
-原生版本 1.7.5 已有参考实现对比测试和隔离环境中的迁移测试，实际 Live 中的验证仍待完成。
+最后的 TypeScript 版本 Kumi 1.7.5 已在 macOS 的 Ableton Live 12.4（测试版）中验证，Windows 验证覆盖安装和连接。
+原生版本 1.7.6 已有参考实现对比测试和隔离环境中的迁移测试，实际 Live 中的验证仍待完成。
 出问题时请发送 `kumi report`。接下来将支持 Renoise 和 Reaper。
 
 ## 开发

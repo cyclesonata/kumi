@@ -6981,6 +6981,24 @@ class PythonRunTests(unittest.TestCase):
         self.assertEqual(bad_error["error"]["type"], "BadError")
         self.assertEqual(bad_error["error"]["message"], "Error message unavailable")
 
+    def test_legacy_note_removal_is_refused_before_it_runs(self):
+        # Live stops a script calling these to ask the producer, holding the bridge until someone answers.
+        clip = "song.tracks[0].clip_slots[0].clip"
+        for code, names in [(f"song.tempo = 126\n{clip}.remove_notes(0.0, 0, 4.0, 128)", "remove_notes is"),
+                            (f"def rewrite(c):\n    c.select_all_notes()\n    c.replace_selected_notes(())\nsong.tempo = 126\nrewrite({clip})", "replace_selected_notes is"),
+                            (f"song.tempo = 126\ngetattr({clip}, 'remove_notes')(0.0, 0, 4.0, 128)\n{clip}.replace_selected_notes(())", "remove_notes and replace_selected_notes are")]:
+            with self.subTest(code=code):
+                result = self.run_python(code)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["type"], "ValueError")
+                self.assertTrue(result["error"]["message"].startswith(f"{names} Live's old way to remove notes"), result["error"]["message"])
+                self.assertIn("remove_notes_extended(from_pitch, pitch_span, from_time, time_span)", result["error"]["message"])
+                self.assertEqual(self.song.tempo, 120, "nothing in the script ran")
+                self.assertIsNone(self.mapper._undo_step)
+        # Live 11's calls, and the old names in a comment, run.
+        allowed = self.run_python(f"# not remove_notes or replace_selected_notes\nresult = [callable(getattr({clip}, name, None)) for name in ('remove_notes_extended', 'remove_notes_by_id')]")
+        self.assertTrue(allowed["ok"], allowed)
+
     def test_authenticated_invoke_needs_no_authority_and_runs_on_the_live_queue(self):
         self.assertIn("python.run", remote_module._AUTHORITY_FREE_INVOKES)
         self.assertNotIn("python.run", remote_module._READ_ONLY_INVOKES)

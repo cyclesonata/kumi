@@ -3,15 +3,15 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## 1.7.5 — Unreleased
+## 1.7.6 — Unreleased
 
-Ships with bridge 1.0.73.
+Ships with bridge 1.0.74.
 
 - Kumi and its bridge run as native Rust executables. Fresh installs need no Node runtime.
-- Current 1.7.4 installer users keep using `kumi update`. Settings, sign-ins, conversations,
+- Current 1.7.4 and 1.7.5 installer users keep using `kumi update`. Settings, sign-ins, conversations,
   library data and the configured Kumi home stay in place.
 - On first native startup with Live closed, the existing JavaScript bridge switches to the native
-  bridge, including when both are version 1.0.73. Its secret, ports and configuration paths stay.
+  bridge, including when both are version 1.0.74. Its secret, ports and configuration paths stay.
 - `kumi update --rollback` restores the previous app and its bridge generation. Close Live before
   rolling back to the JavaScript app. Another rollback returns to the retained native app.
 - YouTube downloads reuse the managed Node runtime retained from an older installation for
@@ -21,6 +21,15 @@ Ships with bridge 1.0.73.
 
 The optimized release and platform installer checks are required before publication. Native
 real-Live validation remains separate from source comparisons and isolated migration tests.
+
+## 1.7.5 — 2026-10-04
+
+Ships with bridge 1.0.74.
+
+- Python that removes notes the pre-Live 11 way (`remove_notes`, `replace_selected_notes`) no longer
+  stops Live with "A custom MIDI Remote Script uses an older process to modify MIDI notes". The bridge
+  (1.0.74) refuses those calls before a script runs and names Live 11's calls instead. Kumi's model is
+  also told to use Live 11's calls, which keep each note's MPE, probability and velocity data.
 
 ## 1.7.4 — 2026-10-03
 
