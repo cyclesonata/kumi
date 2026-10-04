@@ -7,6 +7,7 @@ pub mod bridge_version;
 pub mod changes;
 mod concurrent;
 pub mod connection;
+pub mod command_tools;
 pub mod context;
 pub mod display;
 pub mod fast;

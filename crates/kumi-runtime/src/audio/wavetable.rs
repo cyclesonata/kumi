@@ -75,7 +75,7 @@ pub fn shape_harmonics(shape: Shape, width: Option<f64>, count: Option<usize>) -
 pub fn synthesize(harmonics: &[f64]) -> Vec<f32> {
     let mut frame = vec![0f32; FRAME];
     for (index, amplitude) in harmonics.iter().take(MAX_HARMONIC).enumerate() {
-        if *amplitude == 0.0 {
+        if *amplitude == 0.0 || amplitude.is_nan() {
             continue;
         }
         for (sample, value) in frame.iter_mut().enumerate() {
@@ -217,7 +217,13 @@ pub fn period_of(signal: &[f32], sample_rate: f64) -> Option<f64> {
     Some(best_lag as f64 + if shift.is_finite() && shift.abs() < 1.0 { shift } else { 0.0 })
 }
 fn normalize(mut frames: Vec<Vec<f32>>) -> Vec<Vec<f32>> {
-    let peak = frames.iter().flatten().map(|v| (*v as f64).abs()).fold(0.0, f64::max);
+    let peak = frames.iter().flatten().map(|v| (*v as f64).abs()).fold(0.0_f64, |peak, sample| {
+        if peak.is_nan() || sample.is_nan() {
+            f64::NAN
+        } else {
+            peak.max(sample)
+        }
+    });
     if peak > 0.0 {
         for value in frames.iter_mut().flatten() {
             *value = (*value as f64 / (peak / 0.99)) as f32;
