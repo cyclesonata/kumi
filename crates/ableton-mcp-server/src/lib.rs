@@ -38,5 +38,6 @@ pub mod registry;
 pub mod setup;
 pub mod sqlite_reader;
 pub mod stdio;
+pub mod serve;
 pub mod tool_catalog;
 pub mod transactions;

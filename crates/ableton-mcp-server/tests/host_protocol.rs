@@ -67,11 +67,13 @@ async fn host_lifecycle_resources_status_and_gates_match_source() {
         } else {
             UnavailableLiveAdapter.status()
         };
-        let host =
+        let host = Rc::new(
             McpHost::new(Rc::new(StatusAdapter(status)), McpHostOptions { tool_policy: case.get("policy").cloned(), ..Default::default() })
-                .unwrap();
+                .unwrap(),
+        );
         for (index, step) in case["steps"].as_array().unwrap().iter().enumerate() {
-            let request = host.begin_request(&step["request"], case["async"] == true);
+            let request =
+                if case["async"] == true { host.handle_async(&step["request"], None).await } else { host.handle(&step["request"]) };
             if let Some(error) = step.get("error") {
                 assert_eq!(
                     request.err().expect("source throws").message(),
@@ -82,15 +84,7 @@ async fn host_lifecycle_resources_status_and_gates_match_source() {
                 );
                 continue;
             }
-            let request = request.unwrap_or_else(|e| panic!("{} step {index}: {e}", case["name"]));
-            let result = match &request.decision {
-                RequestDecision::Complete(_) => request.completed(),
-                RequestDecision::Tool(tool) if tool.name == "live_status" && tool.asynchronous => {
-                    let result = host.live_status_async(&tool.id).await;
-                    request.finish(Some(result))
-                }
-                RequestDecision::Tool(tool) => panic!("fixture reached unselected family: {tool:?}"),
-            };
+            let result = request.unwrap_or_else(|e| panic!("{} step {index}: {e}", case["name"]));
             let mut result = result.unwrap_or(Value::Null);
             if step["normalizeStatus"] == true {
                 let status: Value = serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();

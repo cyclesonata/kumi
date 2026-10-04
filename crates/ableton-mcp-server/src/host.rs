@@ -9,6 +9,7 @@ mod audition;
 mod capture;
 mod clip_launch;
 mod device_parameter;
+mod dispatch;
 pub mod device_state;
 mod events;
 pub mod helpers;
@@ -73,6 +74,7 @@ pub struct McpHostOptions {
 }
 /// Shared state of one stdio host. Protocol decisions retain their request lease until execution ends.
 pub struct McpHost {
+    fused_changes: RefCell<VecDeque<(String, Value)>>,
     record_operations: RefCell<Vec<record_operation::RecordOperation>>,
     undo_recovery_plans: RefCell<Vec<recovery::RecoveryPlan>>,
     undo_refusals: RefCell<std::collections::HashMap<String, recovery::UndoRefusal>>,
@@ -148,6 +150,7 @@ impl McpHost {
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
         Ok(Self {
+            fused_changes: RefCell::new(VecDeque::new()),
             record_operations: RefCell::new(Vec::new()),
             undo_recovery_plans: RefCell::new(Vec::new()),
             undo_refusals: RefCell::new(Default::default()),
