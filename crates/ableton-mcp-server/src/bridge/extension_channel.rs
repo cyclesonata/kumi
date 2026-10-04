@@ -322,6 +322,9 @@ impl ExtensionChannel {
             let weak = Rc::downgrade(&self.0);
             tokio::task::spawn_local(async move {
                 let mut buffer = bytes::BytesMut::new();
+                // How far the buffer is known to hold no newline: each byte is searched once, so a large
+                // frame arriving in 64 KiB reads isn't rescanned from its start after each one.
+                let mut scanned = 0;
                 let mut chunk = vec![0; 65536];
                 loop {
                     let read = tokio::select! {biased;_=cancel.cancelled()=>break,read=reader.read(&mut chunk)=>read};
@@ -350,7 +353,12 @@ impl ExtensionChannel {
                         failure = Some(LiveError::error("the extension sent a frame beyond the bound"));
                     }
                     while failure.is_none() {
-                        let Some(index) = memchr::memchr(b'\n', &buffer) else { break };
+                        let Some(found) = memchr::memchr(b'\n', &buffer[scanned..]) else {
+                            scanned = buffer.len();
+                            break;
+                        };
+                        let index = scanned + found;
+                        scanned = 0;
                         let line = buffer.split_to(index + 1);
                         if index == 0 {
                             continue;
@@ -379,9 +387,9 @@ impl ExtensionChannel {
             }
         }
     }
-    fn on_data(&self, frame: Value) -> Result<(), LiveError> {
+    fn on_data(&self, mut frame: Value) -> Result<(), LiveError> {
         if frame["version"] != LOOPBACK_PROTOCOL_VERSION
-            || !wire::verify(self.0.secret.borrow().as_deref().unwrap_or_default(), &frame, true)?
+            || !wire::verify(self.0.secret.borrow().as_deref().unwrap_or_default(), &mut frame, true)?
         {
             return Err(LiveError::error("the extension's answer isn't signed with the bridge's secret"));
         }

@@ -37,15 +37,16 @@ pub(super) fn signed(secret: &str, mut value: Value, extension: bool) -> Result<
     value["mac"] = mac(secret, &value, extension)?.into();
     Ok(value)
 }
-pub(super) fn verify(secret: &str, value: &Value, extension: bool) -> Result<bool, LiveError> {
-    let mut unsigned = value.clone();
-    let Some(row) = unsigned.as_object_mut() else {
+/// Whether a received frame carries the right `mac`, which this takes out of it: nothing reads the mac
+/// afterwards, and a frame can be megabytes (a snapshot), so it isn't copied to check it.
+pub(super) fn verify(secret: &str, value: &mut Value, extension: bool) -> Result<bool, LiveError> {
+    let Some(row) = value.as_object_mut() else {
         return Ok(false);
     };
     let Some(Value::String(received)) = row.remove("mac") else {
         return Ok(false);
     };
-    Ok(mac(secret, &unsigned, extension)?.as_bytes().ct_eq(received.as_bytes()).into())
+    Ok(mac(secret, value, extension)?.as_bytes().ct_eq(received.as_bytes()).into())
 }
 pub(super) fn random_id() -> String {
     let mut bytes = [0; 18];

@@ -15,7 +15,8 @@ const ROOTS: &[&str] =
     &["instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"];
 #[derive(Clone)]
 pub(super) struct BrowserCache {
-    items: Vec<Value>,
+    /// Shared, so a cache hit (the start of every device or preset load) doesn't copy 10k rows.
+    items: std::rc::Rc<Vec<Value>>,
     at: f64,
     epoch: i64,
 }
@@ -111,7 +112,7 @@ impl McpHost {
                         ||!row["path"].as_str().is_some_and(|s|utf16_len(s)<=512)||!row["isDevice"].is_boolean(){return Err(LiveError::error("browser search returned a malformed candidate set"));}
                     items.push(json!({"id":row["id"],"objectIdentity":row["objectIdentity"],"name":row["name"],"category":row["category"],"path":row["path"],"isDevice":row["isDevice"]}));
                 }
-                let entry=BrowserCache{items,at:now_ms_f64(),epoch};let mut cache=self.browser_search_cache.borrow_mut();
+                let entry=BrowserCache{items:std::rc::Rc::new(items),at:now_ms_f64(),epoch};let mut cache=self.browser_search_cache.borrow_mut();
                 if let Some((_,old))=cache.iter_mut().find(|(name,_)|name==key){*old=entry.clone();}else{cache.push_back((key.into(),entry.clone()));}
                 while cache.len()>16{cache.pop_front();}(entry,false)
             };

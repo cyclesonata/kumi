@@ -400,6 +400,23 @@ pub struct LiveDiscoveryResult {
     pub next_cursor: Option<String>,
 }
 
+impl LiveDiscoveryResult {
+    /// What `serde_json::to_value` makes of it, moving the rows instead of copying them (a page can
+    /// hold megabytes of tracks).
+    pub fn into_value(self) -> Value {
+        let mut row = Map::new();
+        row.insert("epoch".into(), self.epoch.into());
+        row.insert("items".into(), Value::Array(self.items.into_iter().map(Value::Object).collect()));
+        row.insert("truncated".into(), self.truncated.into());
+        row.insert("revision".into(), self.revision.into());
+        row.insert("kind".into(), self.kind.as_str().into());
+        if let Some(cursor) = self.next_cursor {
+            row.insert("nextCursor".into(), cursor.into());
+        }
+        Value::Object(row)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionPlaybackTarget {

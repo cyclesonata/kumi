@@ -47,7 +47,7 @@ pub mod json {
         match value {
             Value::Null => out.push_str("null"),
             Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-            Value::Number(n) => out.push_str(&number(n)),
+            Value::Number(n) => write_number(n, out),
             Value::String(s) => escape(s, out),
             Value::Array(items) => {
                 if items.is_empty() {
@@ -72,7 +72,7 @@ pub mod json {
                 }
                 out.push('{');
                 let mut first = true;
-                for key in ordered_keys(map) {
+                let mut entry = |key: &str, item: &Value, out: &mut String| {
                     if !first {
                         out.push(',');
                     }
@@ -83,7 +83,17 @@ pub mod json {
                     if indent.is_some() {
                         out.push(' ');
                     }
-                    write(&map[key], out, indent, depth + 1);
+                    write(item, out, indent, depth + 1);
+                };
+                // Only a key starting with a digit can be an array index, which JavaScript lists first.
+                if map.keys().any(|key| key.as_bytes().first().is_some_and(u8::is_ascii_digit)) {
+                    for key in ordered_keys(map) {
+                        entry(key, &map[key], out);
+                    }
+                } else {
+                    for (key, item) in map {
+                        entry(key, item, out);
+                    }
                 }
                 newline(out, indent, depth);
                 out.push('}');
@@ -128,6 +138,18 @@ pub mod json {
         key.parse::<u32>().ok().filter(|index| *index < u32::MAX)
     }
 
+    /// [`number`], written straight into `out`.
+    fn write_number(n: &serde_json::Number, out: &mut String) {
+        use std::fmt::Write;
+        if let Some(i) = n.as_i64() {
+            let _ = write!(out, "{i}");
+        } else if let Some(u) = n.as_u64() {
+            let _ = write!(out, "{u}");
+        } else {
+            out.push_str(&number(n));
+        }
+    }
+
     /// A number as `JSON.stringify` writes it: `Number.prototype.toString`, or `null` when not finite.
     pub fn number(n: &serde_json::Number) -> String {
         if let Some(i) = n.as_i64() {
@@ -145,19 +167,30 @@ pub mod json {
     /// A string as `JSON.stringify` writes it, quotes included.
     pub fn escape(s: &str, out: &mut String) {
         out.push('"');
-        for ch in s.chars() {
-            match ch {
-                '"' => out.push_str("\\\""),
-                '\\' => out.push_str("\\\\"),
-                '\u{8}' => out.push_str("\\b"),
-                '\u{c}' => out.push_str("\\f"),
-                '\n' => out.push_str("\\n"),
-                '\r' => out.push_str("\\r"),
-                '\t' => out.push_str("\\t"),
-                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-                c => out.push(c),
+        // Runs without anything to escape are copied whole. The escaped characters are all ASCII, so
+        // their byte positions are character boundaries.
+        let mut start = 0;
+        for (at, byte) in s.bytes().enumerate() {
+            let escaped = match byte {
+                b'"' => "\\\"",
+                b'\\' => "\\\\",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                b'\n' => "\\n",
+                b'\r' => "\\r",
+                b'\t' => "\\t",
+                0..0x20 => "",
+                _ => continue,
+            };
+            out.push_str(&s[start..at]);
+            if escaped.is_empty() {
+                out.push_str(&format!("\\u{byte:04x}"));
+            } else {
+                out.push_str(escaped);
             }
+            start = at + 1;
         }
+        out.push_str(&s[start..]);
         out.push('"');
     }
 

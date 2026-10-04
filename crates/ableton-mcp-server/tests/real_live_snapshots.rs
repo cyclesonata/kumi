@@ -56,3 +56,27 @@ fn real_remote_script_snapshots_parse_and_keep_exactly_their_fields() {
         }
     }
 }
+
+#[test]
+fn discovery_results_move_into_the_value_serde_would_make() {
+    use ableton_mcp_server::live::{LiveDiscoveryKind, LiveDiscoveryResult};
+    let fixture: Value =
+        serde_json::from_reader(flate2::read::GzDecoder::new(&include_bytes!("fixtures/real-live-snapshots.json.gz")[..])).unwrap();
+    let tracks: Vec<_> =
+        fixture["frames"][0]["result"]["tracks"].as_array().unwrap().iter().map(|t| t.as_object().unwrap().clone()).collect();
+    for (kind, cursor) in [(LiveDiscoveryKind::Track, None), (LiveDiscoveryKind::SessionClip, Some("next-page".to_string()))] {
+        let result = LiveDiscoveryResult {
+            epoch: 1218806785596302,
+            items: tracks.clone(),
+            truncated: cursor.is_some(),
+            revision: "r1".into(),
+            kind,
+            next_cursor: cursor,
+        };
+        let expected = serde_json::to_value(&result).unwrap();
+        let moved = result.into_value();
+        assert_eq!(moved, expected);
+        // Key order too: the text a client reads is the same.
+        assert_eq!(kumi_common::js::json::stringify(&moved), kumi_common::js::json::stringify(&expected));
+    }
+}

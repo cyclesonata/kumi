@@ -154,7 +154,7 @@ impl McpHost {
             limit: Some(if kind == "note" { limit.min(NOTE_PAGE) } else { limit }),
             cursor: params["cursor"].as_str().map(str::to_owned),
         };
-        Ok(success_text(id, &serde_json::to_value(self.adapter.discover_async(&request, None).await?).unwrap()))
+        Ok(success_text(id, &self.adapter.discover_async(&request, None).await?.into_value()))
     }
     pub async fn live_note_read_async(&self, id: &Value, params: &Value) -> Value {
         if !has_only(params, &["clipRef", "noteIds", "selected"]) || !is_non_empty_string(&params["clipRef"], 256) {

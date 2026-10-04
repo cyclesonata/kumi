@@ -397,6 +397,9 @@ impl RemoteScriptLiveAdapter {
             let weak = Rc::downgrade(&this.0);
             tokio::task::spawn_local(async move {
                 let mut buffer = bytes::BytesMut::new();
+                // How far the buffer is known to hold no newline: each byte is searched once, so a large
+                // frame arriving in 64 KiB reads isn't rescanned from its start after each one.
+                let mut scanned = 0;
                 let mut chunk = vec![0; 65536];
                 loop {
                     let read = tokio::select! { biased; _=cancel.cancelled()=>break, read=reader.read(&mut chunk)=>read };
@@ -422,7 +425,12 @@ impl RemoteScriptLiveAdapter {
                         failure = Some(LiveError::error("remote frame exceeds limit"));
                     }
                     while failure.is_none() {
-                        let Some(index) = memchr::memchr(b'\n', &buffer) else { break };
+                        let Some(found) = memchr::memchr(b'\n', &buffer[scanned..]) else {
+                            scanned = buffer.len();
+                            break;
+                        };
+                        let index = scanned + found;
+                        scanned = 0;
                         let line = buffer.split_to(index + 1);
                         if index == 0 {
                             continue;
@@ -457,13 +465,13 @@ impl RemoteScriptLiveAdapter {
             }
         }
     }
-    fn on_response(&self, response: Value) -> Result<(), LiveError> {
+    fn on_response(&self, mut response: Value) -> Result<(), LiveError> {
         if response["version"] != LOOPBACK_PROTOCOL_VERSION
             || !["id", "mac", "bridgeEpoch", "connectionChallenge"].iter().all(|key| response[*key].is_string())
         {
             return Err(LiveError::error("invalid remote response"));
         }
-        if !wire::verify(&self.0.endpoint.secret, &response, false)? {
+        if !wire::verify(&self.0.endpoint.secret, &mut response, false)? {
             return Err(LiveError::error("remote response authentication failed"));
         }
         let id = response["id"].as_str().unwrap();
@@ -523,7 +531,7 @@ impl RemoteScriptLiveAdapter {
         }
         let pending = self.0.pending.borrow_mut().remove(id).ok_or_else(|| LiveError::error("unknown or duplicate remote response"))?;
         if truthy(&response["ok"]) {
-            let result = response["result"].clone();
+            let result = response["result"].take();
             if let Err(error) = validate_live_operation_result(&pending.operation, &result) {
                 let error = LiveError::from(error);
                 let _ = pending.response.send(Err(error.clone()));
