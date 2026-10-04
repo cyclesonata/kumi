@@ -8,6 +8,7 @@ mod arrangement_clip;
 mod browser_render;
 pub mod audio;
 mod audio_clip;
+mod audio_import;
 mod audition;
 mod capture;
 mod clip_duplicate;
@@ -19,6 +20,7 @@ mod device_copy;
 pub mod device_state;
 mod dispatch;
 mod events;
+mod import_files;
 pub mod helpers;
 pub mod json_diagnostics;
 mod managed;
@@ -129,6 +131,7 @@ pub struct McpHost {
     recovery_finalization_in_flight: Cell<bool>,
     active_async_operations: Cell<usize>,
     options: McpHostOptions,
+    import_files: Rc<import_files::ImportFiles>,
     semantic_exports: RefCell<VecDeque<project::SemanticExport>>,
 }
 impl Default for McpHost {
@@ -164,6 +167,12 @@ impl McpHost {
         );
         let retention = Rc::new(TransactionRetention::default());
         let map = || BoundedTransactionMap::new(retention.clone(), None);
+        let import_files = Rc::new(import_files::ImportFiles::new(&options));
+        let cleanup_imports = import_files.clone();
+        let clip_lifecycle_transactions = BoundedTransactionMap::new(retention.clone(), Some(Rc::new(move |value| {
+            cleanup_imports.release_for(&value.borrow());
+            Ok(())
+        })));
         Ok(Self {
             browser_search_cache: RefCell::new(VecDeque::new()),
             fused_changes: RefCell::new(VecDeque::new()),
@@ -196,7 +205,7 @@ impl McpHost {
             transport_transactions: map(),
             clip_launch_transactions: map(),
             note_edit_transactions: map(),
-            clip_lifecycle_transactions: map(),
+            clip_lifecycle_transactions,
             midi_transactions: SessionMidiTransactionManager::new(adapter.clone(), Some(views.clone())),
             device_state_transactions: DeviceStateTransactionManager::new(adapter.clone(), Some(views.clone())),
             batch_transactions: batch,
@@ -206,6 +215,7 @@ impl McpHost {
             recovery_finalization_in_flight: Cell::new(false),
             active_async_operations: Cell::new(0),
             options,
+            import_files,
             semantic_exports: RefCell::new(VecDeque::new()),
         })
     }
