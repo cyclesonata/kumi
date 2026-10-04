@@ -355,7 +355,16 @@ async fn drum_pad_workflows_preserve_source_loading_file_authority_and_recovery(
                         files
                     };
                     same(&staged_files(&stage), &expected_files, &format!("{at} files"));
-                    same(&presets(&library, &root_text), &step["presets"], &format!("{at} presets"));
+                    let expected_presets = step["presets"].clone();
+                    #[cfg(windows)]
+                    let expected_presets = {
+                        let mut presets = expected_presets;
+                        for file in presets["files"].as_array_mut().unwrap() {
+                            file["mode"] = Value::Null;
+                        }
+                        presets
+                    };
+                    same(&presets(&library, &root_text), &expected_presets, &format!("{at} presets"));
                     #[cfg(unix)]
                     same(&mode(&stage), &step["stageMode"], &format!("{at} managed root mode"));
                 }
