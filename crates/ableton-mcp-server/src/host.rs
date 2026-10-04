@@ -26,6 +26,8 @@ mod project;
 mod protocol;
 mod reads;
 mod record_operation;
+mod recording;
+mod realtime;
 mod recovery;
 mod rename;
 mod resources;
