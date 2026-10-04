@@ -943,9 +943,13 @@ pub struct Clip {
     pub notes: Vec<ObservedObject<Note>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes_revision: Option<String>,
-    pub warp: bool,
-    pub takes: Vec<String>,
-    pub automation: Vec<AutomationPoint>,
+    // The Remote Script doesn't send these three; only the simulator does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub automation: Option<Vec<AutomationPoint>>,
     /// Envelopes by parameter reference, each a list of automation points.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelopes: Option<Map<String, Value>>,
@@ -1037,9 +1041,9 @@ impl Clip {
             length,
             notes: Vec::new(),
             notes_revision: None,
-            warp: false,
-            takes: Vec::new(),
-            automation: Vec::new(),
+            warp: Some(false),
+            takes: Some(Vec::new()),
+            automation: Some(Vec::new()),
             envelopes: None,
             is_audio: Maybe::Absent,
             gain: Maybe::Absent,
@@ -1597,7 +1601,9 @@ pub struct Locator {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Arrangement {
-    pub length: f64,
+    // The Remote Script's snapshot has no Arrangement length; only the simulator sends one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub locator_revision: Option<String>,
     pub locators: Vec<Locator>,
