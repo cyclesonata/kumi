@@ -506,8 +506,19 @@ async fn unknown_signed_response_and_event_sequence_fail_closed() {
                 let events = Rc::new(RefCell::new(vec![]));
                 let observed = events.clone();
                 let _off = adapter.subscribe(Rc::new(move |e| observed.borrow_mut().push(e.clone()))).unwrap();
+                let disconnected = Signal::new();
+                let on_disconnect = disconnected.clone();
+                let _off_status = adapter.subscribe_status(Rc::new(move |status| {
+                    if status.is_some_and(|status| !status.connected) {
+                        on_disconnect.cancel();
+                    }
+                }));
                 let _ = adapter.invoke_async(&LiveInvocation::new("subscribe", json!({"types":["object"]})), None).await;
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                // The subscribe acknowledgement can arrive before either event. Wait for the
+                // invalid event's disconnect, which follows delivery of the valid first event.
+                tokio::time::timeout(Duration::from_millis(500), disconnected.cancelled())
+                    .await
+                    .expect("invalid event sequence must disconnect the adapter");
                 assert_eq!(events.borrow().len(), 1);
                 assert!(!adapter.status().unwrap().connected);
                 adapter.close().await.unwrap();
@@ -599,15 +610,21 @@ async fn subscriptions_restore_with_reset_and_invalid_retry_preserves_sequence()
             let adapter = peer.connect().await;
             let events = Rc::new(RefCell::new(vec![]));
             let observed = events.clone();
-            let _off = adapter.subscribe(Rc::new(move |e| observed.borrow_mut().push(e.clone()))).unwrap();
+            let (event_sent, mut event_received) = tokio::sync::mpsc::unbounded_channel();
+            let _off = adapter
+                .subscribe(Rc::new(move |e| {
+                    observed.borrow_mut().push(e.clone());
+                    event_sent.send(()).unwrap();
+                }))
+                .unwrap();
             let invoke = LiveInvocation::new("subscribe", json!({"types":["transport"]}));
             adapter.invoke_async(&invoke, None).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::timeout(Duration::from_millis(500), event_received.recv()).await.unwrap().unwrap();
             assert!(adapter.invoke_async(&invoke, Some(&LiveOperationContext::with_deadline(now_ms() as f64 - 1.0))).await.is_err());
             assert_eq!(subscriptions.get(), 1);
             assert!(adapter.get_async(&LiveRef::from("1:track:0"), None).await.is_err());
             adapter.refresh_status_async(None).await.unwrap();
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::timeout(Duration::from_millis(500), event_received.recv()).await.unwrap().unwrap();
             assert_eq!(subscriptions.get(), 2);
             assert_eq!(events.borrow().iter().map(|e| e.sequence).collect::<Vec<_>>(), vec![1, 1]);
             adapter.close().await.unwrap();
