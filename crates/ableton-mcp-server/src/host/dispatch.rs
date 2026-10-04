@@ -134,6 +134,16 @@ impl McpHost {
             optional!(dispatch_capture_tool);
             optional!(dispatch_audition_tool);
             optional!(dispatch_transport_tool);
+            optional!(dispatch_transport_action_tool);
+            optional!(dispatch_track_structure_tool);
+            optional!(dispatch_deletion_tool);
+            optional!(dispatch_dialog_tool);
+            optional!(dispatch_object_view_tool);
+            optional!(dispatch_selection_tool);
+            optional!(dispatch_warp_marker_tool);
+            optional!(dispatch_clip_action_tool);
+            optional!(dispatch_drum_pad_tool);
+
             optional!(dispatch_clip_launch_tool);
             optional!(dispatch_managed_tool);
             optional!(dispatch_device_state_tool);
@@ -398,6 +408,24 @@ impl McpHost {
             }
             if tx.starts_with("songset_") {
                 return Ok(self.undo_song_settings_async(id, params, signal).await);
+            }
+            if tx.starts_with("trackstruct_") {
+                return Ok(self.undo_track_structure_async(id, params, signal).await);
+            }
+            if tx.starts_with("clipview_") {
+                return Ok(self.undo_clip_view_async(id, params, signal).await);
+            }
+            if tx.starts_with("devview_") {
+                return Ok(self.undo_device_view_async(id, params, signal).await);
+            }
+            if tx.starts_with("selection_") {
+                return Ok(self.undo_selection_async(id, params, signal).await);
+            }
+            if tx.starts_with("warp_") {
+                return Ok(self.undo_warp_marker_async(id, params, signal).await);
+            }
+            if tx.starts_with("drumpad_") {
+                return Ok(self.undo_drum_pad_async(id, params, signal).await);
             }
             if tx.starts_with("firebutton_") {
                 return Ok(self.undo_fire_button(id));
