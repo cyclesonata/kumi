@@ -141,9 +141,24 @@ fn upgrade(
     artifact_sha256: &str,
     result: &mut Value,
 ) -> Result<(), LiveError> {
-    if version_compare(evidence.manifest["package"]["version"].as_str().unwrap_or(""), receipt["packageVersion"].as_str().unwrap_or(""))?
-        != std::cmp::Ordering::Greater
+    let order =
+        version_compare(evidence.manifest["package"]["version"].as_str().unwrap_or(""), receipt["packageVersion"].as_str().unwrap_or(""))?;
+    // The first native distribution keeps the bridge protocol/package version. A runtime
+    // migration at that version is allowed only from the exact verified Node generation;
+    // ordinary native upgrades and all downgrades retain the semantic-version fence.
+    let runtime_migration = if order == std::cmp::Ordering::Equal
+        && evidence.manifest["package"]["version"] == receipt["packageVersion"]
+        && evidence.manifest["schema"] == "ableton-mcp-native-release/v1"
     {
+        let current = verify_release_package(p(&receipt["packageRoot"]), o.allow_dirty_private_build)?;
+        ["ableton-mcp-release/v2", "ableton-mcp-private-release/v1"].iter().any(|schema| current.manifest["schema"] == *schema)
+            && json!(current.manifest_sha256) == receipt["releaseManifestSha256"]
+            && current.manifest["package"]["version"] == receipt["packageVersion"]
+            && current.manifest["protocol"]["registryHash"] == receipt["registryHash"]
+    } else {
+        false
+    };
+    if order != std::cmp::Ordering::Greater && !runtime_migration {
         return Err(fail("upgrade requires a strictly newer semantic package version; use rollback for a prior retained generation"));
     }
     if json!(artifact_sha256) == receipt["artifactSha256"] && json!(evidence.manifest_sha256) == receipt["releaseManifestSha256"] {
