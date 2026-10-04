@@ -145,6 +145,11 @@ impl McpHost {
             optional!(dispatch_clip_duplicate_tool);
             optional!(dispatch_clip_move_tool);
             optional!(dispatch_device_lifecycle_tool);
+            optional!(dispatch_device_copy_tool);
+            optional!(dispatch_audio_clip_tool);
+            optional!(dispatch_note_target_tool);
+            optional!(dispatch_mixer_tool);
+            optional!(dispatch_ui_tool);
             optional!(dispatch_arrangement_clip_tool);
             optional!(dispatch_recording_tool);
             optional!(dispatch_realtime_tool);
@@ -317,6 +322,18 @@ impl McpHost {
             }
             if tx.starts_with("clipmove_") {
                 return Ok(self.undo_clip_move_async(id, params, signal).await);
+            }
+            if tx.starts_with("audioclip_") {
+                return Ok(self.undo_audio_clip_async(id, params, signal).await);
+            }
+            if tx.starts_with("noteedit_") {
+                return Ok(self.undo_note_target_async(id, params, signal).await);
+            }
+            if tx.starts_with("mixer_") {
+                return Ok(self.undo_mixer_async(id, params, signal).await);
+            }
+            if tx.starts_with("devdup_") {
+                return Ok(self.undo_device_copy_async(id, params, signal).await);
             }
             if tx.starts_with("browserload_") {
                 return Ok(self.undo_browser_load_async(id, params, signal).await);
