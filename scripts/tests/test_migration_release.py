@@ -159,7 +159,7 @@ class MigrationRelease(unittest.TestCase):
     def production_environment(self, home, scripts):
         env = dict(os.environ)
         for key in list(env):
-            if key.startswith("KUMI_") or key in ("AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "LM_API_TOKEN"):
+            if key.startswith(("KUMI_", "ABLETON_MCP_")) or key in ("AI_GATEWAY_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "OPENCODE_API_KEY", "LM_API_TOKEN"):
                 env.pop(key)
         env.update(KUMI_HOME=str(home), KUMI_INSTALLED="1", KUMI_NO_UPDATE_CHECK="1", KUMI_UI="plain",
                    KUMI_REMOTE_SCRIPTS_DIR=str(scripts), KUMI_LIVE_EXTENSIONS_DIR=str(home / "Live Extensions"),
@@ -266,6 +266,19 @@ class MigrationRelease(unittest.TestCase):
         self.check_existing_data(home, markers)
         suffix = ".exe" if os.name == "nt" else ""
         self.assertIn(manifest["bridge"], self.launched(app / ("ableton-mcp-server" + suffix), env, "--version"))
+        requests = [
+            {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"release-probe","version":"1"}}},
+            {"jsonrpc":"2.0","method":"notifications/initialized"},
+            {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"live_status","arguments":{}}},
+        ]
+        replies = [json.loads(line) for line in self.launched(app / ("ableton-mcp-server" + suffix), env,
+                         input="".join(json.dumps(request) + "\n" for request in requests)).splitlines()]
+        self.assertEqual(len(replies), 2)
+        self.assertEqual(next(reply for reply in replies if reply["id"] == 1)["result"]["serverInfo"]["version"], manifest["bridge"])
+        status = json.loads(next(reply for reply in replies if reply["id"] == 2)["result"]["content"][0]["text"])
+        self.assertFalse(status["connected"])
+        self.assertEqual(status["adapter"], "unavailable")
+        self.assertNotEqual(status.get("provenance"), "real-live")
         reply = json.loads(self.launched(app / ("ableton-mcp-analysis-worker" + suffix), env,
                               input=json.dumps({"mode":"analyze","source":{"pcmBase64":"AAAAPwAAAL8AAAA/AAAAvw==","sampleRate":48000}})))
         self.assertTrue(reply["ok"])
