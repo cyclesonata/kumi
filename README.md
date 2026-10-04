@@ -71,7 +71,7 @@ Kumi tells you when there's a newer version as it starts. `/update` inside Kumi,
 
 ## Status
 
-- Kumi 1.7.4 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windos. You may run into issues on lower versions. If you do, **please file an issue!**
+- Kumi 1.7.5 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
 - Support for Reaper and Renoise are planned
 
 ## Development
