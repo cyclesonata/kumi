@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const setup = process.argv[2] === '--setup';
 const args = setup ? [] : process.argv.slice(2);
+let failureMessage = 'Kumi could not start. Check the native installation or install Rust to build this checkout.';
 const run = (command, argv, env = process.env) => {
   const result = spawnSync(command, argv, { cwd: root, stdio: 'inherit', env });
   if (result.error) throw result.error;
@@ -32,16 +33,22 @@ try {
       const version = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
       // A checkout's version is preferable to silently changing branches or application versions.
       if (!env.KUMI_VERSION && !env.KUMI_RELEASES) env.KUMI_VERSION = version;
-      console.log(`Kumi is switching this npm installation to the native release. Your settings, sign-ins, conversations and library stay in ${home}.`);
+      console.log('Kumi is switching this npm installation to the native release. Your settings, sign-ins, conversations and library stay in the same Kumi home.');
+      failureMessage = 'Kumi could not start the native installer. Check that a system shell is available.';
       const result = process.platform === 'win32'
         ? run(join(process.env.SystemRoot || 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', join(root, 'install.ps1')], env)
         : run('sh', [join(root, 'install.sh')], env);
       if (result !== 0) process.exit(result);
-      if (!existsSync(executable)) throw new Error(`Kumi ${env.KUMI_VERSION || version} has no installed native executable. Use a published native release or install Rust to build this checkout.`);
+      if (!existsSync(executable)) {
+        failureMessage = 'Kumi has no installed native executable. Use a published native release or install Rust to build this checkout.';
+        throw new Error(failureMessage);
+      }
     }
+    failureMessage = 'Kumi could not start the installed native application. Run the installer to repair it.';
     process.exitCode = setup ? 0 : run(executable, args, env);
   }
-} catch (error) {
-  console.error(`Kumi: ${error instanceof Error ? error.message : error}`);
+} catch {
+  // Spawn and filesystem errors can include private environment values and paths.
+  console.error(failureMessage);
   process.exitCode = 1;
 }

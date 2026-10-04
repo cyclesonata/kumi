@@ -129,6 +129,36 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "reference fixture: --help\n")
 
+    def test_npm_handoff_failure_does_not_log_private_environment_values(self):
+        checkout = self.root / "launcher checkout"
+        (checkout / "scripts").mkdir(parents=True)
+        shutil.copyfile(release.native.ROOT / "scripts/native-kumi.mjs", checkout / "scripts/native-kumi.mjs")
+        (checkout / "package.json").write_text('{"version":"99.0.0"}')
+        (checkout / "install.sh").write_text("exit 0\n")
+        tools = self.root / "launcher tools"
+        tools.mkdir()
+        system = self.root / "launcher-system-private-marker"
+        if os.name == "nt":
+            helper = system / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            helper.parent.mkdir(parents=True)
+            shutil.copyfile(self.root / "stage" / self.binary, helper)
+        else:
+            helper = tools / "sh"
+            helper.symlink_to(shutil.which("sh"))
+        env = dict(os.environ, PATH=str(tools), SystemRoot=str(system),
+                   KUMI_HOME=str(self.root / "launcher-home-private-marker"),
+                   KUMI_VERSION="launcher-version-private-marker")
+        env.pop("KUMI_REFERENCE_RUNTIME", None)
+        for missing_helper in (False, True):
+            if missing_helper:
+                helper.unlink()
+            result = subprocess.run([shutil.which("node"), str(checkout / "scripts/native-kumi.mjs"), "--setup"],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("Kumi", result.stderr)
+            for marker in ("launcher-system-private-marker", "launcher-home-private-marker", "launcher-version-private-marker"):
+                self.assertNotIn(marker, result.stdout + result.stderr)
+
     @unittest.skipIf(os.name == "nt", "PowerShell acquisition is exercised by installer CI")
     def test_npm_only_handoff_installs_native_without_rust_or_moving_credentials(self):
         class Quiet(http.server.SimpleHTTPRequestHandler):
