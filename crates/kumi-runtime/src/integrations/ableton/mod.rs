@@ -11,6 +11,7 @@ pub mod context;
 pub mod display;
 pub mod fast;
 pub mod focus;
+pub mod history;
 pub mod fold;
 mod inference;
 pub mod pins;
