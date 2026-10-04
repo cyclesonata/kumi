@@ -7,6 +7,7 @@ mod arrangement;
 mod capture;
 pub mod audio;
 mod audition;
+mod clip_launch;
 mod device_parameter;
 pub mod device_state;
 mod events;
