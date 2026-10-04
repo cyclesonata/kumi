@@ -312,7 +312,20 @@ async fn command_and_plugin_traces_match_typescript() {
                 files.sort();
                 use sha2::{Digest, Sha256};
                 let files = files.iter().map(|path| json!({"name":path.file_name().unwrap().to_str().unwrap(),"sha256":hex::encode(Sha256::digest(std::fs::read(path).unwrap()))})).collect::<Vec<_>>();
-                eq(json!(files), &case["files"], &format!("{label} files"));
+                // The source preserves the CPU's sign bit for Infinity * sin(0)'s NaN.
+                // Compare whole-file hashes with the recorded source on the same CPU;
+                // every finite WAV continues to use its original shared byte oracle.
+                let architecture = match std::env::consts::ARCH {
+                    "aarch64" => "arm64",
+                    "x86_64" => "x64",
+                    other => other,
+                };
+                let expected_files = if case.get("filesByArchitecture").is_some() && fixture["filesArchitecture"] != architecture {
+                    case["filesByArchitecture"].get(architecture).expect("record the exact source WAV fixture for this architecture")
+                } else {
+                    &case["files"]
+                };
+                eq(json!(files), expected_files, &format!("{label} files"));
             }
         })
         .await;

@@ -1,9 +1,12 @@
 // Regenerate after `npm run build -w @kumi/runtime`; body comes from the current TypeScript source.
+// Run once normally, then on the other supported CPU architecture with --record-file-architecture.
+// Infinity * Math.sin(0) produces differently signed NaNs on ARM64/x64; retain exact file bytes for both.
 import {readFileSync,writeFileSync,unlinkSync,mkdtempSync,readdirSync,existsSync,rmSync} from 'node:fs';
 import ts from 'typescript';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createHash} from 'node:crypto';
+import {isDeepStrictEqual} from 'node:util';
 const root=new URL('../../../../',import.meta.url);
 const original=new URL('packages/runtime/src/integrations/ableton/index.ts',root);
 const file=new URL('packages/runtime/dist/src/integrations/ableton/index.command-oracle.js',root);
@@ -55,5 +58,19 @@ for(const input of [{},{device:1},{device:'stale'},{device:'7:device:0:0'}])awai
 for(const config of [{},{names:['Cutoff',null,9,'Drive'],parameters:[{name:'Drive'}, {name:'Cutoff',ref:4,displayValue:''}]},{deviceName:'Serum'},{deviceRead:{isError:true,content:[{type:'text',text:'only a plug-in'}]}},{deviceRead:{isError:true,content:[{type:'text',text:'Nope'}]}},{deviceRead:wrap({names:{}})},{deviceDiscovery:wrap({items:{}})},{parameterRead:wrap({items:[null]})},{parameterRead:wrap({items:[],nextCursor:'again'})},{throwRead:'Bridge failed'}])await run('plugin-guide',{...seed,...config},[{input:{device:'7:device:0:0'},plugin:true}]);
 for(const wavetable of [[],true,{keyframes:[]},{keyframes:[null]},{keyframes:[{harmonics:{length:4294967296}}]},{keyframes:[{harmonics:{length:'Infinity'}}]},{from_audio:[]}])await run('wavetable-invalid',seed,[{input:{device:'7:device:0:0',action:'wavetable',wavetable},plugin:true}]);
 for(const wavetable of [{count:1},{name:'  A / bad:*?\"<>| name  ',count:1,keyframes:[{shape:'sine'}]},{name:'Pulse',count:2,keyframes:[{shape:'pulse',width:.13},{shape:'square'}]},{name:'Silence',count:1,keyframes:[{shape:'unknown'}]},{name:'Harmonics',count:1,keyframes:[{harmonics:[1,.5,-.25]}]},{name:'Coerced',count:1,keyframes:[{harmonics:'123'}]},{name:'Object',count:1,keyframes:[{harmonics:{length:2,0:1,1:.2}}]},{name:'Invalid',count:2,keyframes:[{harmonics:['x']},{shape:'sine'}]},{name:'Infinite',count:2,keyframes:[{harmonics:['Infinity']},{shape:'sine'}]}])await run('wavetable-write',seed,[{input:{device:'7:device:0:0',action:'wavetable',wavetable},plugin:true},{input:{device:'7:device:0:0',action:'wavetable',wavetable},plugin:true}]);
-writeFileSync(new URL('command-tools-oracle.json',import.meta.url),JSON.stringify({cases})+'\n');console.log(cases.length+' source command/plug-in sequences');
+const output=new URL('command-tools-oracle.json',import.meta.url);
+if(process.argv.includes('--record-file-architecture')){
+ const fixture=JSON.parse(readFileSync(output,'utf8'));
+ if(!fixture.filesArchitecture||fixture.filesArchitecture===process.arch)throw Error('record a different architecture after generating the base fixture');
+ if(fixture.cases.length!==cases.length)throw Error('source case count changed; regenerate both architectures');
+ for(let index=0;index<cases.length;index++){
+  const {files:expectedFiles,filesByArchitecture,...expected}=fixture.cases[index];
+  const {files,...actual}=cases[index];
+  if(!isDeepStrictEqual(actual,expected))throw Error(`non-file source output changed for case ${index}; regenerate both architectures`);
+  if(!isDeepStrictEqual(files,expectedFiles))fixture.cases[index].filesByArchitecture={...filesByArchitecture,[process.arch]:files};
+  else if(filesByArchitecture){delete filesByArchitecture[process.arch];if(!Object.keys(filesByArchitecture).length)delete fixture.cases[index].filesByArchitecture;}
+ }
+ writeFileSync(output,JSON.stringify(fixture)+'\n');
+}else writeFileSync(output,JSON.stringify({filesArchitecture:process.arch,cases})+'\n');
+console.log(cases.length+' source command/plug-in sequences on '+process.arch);
 }finally{unlinkSync(file)}
