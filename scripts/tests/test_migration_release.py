@@ -145,16 +145,19 @@ class MigrationRelease(unittest.TestCase):
         else:
             helper = tools / "sh"
             helper.symlink_to(shutil.which("sh"))
-        env = dict(os.environ, PATH=str(tools), SystemRoot=str(system),
+        env = dict(os.environ, PATH=str(tools), KUMI_TEST_SYSTEM_ROOT=str(system),
                    KUMI_HOME=str(self.root / "launcher-home-private-marker"),
                    KUMI_VERSION="launcher-version-private-marker")
         env.pop("KUMI_REFERENCE_RUNTIME", None)
         for missing_helper in (False, True):
             if missing_helper:
                 helper.unlink()
-            result = subprocess.run([shutil.which("node"), str(checkout / "scripts/native-kumi.mjs"), "--setup"],
-                                    env=env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 1)
+            # Let Node initialize with Windows' real SystemRoot before injecting the test helper path.
+            wrapper = "import { pathToFileURL } from 'node:url'; process.env.SystemRoot = process.env.KUMI_TEST_SYSTEM_ROOT; await import(pathToFileURL(process.argv[1]).href);"
+            result = subprocess.run([shutil.which("node"), "--input-type=module", "-e", wrapper,
+                                     str(checkout / "scripts/native-kumi.mjs"), "--setup"],
+                                    env=env, capture_output=True, text=True, encoding="utf-8")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("Kumi", result.stderr)
             for marker in ("launcher-system-private-marker", "launcher-home-private-marker", "launcher-version-private-marker"):
                 self.assertNotIn(marker, result.stdout + result.stderr)
