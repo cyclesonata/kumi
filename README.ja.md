@@ -67,11 +67,17 @@ Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業
 
 新しいバージョンがあると、Kumi は起動時に知らせます。Kumi の中で `/update`、またはターミナルで `kumi update` を実行すると新しいバージョンを取得し、ブリッジも一緒に更新されます。`kumi update --check` は確認だけ、`kumi update --rollback` は元に戻します。確認を止めるには、`~/.kumi/settings.json` に `"updateCheck": false` を加えます。
 
+現在の 1.7.4 インストーラー版からは、Live を閉じて `kumi update` を実行し、いつもどおり Kumi を開きます。
+設定、サインイン、会話、ライブラリーはそのままです。最初の起動時に既存のブリッジもネイティブ版へ切り替わります。
+[移行とロールバックの詳細](docs/ja/KUMI_GUIDE.md#更新レポートアンインストール)。
+
 [ガイド](docs/ja/KUMI_GUIDE.md) · [コマンド、キー、画面](docs/ja/KUMI_TUI.md) · [Kumi が Set を変更するしくみ](docs/ja/KUMI_CHANGES.md) · [変更履歴（英語）](CHANGELOG.md)
 
 ## 現状
 
-Kumi 1.7.4 は macOS 上の Ableton Live 12.4（ベータ）で確認しています。Windows では、Kumi のインストールと Live への接続を確認済みです。それ以外は Windows ではまだ新しいので、何か問題が起きたら `kumi report` を送ってください。次は Renoise と Reaper への対応を予定しています。
+最後の TypeScript 版 Kumi 1.7.4 は macOS の Ableton Live 12.4（ベータ）で確認済みで、Windows ではインストールと接続を確認しました。
+ネイティブ版 1.7.5 には参照実装との比較テストと隔離した移行テストがありますが、実際の Live での検証はまだ必要です。
+問題が起きたら `kumi report` を送ってください。次は Renoise と Reaper への対応を予定しています。
 
 ## 開発
 

@@ -366,7 +366,8 @@ async fn native_bridge_configuration_resolves_binary_and_sibling_metadata() {
     let binary = s.root.path().join("native/ableton-mcp-server");
     fs::create_dir_all(binary.parent().unwrap()).unwrap();
     fs::write(&binary, "native fixture").unwrap();
-    fs::write(binary.parent().unwrap().join("package.json"), json!({"version":kumi_runtime::KUMI_VERSION,"bridge":"1.0.11"}).to_string()).unwrap();
+    fs::write(binary.parent().unwrap().join("package.json"), json!({"version":kumi_runtime::KUMI_VERSION,"bridge":"1.0.11"}).to_string())
+        .unwrap();
     fs::write(&s.config, json!({"version":2,"server":{"command":binary,"args":["--config",s.config]}}).to_string()).unwrap();
     let server = read_bridge_server(s.config.to_str().unwrap()).unwrap();
     assert!(server.native());
