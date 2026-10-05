@@ -63,6 +63,11 @@ jobs:
           cache-dependency-path: crates/kumi-runtime/tests/support/package-lock.json
       - name: Install the official MCP and model SDKs the interoperability tests run beside Kumi's
         run: npm ci --prefix crates/kumi-runtime/tests/support --ignore-scripts
+      - name: The published Kumi 1.7.5, fetched once for the migration tests
+        shell: bash
+        run: |
+          python="$(command -v python3 || command -v python)"
+          echo "KUMI_LEGACY_APP=$("$python" scripts/fetch-legacy-release.py "$RUNNER_TEMP/kumi-1.7.5")" >> "$GITHUB_ENV"
       - run: cargo fmt --all --check
       - name: Every test, in a home of their own (no test reaches this machine's Live folders or ~/.kumi)
         env:
@@ -111,6 +116,11 @@ jobs:
           cache-dependency-path: crates/kumi-runtime/tests/support/package-lock.json
       - name: Install the official MCP and model SDKs the interoperability tests run beside Kumi's
         run: npm ci --prefix crates/kumi-runtime/tests/support --ignore-scripts
+      - name: The published Kumi 1.7.5, fetched once for the migration tests
+        shell: bash
+        run: |
+          python="$(command -v python3 || command -v python)"
+          echo "KUMI_LEGACY_APP=$("$python" scripts/fetch-legacy-release.py "$RUNNER_TEMP/kumi-1.7.5")" >> "$GITHUB_ENV"
       - name: Windows input regressions
         if: runner.os == 'Windows'
         shell: pwsh
