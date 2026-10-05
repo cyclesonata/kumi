@@ -12,12 +12,19 @@ use kumi_runtime::{
     core::errors::FailureKind,
     integrations::ableton::project::since,
     providers::{
-        models::{ApiKeyCheck, ModelInfo},
+        models::{ApiKeyCheck, ModelInfo, ServiceTier},
         provider_info, Effort, SignIn,
     },
 };
 use std::collections::HashMap;
 
+/// After choosing a model: say when `/fast` puts it on its faster tier, since that costs more.
+fn fast_note(tier: Option<&ServiceTier>) -> String {
+    tier.map(|tier| {
+        format!(" {} is on{}; /fast turns it off.", tier.name, tier.description.as_ref().map(|d| format!(": {d}")).unwrap_or_default())
+    })
+    .unwrap_or_default()
+}
 /// A word of a /recipe line: quoted when it has spaces, quotes or backslashes, so the line reads back the same.
 fn recipe_word(text: &str) -> String {
     // A name like 808 or true goes in quotes too, so it stays a name rather than a number or a switch.
@@ -1056,7 +1063,8 @@ impl TuiApp {
             return Some("no model chosen".into());
         };
         let name = current.name.unwrap_or_else(|| model.split_once('/').map(|(_, m)| m).unwrap_or(&model).into());
-        Some(current.effort.map(|e| format!("{name} · {}", e.as_str())).unwrap_or(name))
+        let label = current.effort.map(|e| format!("{name} · {}", e.as_str())).unwrap_or(name);
+        Some(current.fast.map(|tier| format!("{label} · {}", tier.name.to_lowercase())).unwrap_or(label))
     }
     pub(super) fn tokens_used(&self) -> String {
         let Some(provider) = self.0.options.models.as_ref().and_then(|m| m.current().provider).as_deref().and_then(ProviderId::parse)
@@ -1181,10 +1189,11 @@ impl TuiApp {
         };
         self.notice(
             &format!(
-                "Kumi talks to {} from your next message{effort}.{}{}",
+                "Kumi talks to {} from your next message{effort}.{}{}{}",
                 current.name.as_deref().unwrap_or(value),
                 if current.pinned { " KUMI_MODEL is set, so this lasts until Kumi closes." } else { "" },
-                note.map(|n| format!(" {n}")).unwrap_or_default()
+                note.map(|n| format!(" {n}")).unwrap_or_default(),
+                fast_note(current.fast.as_ref())
             ),
             NoticeTone::Info,
         );
