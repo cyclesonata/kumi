@@ -20,6 +20,26 @@
   <img src="docs/assets/kumi-screenshot.png" alt="Kumi rebuilding a Drift bass from a video tutorial: the conversation with each step it took, FOCUS showing the new track's device chain, and HISTORY with an undo for every change" width="760">
 </p>
 
+## Quickstart
+
+Needs Ableton Live 12 on macOS 13+ or Windows 10/11.
+
+**macOS** (Terminal):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+```
+
+**Windows** (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+Kumi opens once it's installed and walks you through signing in and connecting to Live. After that, just run `kumi`. Something off? `kumi doctor` says what to fix.
+
+[Guide](docs/en/KUMI_GUIDE.md) · [Commands, keys and screens](docs/en/KUMI_TUI.md) · [How Kumi changes your Set](docs/en/KUMI_CHANGES.md) · [Changelog](CHANGELOG.md)
+
 ## What it does
 
 - **Changes almost anything in the Set:** tempo, scale and groove; the mixer, routing and sidechains; tracks, scenes and clips; notes and MIDI transforms; devices, racks and their parameters.
@@ -34,42 +54,6 @@
 - **Remembers:** notes about you and each Set, techniques it learns from what you keep, and recipes you can replay. Every save is shown, and one click forgets it.
 - **Keeps your conversations** for each Set, and says what changed while it was closed.
 - **Works with your model:** sign in with ChatGPT, or use an OpenAI, Anthropic or OpenCode API key.
-
-## Get started
-
-You need Ableton Live 12 on macOS 13 or later, or on Windows 10 or 11. Live 12.4 or later adds the right-click menu, MIDI written straight into the Arrangement and offline renders. Making Max for Live devices needs Max for Live (Live Suite, or Standard with the add-on). Kumi runs as a native application.
-
-**macOS:** open Terminal and paste:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
-```
-
-**Windows:** open PowerShell and paste:
-
-```powershell
-irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
-```
-
-Kumi starts as soon as it's installed, and its setup runs the steps still missing:
-
-1. **Sign in**: ChatGPT, or an Anthropic, OpenAI or OpenCode key.
-2. **Connect to Live**: Kumi puts its bridge in place. If Live is open, Kumi offers to restart it, and Live asks you to save your work first.
-3. **Control Surface**: in Live, pick **AbletonMcpBridge** as a Control Surface in **Settings → Link, Tempo & MIDI**. Kumi notices by itself, and Live remembers the choice.
-
-Esc leaves a step for later. Next time, run `kumi` (on macOS, in a new terminal window). `kumi login`, `kumi bridge` and `kumi doctor` do each step on its own.
-
-Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live. While Kumi works, Enter tells it more (it reads it after the step under way), Tab sends a message for after, and `/btw` asks something on the side.
-
-Something off? `kumi doctor` checks everything and says what to run. `kumi report` puts what went wrong in one file to send us. `kumi uninstall` removes Kumi.
-
-Kumi tells you when there's a newer version as it starts. `/update` inside Kumi, or `kumi update` in a terminal, gets it and brings the bridge along; `kumi update --check` only asks, and `kumi update --rollback` goes back. To stop the check, put `"updateCheck": false` in `~/.kumi/settings.json`.
-
-Updating from Kumi 1.7.5 or earlier? Close Live, run `kumi update`, then open Kumi as usual.
-Your settings, sign-ins, conversations and library stay in place. The native app switches the
-existing bridge on first startup. [Migration and rollback details](docs/en/KUMI_GUIDE.md#updating-reporting-and-uninstalling).
-
-[Guide](docs/en/KUMI_GUIDE.md) · [Commands, keys and screens](docs/en/KUMI_TUI.md) · [How Kumi changes your Set](docs/en/KUMI_CHANGES.md) · [Changelog](CHANGELOG.md)
 
 ## Status
 

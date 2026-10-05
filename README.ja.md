@@ -20,6 +20,26 @@
   <img src="docs/assets/kumi-screenshot.png" alt="ビデオチュートリアルから Drift のベースを作り直す Kumi：手順ごとの会話、新しいトラックのデバイスチェーンを表示する FOCUS、変更ごとに取り消しの付いた HISTORY" width="760">
 </p>
 
+## クイックスタート
+
+macOS 13 以降、または Windows 10・11 上の Ableton Live 12 が必要です。
+
+**macOS**（ターミナル）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+```
+
+**Windows**（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+インストールが終わると Kumi が起動し、サインインと Live への接続を案内します。次回からは `kumi` を実行するだけです。うまくいかないときは `kumi doctor` が直し方を教えます。
+
+[ガイド](docs/ja/KUMI_GUIDE.md) · [コマンド、キー、画面](docs/ja/KUMI_TUI.md) · [Kumi が Set を変更するしくみ](docs/ja/KUMI_CHANGES.md) · [変更履歴（英語）](CHANGELOG.md)
+
 ## できること
 
 - **Set のほぼすべてを変更：** テンポ、スケール、グルーヴ。ミキサー、ルーティング、サイドチェイン。トラック、シーン、クリップ。ノートと MIDI 変換。デバイス、ラックとそのパラメータ。
@@ -34,42 +54,6 @@
 - **覚える：** あなたと各 Set についてのメモ、残した音から学んだテクニック、再実行できるレシピ。保存したものはすべて表示され、クリック一つで忘れさせられます。
 - **会話を保存：** Set ごとに会話を保存し、閉じていた間に変わったことも伝えます。
 - **好きなモデルで：** ChatGPT でサインインするか、OpenAI・Anthropic・OpenCode の API キーを使います。
-
-## はじめかた
-
-macOS 13 以降、または Windows 10・11 上の Ableton Live 12 が必要です。Live 12.4 以降では、右クリックメニュー、アレンジメントへの MIDI の直接書き込み、オフラインレンダリングが加わります。Max for Live デバイスを作るには Max for Live（Live Suite、またはアドオンを追加した Standard）が必要です。Kumi はネイティブアプリとして動作します。
-
-**macOS：** ターミナルを開いて貼り付けます。
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
-```
-
-**Windows：** PowerShell を開いて貼り付けます。
-
-```powershell
-irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
-```
-
-Kumi はインストールされるとすぐに起動し、セットアップがまだ済んでいないステップだけを進めます：
-
-1. **Sign in**：ChatGPT、または Anthropic・OpenAI・OpenCode のキーでサインインします。
-2. **Connect to Live**：Kumi がブリッジを配置します。Live が開いていれば Kumi が Live の再起動を提案し、その前に Live が作業の保存を求めます。
-3. **Control Surface**：Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** を Control Surface として選びます。Kumi は自分で気づき、Live はこの選択を覚えておきます。
-
-Esc を押すと、そのステップは後回しになります。次回からは `kumi` を実行します（macOS では新しいターミナルウィンドウで）。`kumi login`、`kumi bridge`、`kumi doctor` では、各ステップを個別に行えます。
-
-Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。Kumi が作業中でも、Enter で追加の指示を伝えられます（今のステップの後に読まれます）。Tab は作業が終わった後に送るメッセージ、`/btw` は作業とは別にちょっとした質問をします。
-
-うまくいかないときは、`kumi doctor` がすべてを確認し、実行すべきことを教えます。`kumi report` は起きた問題を、私たちに送れるファイル一つにまとめます。`kumi uninstall` で Kumi を削除します。
-
-新しいバージョンがあると、Kumi は起動時に知らせます。Kumi の中で `/update`、またはターミナルで `kumi update` を実行すると新しいバージョンを取得し、ブリッジも一緒に更新されます。`kumi update --check` は確認だけ、`kumi update --rollback` は元に戻します。確認を止めるには、`~/.kumi/settings.json` に `"updateCheck": false` を加えます。
-
-Kumi 1.7.5 以前からは、Live を閉じて `kumi update` を実行し、いつもどおり Kumi を開きます。
-設定、サインイン、会話、ライブラリーはそのままです。最初の起動時に既存のブリッジもネイティブ版へ切り替わります。
-[移行とロールバックの詳細](docs/ja/KUMI_GUIDE.md#更新レポートアンインストール)。
-
-[ガイド](docs/ja/KUMI_GUIDE.md) · [コマンド、キー、画面](docs/ja/KUMI_TUI.md) · [Kumi が Set を変更するしくみ](docs/ja/KUMI_CHANGES.md) · [変更履歴（英語）](CHANGELOG.md)
 
 ## 現状
 

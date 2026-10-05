@@ -8,7 +8,7 @@ HISTORY. It plays, records and renders, listens to audio and compares it with a
 reference, watches video tutorials, makes Max for Live devices, looks things up
 on the web, and remembers how you work.
 
-To install Kumi and connect it to Live, follow [Get started](../../README.md#get-started).
+To install Kumi and connect it to Live, follow [Quickstart](../../README.md#quickstart).
 This guide covers everything after that. For the keys and the screen, see
 [commands, keys and screens](KUMI_TUI.md); for how changes and undo work, see
 [how Kumi changes your Set](KUMI_CHANGES.md).
@@ -589,7 +589,7 @@ be closed, and the bridge's previous generation must still be available. Repeati
 returns to the native app. Kumi never quits Live itself.
 
 Very old installers using Node 22 refuse the new release before downloading it. If `kumi update`
-says it needs another Node version, run the [installer](../../README.md#get-started) again with the
+says it needs another Node version, run the [installer](../../README.md#quickstart) again with the
 same `KUMI_HOME`; it installs the native app while keeping your data. npm users can keep using
 `npm run setup` and `npm run kumi -- ...`: Cargo builds this checkout when available; otherwise
 these commands install the matching published native release.
