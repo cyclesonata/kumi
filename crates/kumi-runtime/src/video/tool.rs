@@ -168,7 +168,13 @@ impl KernelTool for VideoTool {
                 }
                 (views.iter().flatten().next().copied(), views)
             }
-            other => (other.and_then(Value::as_str).and_then(Region::parse), Vec::new()),
+            Some(Value::String(part)) if part == "whole" => (None, Vec::new()),
+            Some(Value::String(part)) => match Region::parse(part) {
+                Some(region) => (Some(region), Vec::new()),
+                None => return Ok(ToolResult::error(format!("zoom has no part called {}.", stringify(&json!(part))))),
+            },
+            Some(Value::Null) | None => (None, Vec::new()),
+            Some(_) => return Ok(ToolResult::error("zoom is a part of the picture (\"bottom\") or a list of them.")),
         };
         let listen_from = time("listen_from");
         let listen_to = time("listen_to");

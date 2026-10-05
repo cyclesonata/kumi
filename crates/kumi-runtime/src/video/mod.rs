@@ -521,6 +521,14 @@ impl Watcher<'_> {
     }
 }
 
+/// "a, b and c".
+fn and_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
 /// What's said of the frames Kumi couldn't take: one note for each reason, with their times, rather
 /// than one per frame; and how many it then didn't try.
 pub fn missed_frames(missed: &[(f64, String)], untried: usize) -> Vec<String> {
@@ -872,16 +880,24 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             },
         )
     };
-    // Each frame Kumi takes, and the part of the picture: with views, each moment in each part, at most
-    // MAX_SHOTS of them.
+    // Each frame Kumi takes, and the part of the picture: with views, each moment in each part, the
+    // earliest moments first, at most MAX_SHOTS of them.
     let views = if looked && !request.views.is_empty() { request.views.clone() } else { vec![region] };
-    let mut shots: Vec<(f64, Option<Region>)> = wanted.iter().flat_map(|at| views.iter().map(move |view| (*at, *view))).collect();
+    let mut moments = wanted.clone();
+    moments.sort_by(f64::total_cmp);
+    let mut shots: Vec<(f64, Option<Region>)> = moments.iter().flat_map(|at| views.iter().map(move |view| (*at, *view))).collect();
     if shots.len() > MAX_SHOTS {
-        notes.push(format!(
-            "That's {} views; Kumi showed the first {MAX_SHOTS} (the earliest moments): ask for the rest in another look.",
-            shots.len()
-        ));
+        let asked = shots.len();
         shots.truncate(MAX_SHOTS);
+        let left: Vec<_> = moments
+            .iter()
+            .filter(|at| shots.iter().filter(|(shot, _)| shot == *at).count() < views.len())
+            .map(|at| format_time(*at))
+            .collect();
+        notes.push(format!(
+            "That's {asked} views; Kumi showed the first {MAX_SHOTS}, the earliest moments: ask for {} in another look.",
+            and_list(&left)
+        ));
     }
     let mut frames = Vec::new();
     let mut sound = None;

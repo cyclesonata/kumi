@@ -297,13 +297,30 @@ async fn one_look_shows_each_moment_in_each_part_asked_for() {
     assert!(captions[0].starts_with("Frame at 0:02 (close-up: bottom-left)") && captions[1].starts_with("Frame at 0:02,"), "{captions:?}");
     assert!(captions[2].starts_with("Frame at 0:07 (close-up: bottom-left)") && captions[3].starts_with("Frame at 0:07,"), "{captions:?}");
     assert!(result.text.contains("0:02 (bottom-left close-up), 0:02, 0:07 (bottom-left close-up), 0:07."), "{}", result.text);
-    // Twelve moments in two parts each are 24 pictures: the first 16 come, and the note says so.
-    let moments: Vec<_> = (0..12).map(|second| json!(second)).collect();
+    // Twelve moments in two parts each are 24 pictures: the earliest moments' 16 come, however the moments
+    // were given, and the note names the rest.
+    let moments: Vec<_> = (0..12).rev().map(|second| json!(second)).collect();
     let many = look(json!({"url":video,"look_at":moments,"zoom":["whole","bottom"]})).await;
     assert_eq!(many.images.len(), 16);
-    assert!(many.text.contains("That's 24 views; Kumi showed the first 16"), "{}", many.text);
+    assert!(many.images.first().unwrap().caption.as_deref().unwrap().starts_with("Frame at 0:00"), "{:?}", many.images[0].caption);
+    assert!(
+        many.images.last().unwrap().caption.as_deref().unwrap().starts_with("Frame at 0:07 (close-up: bottom)"),
+        "{:?}",
+        many.images[15].caption
+    );
+    assert!(
+        many.text.contains(
+            "That's 24 views; Kumi showed the first 16, the earliest moments: ask for 0:08, 0:09, 0:10 and 0:11 in another look."
+        ),
+        "{}",
+        many.text
+    );
     let wrong = look(json!({"url":video,"look_at":["0:02"],"zoom":["bottom","sideways"]})).await;
     assert!(wrong.is_error && wrong.text.contains("zoom has no part called \"sideways\""), "{}", wrong.text);
+    let string = look(json!({"url":video,"look_at":["0:02"],"zoom":"bottom-left, bottom-right"})).await;
+    assert!(string.is_error && string.text.contains("zoom has no part called \"bottom-left, bottom-right\""), "{}", string.text);
+    let whole = look(json!({"url":video,"look_at":["0:02"],"zoom":"whole"})).await;
+    assert_eq!((whole.is_error, whole.images.len()), (false, 1), "{}", whole.text);
     let named = look(json!({"url":video,"look_at":["0:02"],"zoom":["bottom", 3]})).await;
     assert!(named.is_error && named.text.contains("zoom's parts are names"), "{}", named.text);
     let alone = look(json!({"url":video,"zoom":["bottom"]})).await;
