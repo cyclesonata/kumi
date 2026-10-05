@@ -8,7 +8,7 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 
 ## 登录并选择模型
 
-在 Kumi 中，`/login` 用于登录（第一次时，Kumi 会自己打开它）：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
+在 Kumi 中，`/login` 用于登录（第一次时，Kumi 的设置会先问你）：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
 
 | 提供方 | 模型名称 | 登录方式 |
 | --- | --- | --- |
@@ -43,12 +43,13 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 
 ## 连接 Live
 
-Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。第一次打开 Kumi 时，以及每当它自带的桥接比 Live 中的新时，Kumi 都会提出连接：
+Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。第一次打开 Kumi 时，以及每当它自带的桥接比 Live 中的新时，Kumi 的设置都会在应用内只完成尚未完成的步骤：
 
-1. 选择 **Connect now**。Kumi 会关闭，把桥接放到位，再重新打开。如果 Live 正开着，Kumi 会先请它退出（Live 会提示你保存工作），之后再把它重新打开；你也可以自己退出 Live，Kumi 会等待。
-2. 第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Live 一应答，Kumi 就会连接，Live 也会记住这个选择。
+1. **Sign in**：如果 Kumi 还没有登录，先登录。
+2. **Connect to Live**：Kumi 把桥接放到位并打开 Live。如果 Live 正开着，选择 **Restart Live now**（Kumi 请 Live 退出，Live 会先提示你保存工作）或 **I'll restart it**（Kumi 等你自己退出 Live）。
+3. **Control Surface**：第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。
 
-选择 **Later** 时，Kumi 暂时在不连接 Live 的情况下聊天，下次会再次提出。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
+在某一步按 Esc，会把这一步留到以后：Kumi 暂时在不连接 Live 的情况下聊天，下次会再次提出这一步。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
 
 Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包括你移到别处的 User Library（为此它会读取 Live 自己的设置）。`KUMI_REMOTE_SCRIPTS_DIR` 可以覆盖这个位置。
 

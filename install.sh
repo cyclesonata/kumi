@@ -21,14 +21,28 @@ main() {
   elif [ -n "${KUMI_VERSION:-}" ]; then base="https://github.com/user1303836/kumi/releases/download/v${KUMI_VERSION#v}"
   else base="https://github.com/user1303836/kumi/releases/latest/download"; fi
 
-  bold=""; dim=""; reset=""
-  if [ -t 1 ]; then bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"; reset="$(printf '\033[0m')"; fi
+  # Plain lines, as in Kumi's own setup: the steps aligned, "done" in mint. Colour only in a terminal
+  # that has it, and never with NO_COLOR.
+  bold=""; dim=""; mint=""; reset=""; tty=""
+  if [ -t 1 ] && [ "${TERM:-}" != "dumb" ]; then
+    tty=1; bold="$(printf '\033[1m')"; dim="$(printf '\033[2m')"; reset="$(printf '\033[0m')"
+    if [ -z "${NO_COLOR:-}" ]; then
+      case "${COLORTERM:-}" in
+        truecolor|24bit) mint="$(printf '\033[38;2;134;227;181m')" ;;
+        *) mint="$(printf '\033[38;5;115m')" ;;
+      esac
+    fi
+  fi
   say() { printf '%s\n' "$*"; }
-  step() { printf '%s %s\n' "${dim}›${reset}" "$*"; }
+  # A step's line: "…" while it runs (in a terminal), then "done" and what it did.
+  begin() { step_name="$1"; if [ -n "$tty" ]; then printf '  %-20s%s' "$1" "${dim}…${reset}"; fi; }
+  finish() {
+    if [ -n "$tty" ]; then printf '\r\033[K'; fi
+    if [ -n "${1:-}" ]; then printf '  %-20s%s%s\n' "$step_name" "${mint}done${reset}" "${dim} · $1${reset}"
+    else printf '  %-20s%s\n' "$step_name" "${mint}done${reset}"; fi
+  }
   fail() { printf '\n%s\n' "Kumi couldn't be installed: $*" >&2; exit 1; }
 
-  say ""
-  say "${bold}Installing Kumi${reset}, a studio partner for Ableton Live"
   say ""
 
   # ── What this computer is ──────────────────────────────────────────────
@@ -77,7 +91,6 @@ main() {
   trap 'rm -rf "$work"' EXIT INT TERM
 
   # ── Which Kumi ─────────────────────────────────────────────────────────
-  step "Finding the latest Kumi…"
   fetch "$base/kumi-release-$target.json" "$work/release.json"; got=$?
   if [ "$got" -ne 0 ]; then
     # curl -f exits 22, and wget 8, when the server answered with an error (no release there) rather than not at all.
@@ -90,16 +103,23 @@ main() {
   printf '%s\n' "$kumi_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$' || fail "the release version didn't make sense."
   printf '%s\n' "$bundle" | grep -Eq '^[A-Za-z0-9_.-]+\.tar\.gz$' || fail "the release archive name didn't make sense."
   printf '%s\n' "$bundle_sha" | grep -Eq '^[0-9a-f]{64}$' || fail "the release checksum didn't make sense."
+  # The header: the wordmark, and the version at the right of a 60-column line.
+  printf '  %s%*s%s\n\n' "${bold}kumi${reset}" "$((56 - ${#kumi_version}))" "" "${dim}${kumi_version}${reset}"
 
   # ── Kumi ───────────────────────────────────────────────────────────────
-  step "Downloading Kumi ${kumi_version}…"
+  begin "Download"
   fetch "$base/$bundle" "$work/kumi.tar.gz" || fail "couldn't download Kumi from GitHub."
   [ "$(sha "$work/kumi.tar.gz")" = "$bundle_sha" ] || fail "Kumi's download didn't match its checksum, so it wasn't used. Try again."
+  finish "checked against its checksum"
+  begin "Install"
   mkdir -p "$work/app" && tar -xzf "$work/kumi.tar.gz" -C "$work/app" || fail "couldn't unpack Kumi."
   KUMI_INSTALLED=1 KUMI_HOME="$KUMI_HOME" "$work/app/kumi" --version >/dev/null 2>&1 || fail "the downloaded Kumi didn't start. Please report this at github.com/user1303836/kumi/issues."
   app="$KUMI_HOME/app"
   rm -rf "$app.previous"; [ -d "$app" ] && mv "$app" "$app.previous"
   mv "$work/app" "$app" || { [ -d "$app.previous" ] && mv "$app.previous" "$app"; fail "couldn't put Kumi in place."; }
+  home_shown="$KUMI_HOME"
+  case "$home_shown" in "$HOME"/*) home_shown="~/${home_shown#"$HOME"/}" ;; esac
+  finish "$home_shown"
 
   # ── The kumi command ───────────────────────────────────────────────────
   mkdir -p "$KUMI_HOME/bin"
@@ -115,6 +135,7 @@ LAUNCHER
   chmod 755 "$KUMI_HOME/bin/kumi"
 
   # ── PATH ───────────────────────────────────────────────────────────────
+  begin "PATH"
   bin="$KUMI_HOME/bin"; marker="# Added by the Kumi installer"; added=""
   case ":$PATH:" in *":$bin:"*) on_path=1 ;; *) on_path="" ;; esac
   if [ -z "${KUMI_NO_MODIFY_PATH:-}" ]; then
@@ -140,25 +161,29 @@ LAUNCHER
     fi
   fi
 
+  case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
+  if [ -n "$added" ]; then finish "added in ${added}, for new terminal windows"
+  elif [ -n "${KUMI_NO_MODIFY_PATH:-}" ] && [ -z "$on_path" ]; then
+    if [ -n "$tty" ]; then printf '\r\033[K'; fi
+    printf '  %-20s%s\n' "PATH" "${dim}left as it is (KUMI_NO_MODIFY_PATH)${reset}"
+  else finish; fi
+
   # ── Done ───────────────────────────────────────────────────────────────
   say ""
-  say "${bold}Kumi $kumi_version is installed.${reset}"
-  case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
-  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in $added, for new terminal windows.${reset}"; fi
-  say "${dim}Update with: kumi update · Remove with: kumi uninstall${reset}"
+  say "  ${dim}Update with: kumi update · Remove with: kumi uninstall${reset}"
   say ""
   # Kumi starts here and now: it signs you in and connects to Live. Its keyboard is the terminal's, since
   # this script's own input is the download.
   if [ -z "${KUMI_NO_LAUNCH:-}" ] && [ -z "${CI:-}" ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
-    say "Starting Kumi…"
+    say "  Starting Kumi…"
     exec "$bin/kumi" </dev/tty
   fi
   if [ -z "$on_path" ]; then
-    say "Next, in a new terminal window (or after: export PATH=\"$bin:\$PATH\"): kumi"
+    say "  Next, in a new terminal window (or after: export PATH=\"$bin:\$PATH\"): kumi"
   else
-    say "Next: kumi"
+    say "  Next: kumi"
   fi
-  say "${dim}It signs you in and connects to Live.${reset}"
+  say "  ${dim}It signs you in and connects to Live.${reset}"
 }
 
 main "$@"

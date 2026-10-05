@@ -16,7 +16,25 @@
   try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
 
   function Say([string]$Text = '') { Write-Host $Text }
-  function Step([string]$Text) { Write-Host "› $Text" -ForegroundColor DarkGray }
+  # Plain lines, as in Kumi's own setup: the steps aligned, "done" in mint (green where the console has no
+  # true colour). No colour with NO_COLOR, or when the output isn't a console.
+  $interactive = -not [Console]::IsOutputRedirected
+  $colour = $interactive -and -not $env:NO_COLOR
+  $esc = [char]27
+  $trueColour = $colour -and ($env:WT_SESSION -or $env:COLORTERM -in @('truecolor', '24bit'))
+  $step = @{ Name = '' }
+  function Doing([string]$Name) {
+    $step.Name = $Name
+    if ($interactive) { Write-Host ('  ' + $Name.PadRight(20) + '…') -NoNewline -ForegroundColor DarkGray }
+  }
+  function Done([string]$Detail = '') {
+    if ($interactive) { Write-Host "`r" -NoNewline }
+    Write-Host ('  ' + $step.Name.PadRight(20)) -NoNewline
+    if ($trueColour) { Write-Host "$esc[38;2;134;227;181mdone$esc[0m" -NoNewline }
+    elseif ($colour) { Write-Host 'done' -NoNewline -ForegroundColor Green }
+    else { Write-Host 'done' -NoNewline }
+    if ($Detail) { Write-Host " · $Detail" -ForegroundColor DarkGray } else { Write-Host ' ' }
+  }
   function Fail([string]$Text) { Write-Host ''; Write-Host "Kumi couldn't be installed: $Text" -ForegroundColor Red; throw 'KumiInstallFailed' }
 
   # 'ok', 'missing' (the server answered 404: nothing there to get) or 'failed' (no answer, after three tries).
@@ -66,8 +84,6 @@
       else { 'https://github.com/user1303836/kumi/releases/latest/download' }
 
     Say ''
-    Write-Host 'Installing Kumi' -NoNewline -ForegroundColor White; Say ', a studio partner for Ableton Live'
-    Say ''
 
     # ── What this computer is ────────────────────────────────────────────
     if ([Environment]::OSVersion.Version.Major -lt 10) { Fail 'Kumi needs Windows 10 or 11.' }
@@ -86,7 +102,6 @@
 
     try {
       # ── Which Kumi ─────────────────────────────────────────────────────
-      Step 'Finding the latest Kumi…'
       $manifestFile = Join-Path $work 'release.json'
       switch (Fetch "$base/kumi-release-$target.json" $manifestFile) {
         'missing' { Fail "there's no Kumi release to install at $($base -replace '^https://', '') yet. Try again later." }
@@ -97,12 +112,19 @@
           $release.kumi -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9_.]+)?$' -or
           $release.bundle -notmatch '^[A-Za-z0-9_.-]+\.tar\.gz$' -or
           $release.sha256 -cnotmatch '^[0-9a-f]{64}$') { Fail "the release description didn't match this computer." }
+      # The header: the wordmark, and the version at the right of a 60-column line.
+      Write-Host '  kumi' -NoNewline -ForegroundColor White
+      Write-Host (' ' * [Math]::Max(1, 56 - $release.kumi.Length)) -NoNewline
+      Write-Host $release.kumi -ForegroundColor DarkGray
+      Say ''
 
       # ── Kumi ───────────────────────────────────────────────────────────
-      Step "Downloading Kumi $($release.kumi)…"
+      Doing 'Download'
       $bundle = Join-Path $work 'kumi.tar.gz'
       if ((Fetch "$base/$($release.bundle)" $bundle) -ne 'ok') { Fail "couldn't download Kumi from GitHub." }
       if ((Sha $bundle) -ne $release.sha256) { Fail "Kumi's download didn't match its checksum, so it wasn't used. Try again." }
+      Done 'checked against its checksum'
+      Doing 'Install'
       $freshApp = Join-Path $work 'app'
       New-Item -ItemType Directory -Force -Path $freshApp | Out-Null
       & $tar -xzf $bundle -C $freshApp
@@ -115,6 +137,7 @@
       if ($hadHome) { $env:KUMI_HOME = $hadHome } else { Remove-Item Env:KUMI_HOME -ErrorAction SilentlyContinue }
       if (-not $started) { Fail 'the downloaded Kumi didn''t start. Please report this at github.com/user1303836/kumi/issues.' }
       Swap $freshApp (Join-Path $KumiHome 'app')
+      Done $KumiHome
     } finally {
       Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
     }
@@ -150,6 +173,7 @@ exit /b %errorlevel%
     [IO.File]::WriteAllText((Join-Path $bin 'kumi.cmd'), $launcher, [Text.Encoding]::ASCII)
 
     # ── PATH ─────────────────────────────────────────────────────────────
+    Doing 'PATH'
     $added = $false
     if (-not $env:KUMI_NO_MODIFY_PATH) {
       # The user PATH as the registry keeps it: %VAR% entries stay unexpanded, and it's written back as a
@@ -167,20 +191,26 @@ exit /b %errorlevel%
     # This window too, so kumi works right away.
     if (-not (($env:Path.Split(';')) | Where-Object { $_.TrimEnd('\') -ieq $bin })) { $env:Path = "$bin;$env:Path" }
 
+    if ($added) { Done "added $bin, for new windows" }
+    elseif ($env:KUMI_NO_MODIFY_PATH) {
+      if ($interactive) { Write-Host "`r" -NoNewline }
+      Write-Host ('  ' + 'PATH'.PadRight(20)) -NoNewline
+      Write-Host 'left as it is in new windows (KUMI_NO_MODIFY_PATH)' -ForegroundColor DarkGray
+    }
+    else { Done }
+
     # ── Done ─────────────────────────────────────────────────────────────
     Say ''
-    Write-Host "Kumi $($release.kumi) is installed." -ForegroundColor White
-    if ($added) { Write-Host "Added $bin to your PATH." -ForegroundColor DarkGray }
-    Write-Host 'Kumi looks best in Windows Terminal (from the Microsoft Store, built into Windows 11).' -ForegroundColor DarkGray
-    Write-Host 'Update with: kumi update · Remove with: kumi uninstall' -ForegroundColor DarkGray
+    Write-Host '  Kumi looks best in Windows Terminal (from the Microsoft Store, built into Windows 11).' -ForegroundColor DarkGray
+    Write-Host '  Update with: kumi update · Remove with: kumi uninstall' -ForegroundColor DarkGray
     Say ''
     # Kumi starts here and now: it signs you in and connects to Live.
     if (-not $env:KUMI_NO_LAUNCH -and -not $env:CI -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
-      Say 'Starting Kumi…'
+      Say '  Starting Kumi…'
       & (Join-Path $bin 'kumi.cmd')
     } else {
-      Say 'Next (in this window, or any new one): kumi'
-      Write-Host 'It signs you in and connects to Live.' -ForegroundColor DarkGray
+      Say '  Next (in this window, or any new one): kumi'
+      Write-Host '  It signs you in and connects to Live.' -ForegroundColor DarkGray
     }
   } catch {
     if ($_.Exception.Message -ne 'KumiInstallFailed') {
