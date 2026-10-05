@@ -59,9 +59,21 @@ impl Response {
 pub trait Fetch {
     async fn fetch(&self, url: &str, init: FetchInit) -> Result<Response, LanguageModelError>;
 }
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct HttpFetch {
     client: reqwest::Client,
+}
+impl Default for HttpFetch {
+    /// Node's fetch gave up connecting after 10 s and on a body that went quiet for 300 s (headers
+    /// included), both retryable; without them a stalled stream waited for the session's quiet timer.
+    fn default() -> Self {
+        Self::with_timeouts(std::time::Duration::from_secs(10), std::time::Duration::from_secs(300))
+    }
+}
+impl HttpFetch {
+    pub fn with_timeouts(connect: std::time::Duration, read: std::time::Duration) -> Self {
+        Self { client: reqwest::Client::builder().connect_timeout(connect).read_timeout(read).build().expect("an HTTP client") }
+    }
 }
 pub fn default_fetch() -> Rc<dyn Fetch> {
     Rc::new(HttpFetch::default())
@@ -142,6 +154,10 @@ pub async fn post_json(
                         return error;
                     }
                     let mut wrapped = ApiCallError::new("Failed to process successful response", &url, Some(body.clone()), Some(status));
+                    // The connection failed mid-stream (a reset, a roam, a stalled read): the SDK's
+                    // network errors are retryable, and the kernel retries only while nothing has
+                    // reached the producer.
+                    wrapped.is_retryable = true;
                     wrapped.cause = Some(error.to_string());
                     wrapped.response_headers = Some(response_headers.clone());
                     wrapped.into()
@@ -172,4 +188,54 @@ pub async fn post_json(
     error.response_body = Some(text);
     error.data = parsed;
     Err(error.into())
+}
+
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A provider that answers 200, sends the start of a stream, then stalls or drops the connection.
+    async fn provider(drop_connection: bool) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let _ = socket.read(&mut request).await;
+            let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+            let part = "data: {\"type\":\"response.reasoning.delta\"}\n\n";
+            socket.write_all(format!("{head}{:x}\r\n{part}\r\n", part.len()).as_bytes()).await.unwrap();
+            if drop_connection {
+                // Mid-chunk, then gone: a reset or a Wi-Fi roam.
+                socket.write_all(b"40\r\npartial").await.unwrap();
+                drop(socket);
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+        url
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_drops_or_stalls_after_200_is_retryable() {
+        for drop_connection in [true, false] {
+            let fetch = HttpFetch::with_timeouts(std::time::Duration::from_secs(2), std::time::Duration::from_millis(300));
+            let url = provider(drop_connection).await;
+            let mut response = post_json(&fetch, &url, Headers::new(), serde_json::json!({"stream":true}), None).await.unwrap();
+            let mut body = response.body.take().unwrap();
+            let mut failure = None;
+            while let Some(chunk) = body.next().await {
+                if let Err(error) = chunk {
+                    failure = Some(error);
+                    break;
+                }
+            }
+            let failure = failure.expect("the stream failed");
+            let api = failure.api_call().expect("an API call error");
+            assert_eq!(api.status_code, Some(200));
+            assert!(api.is_retryable, "dropped: {drop_connection}: {failure:?}");
+            assert_eq!(crate::kernel::failure::retry_delay_ms(&failure, 0), Some(750.0));
+        }
+    }
 }
