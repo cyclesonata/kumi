@@ -104,7 +104,8 @@ main() {
   printf '%s\n' "$bundle" | grep -Eq '^[A-Za-z0-9_.-]+\.tar\.gz$' || fail "the release archive name didn't make sense."
   printf '%s\n' "$bundle_sha" | grep -Eq '^[0-9a-f]{64}$' || fail "the release checksum didn't make sense."
   # The header: the wordmark, and the version at the right of a 60-column line.
-  printf '  %s%*s%s\n\n' "${bold}kumi${reset}" "$((56 - ${#kumi_version}))" "" "${dim}${kumi_version}${reset}"
+  pad=$((56 - ${#kumi_version})); [ "$pad" -gt 0 ] || pad=1
+  printf "  %s%${pad}s%s\n\n" "${bold}kumi${reset}" "" "${dim}${kumi_version}${reset}"
 
   # ── Kumi ───────────────────────────────────────────────────────────────
   begin "Download"
