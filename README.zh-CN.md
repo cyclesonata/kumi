@@ -20,6 +20,26 @@
   <img src="docs/assets/kumi-screenshot.png" alt="Kumi 根据视频教程重建 Drift 贝斯：记录它每一步操作的对话、显示新轨道设备链的 FOCUS，以及每项修改都带撤销的 HISTORY" width="760">
 </p>
 
+## 快速开始
+
+需要 Ableton Live 12，运行在 macOS 13 或更高版本，或 Windows 10、11 上。
+
+**macOS**（终端）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
+```
+
+**Windows**（PowerShell）：
+
+```powershell
+irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
+```
+
+安装完成后 Kumi 会自动启动，引导你登录并连接 Live。之后只需运行 `kumi`。遇到问题？`kumi doctor` 会告诉你该怎么修。
+
+[指南](docs/zh-CN/KUMI_GUIDE.md) · [命令、按键与界面](docs/zh-CN/KUMI_TUI.md) · [Kumi 如何修改你的工程](docs/zh-CN/KUMI_CHANGES.md) · [更新日志（英文）](CHANGELOG.md)
+
 ## 它能做什么
 
 - **修改工程里几乎任何东西：** 速度、音阶与律动；调音台、路由与侧链；轨道、场景与片段；音符与 MIDI 变换；设备、机架及其参数。
@@ -34,42 +54,6 @@
 - **记住：** 关于你和每个工程的笔记、从你保留的内容中学到的技巧，以及可重放的配方。每次保存都会显示，点一下就能让它忘掉。
 - **保存对话：** 为每个工程保存对话，并告诉你它关闭期间发生了哪些变化。
 - **用你的模型：** 使用 ChatGPT 登录，或使用 OpenAI、Anthropic、OpenCode 的 API 密钥。
-
-## 开始使用
-
-需要 Ableton Live 12，运行在 macOS 13 或更高版本，或 Windows 10、11 上。Live 12.4 或更高版本还会加入右键菜单、直接写进编曲视图的 MIDI 以及离线渲染。制作 Max for Live 设备需要 Max for Live（Live Suite，或加装了附加组件的 Standard）。Kumi 作为原生应用运行。
-
-**macOS：** 打开“终端”，粘贴：
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | sh
-```
-
-**Windows：** 打开 PowerShell，粘贴：
-
-```powershell
-irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
-```
-
-Kumi 安装完成后会立即启动，它的设置只完成尚未完成的步骤：
-
-1. **Sign in**：使用 ChatGPT，或使用 Anthropic、OpenAI、OpenCode 的密钥登录。
-2. **Connect to Live**：Kumi 把桥接放到位。如果 Live 正开着，Kumi 会提出重启它，Live 会先提示你保存工作。
-3. **Control Surface**：在 Live 的 **Settings → Link, Tempo & MIDI** 中把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。
-
-按 Esc 可把某一步留到以后。下次运行 `kumi` 即可（在 macOS 上，请在新的终端窗口中运行）。`kumi login`、`kumi bridge` 和 `kumi doctor` 可以单独完成每一步。
-
-在 Kumi 中输入 `/` 查看命令。Esc 停止 Kumi 正在做的事，`/stop` 停止 Live。Kumi 工作时，按 Enter 可以补充说明（它会在当前这一步之后读到），按 Tab 发送一条等它做完再处理的消息，`/btw` 可以顺便问个问题。
-
-遇到问题？`kumi doctor` 会检查所有环节并告诉你该运行什么。`kumi report` 把出错的情况整理成一个可以发给我们的文件。`kumi uninstall` 会卸载 Kumi。
-
-有新版本时，Kumi 会在启动时告诉你。在 Kumi 中输入 `/update`，或在终端运行 `kumi update`，即可获取新版本，桥接也会一并更新；`kumi update --check` 只检查、不安装，`kumi update --rollback` 回到上一个版本。如果不想让它检查，在 `~/.kumi/settings.json` 中加入 `"updateCheck": false`。
-
-从 Kumi 1.7.5 或更早版本升级时，关闭 Live，运行 `kumi update`，然后照常打开 Kumi。
-设置、登录信息、对话和素材库都保留原位。首次启动原生应用时，现有桥接也会切换到原生版本。
-[迁移与回滚说明](docs/zh-CN/KUMI_GUIDE.md#更新报告与卸载)。
-
-[指南](docs/zh-CN/KUMI_GUIDE.md) · [命令、按键与界面](docs/zh-CN/KUMI_TUI.md) · [Kumi 如何修改你的工程](docs/zh-CN/KUMI_CHANGES.md) · [更新日志（英文）](CHANGELOG.md)
 
 ## 当前状态
 

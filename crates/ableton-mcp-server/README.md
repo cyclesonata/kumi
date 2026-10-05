@@ -19,7 +19,7 @@ Started without a configuration, the server never connects to Live.
 
 Run `kumi bridge` with Live closed, then pick **AbletonMcpBridge** as a Control
 Surface in Live. Kumi installs, starts and updates the bridge for you; see
-[Get started](https://github.com/user1303836/kumi/blob/main/README.md#get-started).
+[Quickstart](https://github.com/user1303836/kumi/blob/main/README.md#quickstart).
 
 Kumi starts the server itself and allows only the tools it uses. Its model calls
 the read tools directly. Kumi's own tools make the changes, from tempo and the
