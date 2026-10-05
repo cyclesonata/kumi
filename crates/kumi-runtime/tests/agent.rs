@@ -1554,6 +1554,7 @@ async fn an_answer_that_breaks_off_after_its_words_began_carries_on_once_from_wh
         );
         let carried = js(&h.request(1).prompt);
         assert!(carried.contains("The Reese needs") && carried.contains("connection dropped partway"), "{carried}");
+        assert_eq!(h.transcript_texts(), ["why is my bass harsh?", "The Reese needs a darker filter."], "the note isn't the producer's");
         h.kernel.close().await;
 
         // Once a turn: breaking off again ends it, as before.
