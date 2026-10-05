@@ -5,6 +5,7 @@ use super::{
     errors::{FailureKind, KumiError, RuntimeError},
     gaps::{gap_tools, GAP_GUIDANCE},
     memory::{memory_instructions, memory_tools, MemoryTools, MemoryToolsOptions},
+    recall::{recall_tool, RecallOptions},
     recipes::{recipe_instructions, recipe_tools, RecipeStore, RecipeToolsOptions, RUN_RECIPE_TOOL},
     techniques::{
         asks_for_technique, technique_instructions, technique_tools, TechniqueStore, TechniqueTools, TechniqueToolsOptions, PLAN_TECHNIQUE,
@@ -239,6 +240,7 @@ struct Inner {
     learned: Option<Rc<TechniqueTools>>,
     watching: Vec<Rc<dyn KernelTool>>,
     recipes: Vec<Rc<dyn KernelTool>>,
+    recall: Option<Rc<dyn KernelTool>>,
     listening: Vec<Rc<dyn KernelTool>>,
     browsing: Vec<Rc<dyn KernelTool>>,
     gaps: Vec<Rc<dyn KernelTool>>,
@@ -314,6 +316,19 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
                 })
             })
             .unwrap_or_default();
+        let recall = options.conversations.as_ref().map(|store| {
+            let weak = weak.clone();
+            recall_tool(RecallOptions {
+                conversations: Some(store.clone()),
+                techniques: options.techniques.clone(),
+                recipes: options.recipes.clone(),
+                current: Rc::new(move || {
+                    let inner = weak.upgrade()?;
+                    let s = inner.state.borrow();
+                    Some((s.place.clone()?, s.conversation_id.clone()))
+                }),
+            })
+        });
         let learned = options.techniques.as_ref().map(|store| {
             let emit = emit.clone();
             Rc::new(technique_tools(TechniqueToolsOptions {
@@ -403,6 +418,7 @@ pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> 
             grace_ms,
             notes,
             recipes,
+            recall,
             learned,
             listening,
             watching,
@@ -694,6 +710,7 @@ impl Session {
             tools.extend(self.0.browsing.clone());
             tools.extend(self.0.shelf.clone());
             tools.extend(self.0.recipes.clone());
+            tools.extend(self.0.recall.clone());
             if let Some(learned) = &self.0.learned {
                 tools.extend(learned.tools.clone());
             }
@@ -1614,6 +1631,16 @@ impl SessionController for Session {
     async fn forget(&self, id: &str) -> Result<Option<MemoryNote>, RuntimeError> {
         if let Some(notes) = &self.0.notes {
             notes.forget(id).await
+        } else {
+            Ok(None)
+        }
+    }
+    fn has_change_note(&self) -> bool {
+        true
+    }
+    async fn change_note(&self, id: &str, change: NoteChange) -> Result<Option<MemoryNote>, RuntimeError> {
+        if let Some(notes) = &self.0.notes {
+            notes.change(id, change).await
         } else {
             Ok(None)
         }

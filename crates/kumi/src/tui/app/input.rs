@@ -331,6 +331,7 @@ impl TuiApp {
                     && match cmd.name {
                         "/model" | "/effort" | "/login" | "/logout" => self.0.options.models.is_some(),
                         "/memory" => c.has_memory(),
+                        "/note" => c.has_change_note(),
                         "/recipes" => c.has_recipes(),
                         "/recipe" => c.has_run_recipe(),
                         "/conversations" => c.has_conversations(),
@@ -446,6 +447,22 @@ impl TuiApp {
             }
             self.clear_editor();
             self.run_recipe_now(recipe, with).await;
+            return Ok(());
+        }
+        // A note's new words, from /memory's "Change the words", go straight to the note: no model call.
+        if (command == "/note" || command.starts_with("/note ")) && controller.has_change_note() {
+            let Some((id, words)) = panels::note_command(command) else {
+                self.notice("Give the note's id and its new words: /note p3 Prefers short reverbs on drums", NoticeTone::Info);
+                return Ok(());
+            };
+            match controller.change_note(&id, NoteChange::Text(words)).await {
+                Ok(Some(_)) => {
+                    self.clear_editor();
+                    self.notice(&format!("Changed note {id}."), NoticeTone::Info);
+                }
+                Ok(None) => self.notice(&format!("There's no note {id}; /memory lists them."), NoticeTone::Info),
+                Err(error) => self.notice(&error.message(), NoticeTone::Warn),
+            }
             return Ok(());
         }
         if command == "/stop" && controller.has_stop_live() {
@@ -816,6 +833,7 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/login", about: "Sign in to a provider" },
     Command { name: "/goal", about: "Go after a sound until Kumi gets there" },
     Command { name: "/memory", about: "What Kumi remembers" },
+    Command { name: "/note", about: "Change a note's words: /note <id> <new words>" },
     Command { name: "/recipes", about: "Your saved ways of working" },
     Command { name: "/recipe", about: "Run a recipe now: /recipe <name> blank=value …" },
     Command { name: "/logout", about: "Sign out of a provider" },

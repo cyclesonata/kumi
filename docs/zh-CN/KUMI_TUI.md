@@ -58,7 +58,8 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 | `/model`、`/effort` | 选择模型（来自各提供方自己的列表，然后是你电脑上的模型服务器：Ollama、LM Studio 以及 settings.json 中写的服务器；输入文字可筛选）以及它思考的力度；从你的下一条消息起生效 |
 | `/login`、`/logout` | 登录（在浏览器中用 ChatGPT 登录，或输入只显示为圆点的 API 密钥）或退出登录 |
 | `/goal <what to reach>` | 追求一种声音，直到 Kumi 做到为止。只输入 `/goal` 会继续已暂停的目标；`/goal stop`（或 `/goal end`）结束它 |
-| `/memory` | Kumi 记住的一切：关于你和本工程的笔记、从你的工程中学到的东西、技巧、配方和经验；选择一项即可让它忘掉（配方可以运行或忘掉） |
+| `/memory` | Kumi 记住的一切：关于你和本工程的笔记、从你的工程中学到的东西、技巧、配方和经验；选择一项即可让它忘掉（笔记还可以修改文字或置顶，配方可以运行或忘掉） |
+| `/note <id> <new words>` | 不经模型修改一条笔记的文字；在 `/memory` 中选择笔记的 “Change the words” 会替你开头 |
 | `/recipes` | 你的配方：运行或忘掉一个。有空位的配方会写好一行 `/recipe`，填上已固定的对象，由你补完 |
 | `/recipe <name> blank=value …` | 立即运行一个配方，不调用模型；含空格的值用引号括起，没填的空位 Kumi 会指出 |
 | `/status` | Kumi 连接到了什么、当前模型、学习素材库的进度，以及使用 API 密钥时本次会话用掉的 token |
@@ -109,7 +110,7 @@ Kumi 占据整个终端窗口，并在 Kumi 关闭、崩溃或被停止时把窗
 
 ## 纯文本模式
 
-设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/logout <provider>`、`/memory`、`/forget <id>`、`/recipes`、`/update` 和 `/quit`，但没有 `/btw`、`/goal` 或 `/copy`。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
+设置 `KUMI_UI=plain`，或者输入或输出经过管道时，Kumi 会改用逐行显示的纯文本界面，适合屏幕阅读器和日志。它支持 `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/update` 和 `/quit`，但没有 `/btw`、`/goal` 或 `/copy`。请在 shell 中用 `kumi login` 登录。Ctrl-C 停止回答，空闲时则退出。
 
 ## 终端
 

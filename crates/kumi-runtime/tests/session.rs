@@ -791,7 +791,10 @@ local_test!(memory_instructions_tools_and_forgetting, {
         projects_dir: dir.path().join("projects"),
         producer_file: dir.path().join("producer.json"),
     });
-    store.save(MemoryScope::Producer, None, &[MemoryNote { id: "p1".into(), text: "Prefers short reverbs".into(), at: 1 }]).await.unwrap();
+    store
+        .save(MemoryScope::Producer, None, &[MemoryNote { id: "p1".into(), text: "Prefers short reverbs".into(), at: 1, pinned: false }])
+        .await
+        .unwrap();
     let h = harness(None, |o| o.memory = Some(store.clone()));
     h.session.start().await.unwrap();
     let tools = {

@@ -285,6 +285,22 @@ impl SessionController for Control {
         self.call(format!("forget:{id}"));
         Ok(self.get("forgot"))
     }
+    fn has_change_note(&self) -> bool {
+        self.memory.borrow().is_some()
+    }
+    async fn change_note(&self, id: &str, change: NoteChange) -> Result<Option<MemoryNote>, RuntimeError> {
+        self.call(format!("change-note:{id} {change:?}"));
+        let mut view = self.memory.borrow_mut();
+        let Some(view) = view.as_mut() else { return Ok(None) };
+        let Some(note) = view.memory.producer.iter_mut().chain(view.memory.set.iter_mut()).find(|n| n.id == id) else {
+            return Ok(None);
+        };
+        match change {
+            NoteChange::Text(text) => note.text = text,
+            NoteChange::Pinned(pinned) => note.pinned = pinned,
+        }
+        Ok(Some(note.clone()))
+    }
     fn has_stop_live(&self) -> bool {
         self.stop.get()
     }

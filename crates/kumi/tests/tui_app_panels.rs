@@ -241,11 +241,30 @@ case!(memory_notes_techniques_recipes_and_taste, async {
     for s in ["What Kumi remembers", "About you", "Prefers short, dark reverbs", "About Night Drive", "The Reese is the main bass"] {
         h.has(s)
     }
+    // A note: change its words in the box, pin it, or forget it, without the model.
     h.type_text("\x1b[B\r").await;
-    h.has("Forget this note?");
+    for s in ["“The Reese is the main bass”", "Change the words", "Pin it", "A full memory never drops it to make room", "Forget it"] {
+        h.has(s)
+    }
+    h.type_text("\x1b[B\r").await;
+    assert!(h.calls().contains(&"change-note:s1 Pinned(true)".into()));
+    h.has("Pinned: Kumi keeps this note even when its memory is full.");
+    h.type_text("/memory\r").await;
+    h.has("pinned ·");
     h.type_text("\r").await;
+    h.has("“Prefers short, dark reverbs”");
+    h.type_text("\r").await;
+    h.has("/note p1 Prefers short, dark reverbs");
+    h.type_text(" on drums\r").await;
+    assert!(h.calls().contains(&"change-note:p1 Text(\"Prefers short, dark reverbs on drums\")".into()));
+    h.has("Changed note p1.");
+    h.type_text("/note p1\r").await;
+    h.has("Give the note's id and its new words");
+    h.type_text("\x15/memory\r").await;
+    h.type_text("\x1b[B\r").await;
+    h.type_text("\x1b[B\x1b[B\r").await;
     assert!(h.calls().contains(&"forget:s1".into()));
-    assert!(!has(&h.screen(), "Forget this note?"));
+    assert!(!has(&h.screen(), "Change the words"));
     h.close().await;
     c.set("techniques", json!([{"id":"t1","name":"Neuro from a Reese","fits":"gritty, moving neuro basses","source":"Au5 · Neuro bass"}]));
     c.set("recipes", json!([{"name":"Drum bus","about":"a return with glue compression","params":[],"steps":3,"used":0,"created":1}]));

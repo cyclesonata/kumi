@@ -323,6 +323,28 @@ pub trait ConversationStore {
     async fn list(&self, place: &str) -> Result<Vec<ConversationSummary>, RuntimeError>;
     /// A conversation moves with its Set (an unsaved Set's, when the Set is first saved).
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError>;
+    /// Exchanges in every place's kept conversations that hold at least `needed` of `words`
+    /// (lowercase), most words first, then newest; at most `limit`.
+    async fn search(&self, words: &[String], needed: usize, limit: usize) -> Result<Vec<FoundExchange>, RuntimeError> {
+        let _ = (words, needed, limit);
+        Ok(vec![])
+    }
+}
+
+/// An earlier exchange a search found: where and when, what the producer said, and Kumi's answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundExchange {
+    pub place: String,
+    /// The Set's name, when Kumi has seen it saved.
+    pub set: Option<String>,
+    pub conversation: String,
+    pub saved_at: i64,
+    pub said: String,
+    pub answer: String,
+    /// The tools Kumi used in its answer, in order.
+    pub tools: Vec<String>,
+    /// How many of the searched words it holds.
+    pub matched: usize,
 }
 
 /// What `observe` is told besides the signal.
@@ -1212,6 +1234,16 @@ pub struct MemoryNote {
     pub text: String,
     /// Epoch milliseconds it was written.
     pub at: i64,
+    /// The producer pinned it: a full store never drops it to make room.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+/// What the producer changes about a note in /memory, without the model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NoteChange {
+    Text(String),
+    Pinned(bool),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1612,6 +1644,14 @@ pub trait SessionController {
     /// Remove a note by id; None when there's none.
     async fn forget(&self, id: &str) -> Result<Option<MemoryNote>, RuntimeError> {
         let _ = id;
+        Ok(None)
+    }
+    fn has_change_note(&self) -> bool {
+        false
+    }
+    /// Change a note's words or pin it, as the producer asks in /memory; None when there's no such note.
+    async fn change_note(&self, id: &str, change: NoteChange) -> Result<Option<MemoryNote>, RuntimeError> {
+        let _ = (id, change);
         Ok(None)
     }
     fn has_recipes(&self) -> bool {

@@ -170,9 +170,17 @@ impl TuiApp {
             notes
                 .iter()
                 .rev()
-                .map(|n| noted(PickerItem::new(&n.text, format!("note:{}", n.id)), since(n.at as f64, now), NoteTone::Faint))
+                .map(|n| {
+                    let age = since(n.at as f64, now);
+                    noted(
+                        PickerItem::new(&n.text, format!("note:{}", n.id)),
+                        if n.pinned { format!("pinned · {age}") } else { age },
+                        NoteTone::Faint,
+                    )
+                })
                 .collect::<Vec<_>>()
         };
+        let kept: Vec<MemoryNote> = memory.memory.producer.iter().chain(&memory.memory.set).cloned().collect();
         if memory.memory.producer.is_empty() {
             items.push(inert("Nothing yet"));
         } else {
@@ -260,11 +268,18 @@ impl TuiApp {
             ),
             move |app, selected| {
                 let recipes = recipes.clone();
+                let kept = kept.clone();
                 async move {
                     let (kind, id) = selected.value.as_deref().unwrap_or("").split_once(':').unwrap_or(("", ""));
                     if kind == "recipe" {
                         if let Some(recipe) = recipes.iter().find(|r| r.name == id) {
                             app.recipe_actions(recipe.clone());
+                        }
+                        return Ok(());
+                    }
+                    if kind == "note" && app.0.options.controller.has_change_note() {
+                        if let Some(note) = kept.iter().find(|n| n.id == id) {
+                            app.note_actions(note.clone());
                         }
                         return Ok(());
                     }
@@ -401,6 +416,52 @@ impl TuiApp {
             },
         );
         Ok(())
+    }
+    /// A note's words to change (in the box, as /note), its pin, or forgetting it.
+    fn note_actions(&self, note: MemoryNote) {
+        let title = format!("“{}”", self.clean(&note.text, 60));
+        self.pick(
+            Picker::new(
+                title,
+                vec![
+                    item("Change the words", "change", "In the box below; press enter to keep them"),
+                    if note.pinned {
+                        item("Unpin it", "pin", "A full memory can make room by dropping it again")
+                    } else {
+                        item("Pin it", "pin", "A full memory never drops it to make room")
+                    },
+                    PickerItem::new("Forget it", "forget"),
+                    PickerItem::new("Keep it", "keep"),
+                ],
+            ),
+            move |app, answer| {
+                let note = note.clone();
+                async move {
+                    app.close_panel();
+                    let c = &app.0.options.controller;
+                    match answer.value.as_deref() {
+                        Some("change") => {
+                            app.0.state.borrow_mut().editor.set(&format!("/note {} {}", note.id, note.text));
+                            app.0.scheduler.request();
+                        }
+                        Some("pin") => match c.change_note(&note.id, NoteChange::Pinned(!note.pinned)).await? {
+                            Some(changed) if changed.pinned => {
+                                app.notice("Pinned: Kumi keeps this note even when its memory is full.", NoticeTone::Info)
+                            }
+                            Some(_) => app.notice("Unpinned.", NoticeTone::Info),
+                            None => app.notice("That note was already gone.", NoticeTone::Info),
+                        },
+                        Some("forget") => {
+                            if c.forget(&note.id).await?.is_none() {
+                                app.notice("That note was already gone.", NoticeTone::Info);
+                            }
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                }
+            },
+        );
     }
     fn recipe_actions(&self, recipe: RecipeSummary) {
         let blanks =
@@ -1569,4 +1630,17 @@ fn model_items(
         }
     }
     items
+}
+
+/// `/note p3 new words`: the note's id and its new words.
+pub(super) fn note_command(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("/note")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (id, words) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    let digits = id.strip_prefix(['p', 's'])?;
+    let valid = !digits.is_empty() && digits.len() <= 4 && digits.bytes().all(|b| b.is_ascii_digit());
+    (valid && !words.trim().is_empty()).then(|| (id.to_owned(), words.trim().to_owned()))
 }

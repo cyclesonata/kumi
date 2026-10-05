@@ -58,7 +58,8 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 | `/model`, `/effort` | モデル（各プロバイダー自身の一覧から、続いてこのコンピューター上のモデルサーバー：Ollama、LM Studio、settings.json に書いたもの。入力して絞り込める）と、どれだけ深く考えるかを選ぶ。次のメッセージから反映される |
 | `/login`, `/logout` | サインイン（ブラウザで ChatGPT、またはドットでだけ表示される API キー）またはサインアウト |
 | `/goal <what to reach>` | Kumi がたどり着くまで、ある音を追い求める。`/goal` だけなら一時停止した目標を再開し、`/goal stop`（または `/goal end`）で終える |
-| `/memory` | Kumi が保存しているすべて：あなたとこの Set についてのメモ、あなたの Set から学んだこと、テクニック、レシピ、教訓。一つ選ぶと忘れさせられる（レシピは実行するか忘れさせる） |
+| `/memory` | Kumi が保存しているすべて：あなたとこの Set についてのメモ、あなたの Set から学んだこと、テクニック、レシピ、教訓。一つ選ぶと忘れさせられる（メモは言葉を変えるかピン留めもでき、レシピは実行するか忘れさせる） |
+| `/note <id> <new words>` | モデルを使わずにメモの言葉を変える。`/memory` でメモの「Change the words」を選ぶと入力が始まる |
 | `/recipes` | あなたのレシピ：実行するか、忘れさせる。空欄のあるレシピは `/recipe` の行を書き始め、ピン留めしたものを埋めておくので、続きを入力する |
 | `/recipe <name> blank=value …` | レシピをすぐ実行する。モデルは呼ばない。スペースを含む値は引用符で囲む。埋まっていない空欄は Kumi が知らせる |
 | `/status` | Kumi の接続先、モデル、ライブラリーの学習の進み具合、API キーの場合はこのセッションで使ったトークン数 |
@@ -109,7 +110,7 @@ Kumi はターミナルウィンドウ全体を使い、Kumi が閉じたとき�
 
 ## プレーンモード
 
-`KUMI_UI=plain`、またはパイプを通した入力や出力では、代わりに一行ずつのプレーンなインターフェースになり、スクリーンリーダーやログに向いています。使えるのは `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/logout <provider>`、`/memory`、`/forget <id>`、`/recipes`、`/update`、`/quit` で、`/btw`、`/goal`、`/copy` はありません。サインインはシェルから `kumi login` で行います。Ctrl-C は答えを止め、Kumi が何もしていないときは終了します。
+`KUMI_UI=plain`、またはパイプを通した入力や出力では、代わりに一行ずつのプレーンなインターフェースになり、スクリーンリーダーやログに向いています。使えるのは `/help`、`/status`、`/undo`、`/stop`、`/refresh`、`/reconnect`、`/new`、`/conversations [n]`、`/model [provider/model]`、`/effort [level|default]`、`/logout <provider>`、`/memory`、`/forget <id>`、`/note <id> <new words>`、`/pin <id>`、`/unpin <id>`、`/recipes`、`/update`、`/quit` で、`/btw`、`/goal`、`/copy` はありません。サインインはシェルから `kumi login` で行います。Ctrl-C は答えを止め、Kumi が何もしていないときは終了します。
 
 ## ターミナル
 
