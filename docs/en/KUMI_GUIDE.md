@@ -427,6 +427,9 @@ technique.
   GitHub for code. The same search within 20 minutes isn't made again.
 - **Reading** covers pages, PDFs, text and code files, GitHub repositories, Max
   patches and Max for Live devices, and pictures, which the model sees.
+- **Searches and reads** that don't touch Live (the web, sounds, presets, your
+  Sets, the Live manual, earlier conversations) run at the same time, up to four
+  at once. Changes to Live still run one after another.
 
 What Kumi looked up shows above its answer, a line each. It reads only public
 addresses, never your computer or your network, and treats what a page says as
