@@ -8,9 +8,8 @@ cargo run --release -p kumi --
 sh scripts/test-isolated.sh  # PowerShell: ./scripts/test-isolated.ps1
 ```
 
-Node.js 22 or 24 is needed for the retained TypeScript reference tests and
-oracle generators. With Cargo available, `npm run setup` and `npm run kumi`
-build and run this native checkout.
+With Cargo available, `npm run setup` and `npm run kumi` build and run this
+checkout. Node.js is needed for those, Kumi's Live extension and some tests.
 
 The [developer guide](docs/en/DEVELOPER_GUIDE.md) ([简体中文](docs/zh-CN/DEVELOPER_GUIDE.md) ·
 [日本語](docs/ja/DEVELOPER_GUIDE.md)) covers the layout, working on each part and releasing;

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/user1303836/kumi/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
   <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
   <img alt="Native Rust runtime" src="https://img.shields.io/badge/runtime-native%20Rust-555555">
@@ -93,9 +93,6 @@ Existing `npm run setup` and `npm run kumi -- ...` commands remain available. Wi
 these build and run this checkout. Without Cargo, they install and launch the matching published
 native release, keeping the same settings, sign-ins, conversations and library in `~/.kumi`.
 After that handoff, `kumi` runs the native application directly.
-
-The TypeScript source remains the parity reference. Node.js 22 or 24 is needed only for its
-`npm ci`, `npm run build`, `npm run typecheck`, and `npm test` commands.
 
 | Folder | What's in it |
 | --- | --- |
