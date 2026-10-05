@@ -778,6 +778,7 @@ impl Session {
                 tools.extend(learned.tools.clone());
             }
             tools.extend(self.0.gaps.clone());
+            let conversation = self.0.state.borrow().conversation_id.clone();
             let value = (self.0.options.kernel_factory)(KernelOptions {
                 instructions: if extra.is_empty() {
                     observation.instructions.clone()
@@ -787,7 +788,7 @@ impl Session {
                 tools,
                 signal: lifetime.clone(),
                 checkpoint,
-                conversation: Some(self.0.state.borrow().conversation_id.clone()),
+                conversation: Some(conversation),
             })
             .await?;
             if !self.current(op) {
