@@ -208,9 +208,18 @@ async fn a_kept_browser_walk_lasts_ten_minutes_and_a_search_it_cant_answer_walks
     minutes(0.5);
     assert!(names(&search("nothing like this").await).is_empty());
     assert_eq!(walks(), 2, "at most one walk a minute for searches that find nothing");
+    // A minute on, one that shares words with what's kept but isn't in it walks again too.
     minutes(1.0);
-    search("nothing like this").await;
-    assert_eq!(walks(), 3, "a minute on, it walks again for one");
+    let mut items = adapter.step.borrow()["returns"]["items"].as_array().unwrap().clone();
+    items.push(json!({"id":"gritty","objectIdentity":"object-gritty","name":"Gritty Reese Bass","category":"instruments","path":"Library/Instruments","isDevice":true}));
+    *adapter.step.borrow_mut() = json!({"returns": {"items": items}});
+    let gritty = search("gritty reese bass").await;
+    assert_eq!(walks(), 3, "\"Bass\" and \"Fresh Reese\" share its words, but neither is it");
+    assert_eq!(names(&gritty)[0], "Gritty Reese Bass");
+    // A search that something kept answers by name doesn't walk.
+    minutes(2.0);
+    search("bass").await;
+    assert_eq!(walks(), 3);
     minutes(11.0);
     search("bass").await;
     assert_eq!(walks(), 4, "past ten minutes, any search walks");

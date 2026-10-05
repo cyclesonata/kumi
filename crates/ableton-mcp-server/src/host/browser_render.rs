@@ -11,10 +11,10 @@ use kumi_common::{
 use serde::Serialize;
 const CANDIDATES: usize = 10_000;
 /// How long a walk of Live's Browser is kept. A walk holds Live's main thread (0.6–0.75 s for Live's
-/// own library, more with packs and plug-ins), and the Browser rarely changes: when a search finds
-/// nothing in what's kept, the Browser is walked again, once, for what's new (a pack, a device Kumi made),
-/// unless what's kept is under a minute old: a search for something that isn't there walks at most once
-/// a minute.
+/// own library, more with packs and plug-ins), and the Browser rarely changes: when nothing kept has the
+/// whole query in its name, the Browser is walked again, once, for what's new (a pack, a device Kumi
+/// made), unless what's kept is under a minute old: a search for something that isn't there walks at
+/// most once a minute.
 const CACHE_MS: f64 = 600_000.;
 const MISS_WALK_MS: f64 = 60_000.;
 const ROOTS: &[&str] =
@@ -129,8 +129,9 @@ impl McpHost {
                 if let Some((_,old))=cache.iter_mut().find(|(name,_)|name==key){*old=entry.clone();}else{cache.push_back((key.into(),entry.clone()));}
                 while cache.len()>16{cache.pop_front();}(entry,false)
             };
-            // Nothing in what was kept matches: walk again, once, for what's new since.
-            if from_cache&&!tokens.is_empty()&&self.browser_now()-entry.at>=MISS_WALK_MS&&!entry.items.iter().any(|item|!rank(item,&lower,&tokens).matched_tokens.is_empty()){refresh=true;continue;}
+            // Nothing kept has the whole query in its name (a new "Gritty Reese Bass" besides an old "Bass"):
+            // walk again, once, for what's new since.
+            if from_cache&&!tokens.is_empty()&&self.browser_now()-entry.at>=MISS_WALK_MS&&!entry.items.iter().any(|item|rank(item,&lower,&tokens).exact_name_match){refresh=true;continue;}
             break (entry,from_cache);
             };
             let mut ranked:Vec<_>=entry.items.iter().map(|item|(item,rank(item,&lower,&tokens))).filter(|(_,r)|tokens.is_empty()||!r.matched_tokens.is_empty()).collect();
