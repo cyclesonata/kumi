@@ -8,7 +8,7 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 
 ## 登录并选择模型
 
-在 Kumi 中，`/login` 用于登录：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
+在 Kumi 中，`/login` 用于登录（第一次时，Kumi 会自己打开它）：用你的套餐登录 ChatGPT（浏览器会打开，登录结果通过 `localhost:1455` 返回），或用 API 密钥登录 Anthropic、OpenAI 或 OpenCode，密钥粘贴到只显示圆点的输入框中。Kumi 在保存密钥之前会先向其提供方验证；如果连不上提供方，它会保存密钥，并说明尚未验证。`/logout` 用于退出登录。
 
 | 提供方 | 模型名称 | 登录方式 |
 | --- | --- | --- |
@@ -43,19 +43,18 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 
 ## 连接 Live
 
-Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。`kumi bridge` 会把它装进 Live：
+Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。第一次打开 Kumi 时，以及每当它自带的桥接比 Live 中的新时，Kumi 都会提出连接：
 
-1. 退出 Live，并保存你的工作。
-2. 运行 `kumi bridge`。它会请你确认 Live 已关闭（`--yes` 可预先确认），Live 正在运行时会拒绝执行。
-3. 打开 Live。第一次时，打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。
+1. 选择 **Connect now**。Kumi 会关闭，把桥接放到位，再重新打开。如果 Live 正开着，Kumi 会先请它退出（Live 会提示你保存工作），之后再把它重新打开；你也可以自己退出 Live，Kumi 会等待。
+2. 第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Live 一应答，Kumi 就会连接，Live 也会记住这个选择。
 
-`kumi bridge` 通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。它从不退出或启动 Live。之后它最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
+选择 **Later** 时，Kumi 暂时在不连接 Live 的情况下聊天，下次会再次提出。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
 
 Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包括你移到别处的 User Library（为此它会读取 Live 自己的设置）。`KUMI_REMOTE_SCRIPTS_DIR` 可以覆盖这个位置。
 
 **Kumi 的 Live 扩展。** 在 Live 12.4 及更高版本上，`kumi bridge` 还会把 Kumi 的扩展放进 Live 的 Extensions 文件夹（macOS 上为 `~/Library/Application Support/Ableton/Extensions/kumi.kumi`；Windows 上 Kumi 使用 `%LOCALAPPDATA%\Ableton\Extensions`，这一路径在 Windows 上尚未确认）。Live 下次打开时会启动它。这个扩展可以把 MIDI 片段直接写进编曲视图、清空轨道上的一段区域、在不播放的情况下渲染轨道的片段，并在 Live 的右键菜单（**Extensions** 下）中加入 **Ask Kumi about this**，它会把你点击的对象附加到你的下一条消息中。开启 Developer Mode（Settings → Extensions）时，Live 不会启动任何扩展，所以由桥接自己启动 Kumi 的扩展。没有这个扩展 Kumi 也能工作，`kumi doctor` 会告诉你它是否已安装、是否在运行。
 
-桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并告诉你如何连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
+桥接安装好并在 Live 中选中后，`kumi` 会找到并连接它；无需任何配置。没有桥接时，Kumi 照样启动，在不连接 Live 的情况下聊天（**No Live access**），并提出连接。`kumi --bridge-config <absolute path>` 使用你自己的桥接配置；`kumi --inference-only` 在不连接 Live 的情况下聊天。
 
 **可选：Willington。** 装上单独安装的 Willington provider 后，Kumi 还可以编辑 Follow Actions、映射机架的宏旋钮以及设置链区域（chain zone）。它有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5 的绑定（链区域仅限 b5）；请见[可选的 Willington 集成](WILLINGTON_INTEGRATION.md)。
 
