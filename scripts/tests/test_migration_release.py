@@ -279,6 +279,19 @@ class MigrationRelease(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return result.stdout
 
+    def rollback_to_native(self, command, env, manifest, old):
+        """The unchanged old rollback command returns to the retained native generation. A release whose bridge
+        is newer than 1.7.5's then asks whether Live is closed before updating it: unanswered here, it changes
+        nothing, says how to finish and exits 1, leaving the bridge to native startup (as the update does)."""
+        result = self.launch_result(command, env, "update", "--rollback")
+        said = result.stdout + result.stderr
+        if manifest["bridge"] == old["packageVersion"]:
+            self.assertEqual(result.returncode, 0, said)
+        else:
+            self.assertEqual(result.returncode, 1, said)
+            self.assertIn("Nothing was changed. Quit Live, then run:", said)
+        self.assertIn(f"Kumi is back to {manifest['kumi']}", said)
+
     @contextmanager
     def release_server(self, artifacts):
         class Quiet(http.server.SimpleHTTPRequestHandler):
@@ -456,7 +469,7 @@ class MigrationRelease(unittest.TestCase):
         self.assertIn("anthropic     API key saved in Kumi", self.launched(launcher, env, "auth"))
         self.check_existing_data(home, markers)
         self.check_windows_launcher(launcher, self.native_windows_launcher())
-        self.launched(launcher, env, "update", "--rollback")
+        self.rollback_to_native(launcher, env, manifest, old)
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
         self.launched(launcher, env, input="/quit\n")
         self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["config"]["server"]["args"], ["--config", str(config)])
@@ -520,7 +533,7 @@ class MigrationRelease(unittest.TestCase):
         self.check_existing_data(home, markers)
         self.check_windows_launcher(launcher, self.native_windows_launcher())
         # The unchanged old rollback command can return to the retained native generation.
-        self.launched(launcher, env, "update", "--rollback")
+        self.rollback_to_native(launcher, env, manifest, old)
         self.assertIn(manifest["kumi"], self.launched(launcher, env, "--version"))
         self.assertTrue((home / "app" / self.binary).is_file())
         self.launched(launcher, env, "--bridge-config", str(config), input="/quit\n")
