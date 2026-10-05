@@ -8,8 +8,7 @@ use crate::analysis::PcmAnalysis;
 
 pub const AUDIO_DIAGNOSIS_VERSION: &str = "audio-diagnosis/v1";
 
-// TS: live.ts types; unify with live.rs when merged. These declare only the fields the diagnosis
-// reads, so the context revision hashes over those fields until the full rows replace them.
+// Only the fields of Live's rows that the diagnosis reads: the context revision hashes over these.
 pub type LiveRef = String;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

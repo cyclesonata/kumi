@@ -5,7 +5,8 @@ From a copy of this repository, with Rust, Cargo and Python 3.11 or later:
 ```sh
 cargo build --release --locked --workspace --bins
 cargo run --release -p kumi --
-sh scripts/test-isolated.sh  # PowerShell: ./scripts/test-isolated.ps1
+npm ci --prefix crates/kumi-runtime/tests/support  # once: the official SDKs some tests run
+sh scripts/test-isolated.sh                        # PowerShell: ./scripts/test-isolated.ps1
 ```
 
 With Cargo available, `npm run setup` and `npm run kumi` build and run this

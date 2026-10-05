@@ -101,7 +101,7 @@ def document_target(root: Path, source: str, target: str, revision: str, kind: s
         if normalized == ".." or normalized.startswith("../"):
             raise ValueError(f"documentation target escapes repository: {source} -> {target}")
         mapped = dict(DOCUMENTS).get(normalized)
-        relative = {"LICENSE.md": "../LICENSE.md", "apps/mcp-server/package.json": "../package.json",
+        relative = {"LICENSE.md": "../LICENSE.md",
                     "protocol/ableton-live-v1.operations.json": "../remote-script/AbletonMcpBridge/ableton-live-v1.operations.json"}
         if mapped or normalized in relative:
             result = (mapped or relative[normalized]) + suffix

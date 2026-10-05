@@ -188,7 +188,6 @@ class MigrationRelease(unittest.TestCase):
         env = dict(os.environ, PATH=str(tools), KUMI_TEST_SYSTEM_ROOT=str(system),
                    KUMI_HOME=str(self.root / "launcher-home-private-marker"),
                    KUMI_VERSION="launcher-version-private-marker")
-        env.pop("KUMI_REFERENCE_RUNTIME", None)
         for missing_helper in (False, True):
             if missing_helper:
                 helper.unlink()
@@ -216,7 +215,6 @@ class MigrationRelease(unittest.TestCase):
             (home / "auth.json").write_text('{"version":1,"credentials":{"fixture":"unchanged"}}', encoding="utf-8")
             env = dict(os.environ, KUMI_HOME=str(home), KUMI_RELEASES=f"http://127.0.0.1:{server.server_port}",
                        KUMI_NO_MODIFY_PATH="1", PATH="/usr/bin:/bin:/usr/sbin:/sbin")
-            env.pop("KUMI_REFERENCE_RUNTIME", None)
             result = subprocess.run([shutil.which("node"), str(release.native.ROOT / "scripts/native-kumi.mjs"), "--setup"], env=env, capture_output=True, text=True, encoding="utf-8")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("switching this npm installation to the native release", result.stdout)

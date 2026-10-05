@@ -320,6 +320,7 @@ async fn run() -> i32 {
 
 /// SIGINT and SIGTERM interrupt the probe instead of ending it.
 fn listen_for_interrupts(probe: &Rc<Probe>) -> Vec<tokio::task::JoinHandle<()>> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut tasks = vec![tokio::task::spawn_local({
         let probe = probe.clone();
         async move {

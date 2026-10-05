@@ -85,8 +85,9 @@ Windows ではインストールと更新を確認済みですが、Live と一�
 
 ```sh
 cargo build --release --locked --workspace --bins
-cargo run --release -p kumi --        # -- の後に bridge、doctor などを追加
-sh scripts/test-isolated.sh          # Live もサインインも不要
+cargo run --release -p kumi --                     # -- の後に bridge、doctor などを追加
+npm ci --prefix crates/kumi-runtime/tests/support  # 初回のみ：一部のテストが使う公式 SDK
+sh scripts/test-isolated.sh                        # Live もサインインも不要
 ```
 
 従来の `npm run setup` と `npm run kumi -- ...` も使えます。Cargo がある場合はこのチェックアウトを

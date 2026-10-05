@@ -51,10 +51,18 @@ are dropped, so no test can reach your Live folders or `~/.kumi`.
 
 The tests that run the official MCP and model SDKs beside Kumi's own client and
 providers fail until `npm ci --prefix crates/kumi-runtime/tests/support` has
-run. The JSON oracle files in the crates' tests are golden files recorded from
-the TypeScript implementation; it and the scripts that generated them stay at
-the git tag `v1.7.6`. The loudness and true-peak tests hold the analysis to
-FFmpeg's `ebur128` results for generated audio.
+run. The loudness and true-peak tests hold the analysis to FFmpeg's `ebur128`
+results for generated audio.
+
+The JSON oracle files in the crates' tests are golden files recorded from the
+TypeScript implementation; it and the scripts that generated them stay at the
+git tag `v1.7.6`, and nothing in this tree regenerates them. After an
+intentional change in behavior, rewrite the affected oracle entries from the
+native output: the failing assertion prints what it got, and for a SHA-256
+entry, hash that output. Review the diff, and say in the commit message that
+the golden files changed and why. The host tests pin the bridge version the
+golden files were recorded with (`ORACLE_VERSION`), so a bridge version bump
+changes no golden file.
 
 ## The Remote Script
 
@@ -92,6 +100,11 @@ bundles. Without these variables, the tests that need them skip:
 | `KUMI_LEGACY_APP` | An unpacked Kumi 1.7.5: `python3 scripts/fetch-legacy-release.py [folder]` downloads it, checks its SHA-256, unpacks it and prints the folder |
 | `KUMI_NATIVE_RELEASES` | A folder of built release artifacts (see [releasing](DEVELOPER_GUIDE.md#releasing)) |
 
+`KUMI_LEGACY_APP` serves the bridge's own migration test too,
+`crates/ableton-mcp-server/tests/lifecycle_migration.rs`. That test doesn't
+skip without it: it downloads the published Kumi 1.7.5 bundle and checks its
+SHA-256. With the variable set, it runs offline once the bundle is fetched.
+
 ## Checks with Live or a model
 
 These are opt-in. They change real things or spend real tokens, so CI doesn't
@@ -99,7 +112,7 @@ run them.
 
 | Command (from the root) | Needs | What it does |
 | --- | --- | --- |
-| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Live with a disposable copy of a Set open | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
+| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Live with a disposable copy of a Set open; the bridge, built first with `cargo build --release -p ableton-mcp-server --bins` (for a debug run, the same without `--release`) | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | Your sign-in and model | How the model uses Kumi's tools, against a synthetic bridge with the real bridge's tool schemas, read from its native catalog. Never touches Live. Each case says its time, its tools' share of it, and how many model calls it took; `EVAL_EFFORT` sets the model's reasoning effort, and `EVAL_TRACE=1` prints each call. |
 | `cargo run --release -p kumi --example probe_inference` | Your sign-in | One authenticated request with a harmless tool. Never touches Live. |
 

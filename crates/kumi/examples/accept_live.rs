@@ -59,6 +59,14 @@ fn main() {
         eprintln!("The Ableton bridge isn't built ({}); build it first: {build}", bridge.display());
         std::process::exit(2);
     }
+    // Cargo doesn't rebuild a dependency's binaries for an example, so an older build could answer instead.
+    let reported = std::process::Command::new(&bridge).arg("--version").output().ok();
+    let reported = reported.map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned()).unwrap_or_default();
+    let expected = format!("ableton-mcp-server {}", ableton_mcp_server::delivery::PACKAGE_VERSION);
+    if reported != expected {
+        eprintln!("The Ableton bridge at {} says \"{reported}\", not \"{expected}\"; rebuild it: {build}", bridge.display());
+        std::process::exit(2);
+    }
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -393,8 +401,11 @@ impl Accept {
         }
 
         println!("\nChanges");
-        if let Err(error) = self.changes(&before).await {
-            self.say(false, None, &format!("stopped making changes: {}", head(&error.message(), 200)));
+        // A panic stops the changes like an error does, so the undo below still runs.
+        match std::panic::AssertUnwindSafe(self.changes(&before)).catch_unwind().await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => self.say(false, None, &format!("stopped making changes: {}", head(&error.message(), 200))),
+            Err(_) => self.say(false, None, "stopped making changes: a panic (see above)"),
         }
 
         // Whatever stopped the changes, what was changed goes back.

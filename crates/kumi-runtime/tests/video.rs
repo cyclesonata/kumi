@@ -337,7 +337,8 @@ if [ -f "$(dirname "$0")/sleep" ]; then exec sleep 10; fi
         command.to_str().unwrap(),
         "model.en.bin",
         wav.to_str().unwrap(),
-        TranscribeOptions { timeout_ms: Some(50), ..Default::default() },
+        // Long enough for a loaded runner to reach the progress lines before the sleep.
+        TranscribeOptions { timeout_ms: Some(500), ..Default::default() },
     )
     .await
     .unwrap_err();

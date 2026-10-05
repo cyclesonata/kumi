@@ -85,8 +85,9 @@ Build this checkout with Rust and Cargo:
 
 ```sh
 cargo build --release --locked --workspace --bins
-cargo run --release -p kumi --        # add bridge, doctor, or other arguments after --
-sh scripts/test-isolated.sh          # no Live or sign-in needed
+cargo run --release -p kumi --                     # add bridge, doctor, or other arguments after --
+npm ci --prefix crates/kumi-runtime/tests/support  # once: the official SDKs some tests run
+sh scripts/test-isolated.sh                        # no Live or sign-in needed
 ```
 
 Existing `npm run setup` and `npm run kumi -- ...` commands remain available. With Cargo installed,

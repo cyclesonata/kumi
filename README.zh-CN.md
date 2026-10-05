@@ -85,8 +85,9 @@ Kumi 1.7.6 是第一个原生版本，已在 macOS 的 Ableton Live 12.4（测�
 
 ```sh
 cargo build --release --locked --workspace --bins
-cargo run --release -p kumi --        # 在 -- 后添加 bridge、doctor 等参数
-sh scripts/test-isolated.sh          # 无需 Live 或登录
+cargo run --release -p kumi --                     # 在 -- 后添加 bridge、doctor 等参数
+npm ci --prefix crates/kumi-runtime/tests/support  # 只需一次：部分测试运行的官方 SDK
+sh scripts/test-isolated.sh                        # 无需 Live 或登录
 ```
 
 原有的 `npm run setup` 和 `npm run kumi -- ...` 仍可使用。有 Cargo 时，它们构建并运行当前检出的代码。

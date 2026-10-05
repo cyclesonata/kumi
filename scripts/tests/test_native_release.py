@@ -15,6 +15,8 @@ from unittest.mock import patch
 SPEC = importlib.util.spec_from_file_location("native_release", Path(__file__).parents[1] / "build-native-release.py")
 release = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(release)
+# Windows files carry no exec bits, so a bundle built there marks only .exe files executable.
+EXEC_BITS = os.name != "nt"
 
 class NativeRelease(unittest.TestCase):
     def setUp(self):
@@ -119,7 +121,8 @@ class NativeRelease(unittest.TestCase):
             if source_helper.is_file():
                 helper_path = "packages/runtime/hands/" + helper_name
                 self.assertEqual(tar.extractfile(helper_path).read(), source_helper.read_bytes())
-                self.assertEqual(tar.getmember(helper_path).mode, 0o755)
+                if EXEC_BITS:
+                    self.assertEqual(tar.getmember(helper_path).mode, 0o755)
                 self.assertNotIn("hands/" + helper_name, names)
             self.assertEqual(json.load(tar.extractfile("apps/mcp-server/package.json"))["version"], result["bridge"])
             self.assertFalse(any("node_modules" in name or name.startswith("node/") for name in names))
@@ -140,7 +143,7 @@ class NativeRelease(unittest.TestCase):
             self.assertEqual(set(manifest["files"]), set(manifest["roles"]))
             self.assertNotIn("release-manifest.json", manifest["files"])
             self.assertGreaterEqual(len(manifest["files"]), 10)
-            # This is the canonical JSON hash from the TypeScript registry hasher.
+            # The canonical JSON hash of the protocol registry.
             self.assertEqual(manifest["protocol"]["registryHash"], "ec05dd401ec098adb77da1c185aff1857be2bd87859afe9dda4bfeb14e04aa57")
             self.assertEqual(manifest["distribution"], {"channel": "local-native-tarball", "published": False,
                 "signed": False, "notarized": False, "integrityIsIdentityProof": False})
@@ -152,7 +155,8 @@ class NativeRelease(unittest.TestCase):
                 self.assertEqual(set(bridge.getnames()), expected)
                 self.assertTrue(all(member.isfile() and not member.pax_headers for member in bridge.getmembers()))
                 for binary in release.BRIDGE_BINARIES:
-                    self.assertEqual(bridge.getmember("package/" + binary).mode, 0o755)
+                    if EXEC_BITS:
+                        self.assertEqual(bridge.getmember("package/" + binary).mode, 0o755)
                 for member in bridge.getmembers():
                     self.assertEqual(bridge.extractfile(member).read(), tar.extractfile("bridge/" + member.name).read())
         self.assertTrue(gzip.decompress(artifact).endswith(b"\0" * 1024))

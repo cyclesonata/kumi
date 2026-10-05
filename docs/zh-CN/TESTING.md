@@ -43,7 +43,9 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 
 隔离运行器为测试提供独立的主目录：`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME` 和 `KUMI_HOME` 都指向一个全新的临时文件夹，`KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 则被移除，因此任何测试都无法触及你的 Live 文件夹或 `~/.kumi`。
 
-有些测试会在 Kumi 自己的客户端和提供方旁边运行官方的 MCP 和模型 SDK；在运行 `npm ci --prefix crates/kumi-runtime/tests/support` 之前，这些测试会失败。各 crate 测试中的 JSON oracle 文件是从 TypeScript 实现记录下来的基准文件（golden file）；该实现以及生成这些文件的脚本保留在 git 标签 `v1.7.6` 上。响度和真峰值测试会把分析结果与 FFmpeg 的 `ebur128` 对生成音频得出的结果进行比对。
+有些测试会在 Kumi 自己的客户端和提供方旁边运行官方的 MCP 和模型 SDK；在运行 `npm ci --prefix crates/kumi-runtime/tests/support` 之前，这些测试会失败。响度和真峰值测试会把分析结果与 FFmpeg 的 `ebur128` 对生成音频得出的结果进行比对。
+
+各 crate 测试中的 JSON oracle 文件是从 TypeScript 实现记录下来的基准文件（golden file）；该实现以及生成这些文件的脚本保留在 git 标签 `v1.7.6` 上，当前代码树中没有任何东西能重新生成它们。有意改变行为之后，请根据原生输出改写受影响的 oracle 条目：失败的断言会打印实际得到的结果；对于 SHA-256 条目，写入该输出的哈希。检查差异，并在提交信息中说明基准文件有改动及其原因。宿主测试固定使用记录基准文件时的桥接版本（`ORACLE_VERSION`），所以提升桥接版本号不会改变任何基准文件。
 
 ## Remote Script
 
@@ -69,13 +71,15 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 | `KUMI_LEGACY_APP` | 解包后的 Kumi 1.7.5：`python3 scripts/fetch-legacy-release.py [folder]` 会下载它、检查其 SHA-256、解包并打印所在文件夹 |
 | `KUMI_NATIVE_RELEASES` | 存放已构建发布产物的文件夹（见[发布](DEVELOPER_GUIDE.md#发布)） |
 
+`KUMI_LEGACY_APP` 也用于桥接自己的迁移测试 `crates/ableton-mcp-server/tests/lifecycle_migration.rs`。缺少该变量时，这个测试不会跳过，而是下载已发布的 Kumi 1.7.5 发行包并检查其 SHA-256。设置该变量后，只要发行包已下载过一次，它就可以离线运行。
+
 ## 需要 Live 或模型的检查
 
 这些检查需要主动运行。它们会改动真实的东西或消耗真实的 token，所以 CI 不运行它们。
 
 | 命令（在根目录运行） | 需要 | 作用 |
 | --- | --- | --- |
-| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | 打开了某个工程的一次性副本的 Live | 做出 Kumi 能做的每一类修改，用 Kumi 的撤销逐一撤销，播放、并轨、聆听和观看，并测量读取大型工程的耗时。不使用模型。 |
+| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | 打开了某个工程的一次性副本的 Live，以及事先构建好的桥接：`cargo build --release -p ableton-mcp-server --bins`（调试运行时，去掉 `--release` 即可） | 做出 Kumi 能做的每一类修改，用 Kumi 的撤销逐一撤销，播放、并轨、聆听和观看，并测量读取大型工程的耗时。不使用模型。 |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | 你的登录和模型 | 检验模型如何使用 Kumi 的工具，针对一个合成桥接进行，它带有从原生工具目录读取的真实桥接工具 schema。从不触及 Live。每个用例给出所用时间、其中工具所占的时间，以及调用模型的次数；`EVAL_EFFORT` 设置模型的推理强度，`EVAL_TRACE=1` 逐一打印每次调用。 |
 | `cargo run --release -p kumi --example probe_inference` | 你的登录 | 用一个无害的工具发送一次经认证的请求。从不触及 Live。 |
 

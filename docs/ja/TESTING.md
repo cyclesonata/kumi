@@ -43,7 +43,9 @@ Windows では、いくつかのテストがシンボリックリンクを作成
 
 分離ランナーはテスト専用のホームを用意します。`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME`、`KUMI_HOME` は新しい一時フォルダーの中を指し、`KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は取り除かれるので、どのテストもあなたの Live のフォルダーや `~/.kumi` には届きません。
 
-公式の MCP とモデルの SDK を Kumi 自身のクライアントやプロバイダーと並べて実行するテストは、`npm ci --prefix crates/kumi-runtime/tests/support` を実行するまで失敗します。クレートのテストにある JSON のオラクルファイルは、TypeScript 実装から記録したゴールデンファイルです。その実装と、ファイルを生成したスクリプトは、git タグ `v1.7.6` に残っています。ラウドネスとトゥルーピークのテストは、生成した音声に対する FFmpeg の `ebur128` の結果と解析を照らし合わせます。
+公式の MCP とモデルの SDK を Kumi 自身のクライアントやプロバイダーと並べて実行するテストは、`npm ci --prefix crates/kumi-runtime/tests/support` を実行するまで失敗します。ラウドネスとトゥルーピークのテストは、生成した音声に対する FFmpeg の `ebur128` の結果と解析を照らし合わせます。
+
+クレートのテストにある JSON のオラクルファイルは、TypeScript 実装から記録したゴールデンファイルです。その実装と、ファイルを生成したスクリプトは git タグ `v1.7.6` に残っていますが、このツリーにはファイルを再生成するものがありません。意図して動作を変えたときは、影響を受けるオラクルの項目をネイティブの出力から書き直します。失敗したアサーションが実際の出力を表示します。SHA-256 の項目には、その出力のハッシュを書きます。差分を確認し、ゴールデンファイルを変えたことと、その理由をコミットメッセージに書いてください。ホストのテストは、ゴールデンファイルを記録したときのブリッジのバージョン（`ORACLE_VERSION`）に固定して動くので、ブリッジのバージョンを上げてもゴールデンファイルは変わりません。
 
 ## Remote Script
 
@@ -69,13 +71,15 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 | `KUMI_LEGACY_APP` | 展開済みの Kumi 1.7.5。`python3 scripts/fetch-legacy-release.py [folder]` がダウンロードし、SHA-256 を確認して展開し、そのフォルダーを出力します |
 | `KUMI_NATIVE_RELEASES` | ビルド済みのリリースアーティファクトのフォルダー（[リリース](DEVELOPER_GUIDE.md#リリース)を参照） |
 
+`KUMI_LEGACY_APP` は、ブリッジ自身の移行テスト `crates/ableton-mcp-server/tests/lifecycle_migration.rs` にも使われます。このテストは変数がなくてもスキップされず、公開済みの Kumi 1.7.5 のバンドルをダウンロードして SHA-256 を確認します。変数を設定しておけば、バンドルを一度取得したあとはオフラインで実行できます。
+
 ## Live やモデルを使うチェック
 
 これらはオプトインです。実際に何かを変更したり実際にトークンを消費したりするので、CI では実行しません。
 
 | コマンド（ルートから） | 必要なもの | 内容 |
 | --- | --- | --- |
-| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Set の使い捨てコピーを開いた Live | Kumi ができるあらゆる種類の変更を行い、それぞれを Kumi の取り消しで元に戻し、再生、バウンス、聴き取り、監視を行い、大きな Set の読み取りにかかる時間を計測します。モデルは使いません。 |
+| `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Set の使い捨てコピーを開いた Live と、先にビルドしておいたブリッジ（`cargo build --release -p ableton-mcp-server --bins`。デバッグ実行では `--release` を付けずに同じコマンド） | Kumi ができるあらゆる種類の変更を行い、それぞれを Kumi の取り消しで元に戻し、再生、バウンス、聴き取り、監視を行い、大きな Set の読み取りにかかる時間を計測します。モデルは使いません。 |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | サインインとモデル | モデルが Kumi のツールをどう使うかを、本物のブリッジのツールスキーマ（ネイティブのカタログから読み込みます）を持つ合成ブリッジに対して評価します。Live には一切触れません。各ケースは、かかった時間、そのうちツールの時間、モデルの呼び出し回数を示します。`EVAL_EFFORT` でモデルの推論の度合いを設定し、`EVAL_TRACE=1` で呼び出しを一つずつ表示します。 |
 | `cargo run --release -p kumi --example probe_inference` | サインイン | 無害なツールを使った認証済みのリクエストを一つ送ります。Live には一切触れません。 |
 

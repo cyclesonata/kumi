@@ -1577,9 +1577,10 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         Ok::<_, RuntimeError>(stringify(&Value::Array(messages)))
     }
     .await;
+    // The turn's own error comes first; a failure to close would hide it.
     let closed = session.close().await;
-    closed?;
     let conversation = conversation?;
+    closed?;
     let mut saved = vec![];
     for recipe in recipes.list().await? {
         if let Some(recipe) = recipes.get(&recipe.name).await? {

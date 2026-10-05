@@ -1,4 +1,4 @@
-//! Interoperability with the retained Live extension, as the TypeScript bridge tests exercise it.
+//! Interoperability with the Live extension.
 use ableton_mcp_server::{
     bridge::{extension_channel::*, live_extension_folders::*, router::*},
     live::*,
