@@ -1374,7 +1374,16 @@ local_test!(goal_pauses_persists_resumes_without_setup_and_stop_finishes, {
     assert_eq!(h.session.goal_status().unwrap().why.as_deref(), Some("stopped"));
     assert!(rig.cleanup.borrow().iter().any(|s| s.starts_with("tidy:")));
     h.session.close().await.unwrap();
-    assert_eq!(store.load("unsaved").await.unwrap().unwrap().status, GoalRun::Done);
+    // close waits for the goal's save only 25 ms here; a busy runner writes slower.
+    let mut status = None;
+    for _ in 0..1000 {
+        status = store.load("unsaved").await.unwrap().map(|kept| kept.status);
+        if status == Some(GoalRun::Done) {
+            break;
+        }
+        delay(2).await;
+    }
+    assert_eq!(status, Some(GoalRun::Done));
     assert!(!h.session.stop_goal().await.unwrap());
 });
 local_test!(goal_silent_renders_pause_and_structural_gap_prompts_leap, {
