@@ -7,6 +7,8 @@ mod events;
 mod input;
 mod live;
 mod panels;
+mod setup;
+pub use setup::{waveform, LiveSetup, WAVE_WIDTH};
 
 use super::{
     editor::Editor,
@@ -73,6 +75,17 @@ pub struct TuiOptions {
     pub panel_tab: Option<PanelTab>,
     pub updates: Option<UpdateControl>,
     pub voice: Option<Rc<dyn VoiceController>>,
+    /// Live's part of first-run setup; `None` when Kumi chats without Live by choice.
+    pub connect_live: Option<ConnectLive>,
+}
+/// Live's part of first-run setup: the setup shows it when Kumi's bridge isn't in Live yet, or is older
+/// than Kumi's.
+pub struct ConnectLive {
+    /// Why Live isn't connected yet, in a sentence; `None` when the bridge in Live is Kumi's own.
+    pub why: Option<String>,
+    /// Kumi's bridge version.
+    pub bridge: String,
+    pub live: Rc<dyn LiveSetup>,
 }
 impl TuiOptions {
     pub fn new(controller: Rc<dyn SessionController>, input: Rc<dyn TtyInput>, output: Rc<dyn TtyOutput>, mode: impl Into<String>) -> Self {
@@ -94,6 +107,7 @@ impl TuiOptions {
             panel_tab: None,
             updates: None,
             voice: None,
+            connect_live: None,
         }
     }
 }
@@ -222,6 +236,8 @@ struct State {
     beat_timer: Option<JoinHandle<()>>,
     /// The redraws that end changes' flashes; quitting doesn't wait for them.
     flash_timers: Vec<JoinHandle<()>>,
+    /// First-run setup, shown in place of the session until it's done or put off.
+    setup: Option<setup::Setup>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -294,6 +310,7 @@ impl State {
             wake_time: None,
             beat_timer: None,
             flash_timers: Vec::new(),
+            setup: None,
         }
     }
 }
@@ -506,6 +523,12 @@ impl TuiApp {
             if state.closing {
                 return self.done();
             }
+            // Kumi's bridge going into Live, or Live closed by Kumi: the quit waits until both are done with.
+            if state.setup.as_mut().is_some_and(|setup| setup.defer_quit(code, message.clone())) {
+                drop(state);
+                self.0.scheduler.request();
+                return self.done();
+            }
             state.closing = true;
             state.suppress = true;
             state.stream.discard();
@@ -519,6 +542,9 @@ impl TuiApp {
                     Panel::Key { secret, .. } => secret.clear(),
                     _ => {}
                 }
+            }
+            if let Some(setup) = state.setup.as_mut() {
+                setup.stop();
             }
             for aside in &state.asides {
                 if aside.borrow().state == "asking" {
@@ -621,8 +647,15 @@ impl Terminal for TuiApp {
             }
             Ok(())
         });
-        self.task(|app| async move {
-            if let Err(error) = app.check_model().await {
+        // A step missing (signing in, Live's bridge): the setup runs first, in place of the session.
+        let setup = self.begin_setup();
+        self.task(move |app| async move {
+            if setup {
+                app.run_setup(false).await;
+            } else if app.needs_sign_in().await {
+                // It looked for a default model already.
+                app.run_setup(true).await;
+            } else if let Err(error) = app.check_model().await {
                 app.panel_failed(&error);
             }
             Ok(())

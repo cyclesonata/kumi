@@ -120,6 +120,7 @@ impl KernelTool for Tempo {
 }
 fn kernel(binding: ModelBinding) -> AgentKernel {
     create_agent_kernel(AgentKernelOptions {
+        conversation: None,
         binding,
         instructions: "fixture instructions".into(),
         signal: Signal::new(),

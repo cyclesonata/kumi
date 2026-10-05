@@ -8,6 +8,7 @@ use crate::{
     input::TerminalInput,
     install::{self, InstalledIo},
     library::{run_library, LibraryIo},
+    live_app,
     login::{self, AuthIo, LoginIo},
     report::{write_report, ReportIo},
     spinner::step,
@@ -383,6 +384,10 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
         return Ok(updated);
     }
     io.out.write("\nOpening Kumi again…\n");
+    reopen(io).await
+}
+/// Open Kumi again, with the same arguments and conversation.
+async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     if let Some(reopen) = &io.reopen {
         return Ok(reopen().await);

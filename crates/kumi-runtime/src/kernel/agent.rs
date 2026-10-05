@@ -94,6 +94,9 @@ pub struct AgentKernelOptions {
     pub max_steps: Option<usize>,
     /// How much conversation to send; older Live reads are cleared first.
     pub budget: Option<ContextBudget>,
+    /// The conversation's own id: the session id providers key their prompt cache on comes from it,
+    /// so a resumed conversation finds its cache. Without it, each kernel has a new one.
+    pub conversation: Option<String>,
 }
 
 struct StepResult {
@@ -235,7 +238,7 @@ pub struct AgentKernel {
 }
 
 pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, RuntimeError> {
-    let AgentKernelOptions { instructions, tools, signal: _, checkpoint, binding, max_steps, budget } = options;
+    let AgentKernelOptions { instructions, tools, signal: _, checkpoint, binding, max_steps, budget, conversation } = options;
     let max_steps = max_steps.unwrap_or(200);
     let budget_given = budget.is_some();
     let budget = budget.unwrap_or(DEFAULT_BUDGET);
@@ -258,7 +261,14 @@ pub fn create_agent_kernel(options: AgentKernelOptions) -> Result<AgentKernel, R
     let specs: Vec<FunctionTool> =
         tools.iter().map(|tool| FunctionTool::new(tool.name(), tool.description(), Value::Object(tool.input_schema()))).collect();
     let tools: HashMap<String, Rc<dyn KernelTool>> = tools.iter().map(|tool| (tool.name().to_string(), tool.clone())).collect();
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = match conversation {
+        // A UUID of the conversation's own: the same one every time it's carried on.
+        Some(conversation) => {
+            let digest = Sha256::digest(format!("kumi-conversation:{conversation}").as_bytes());
+            uuid::Builder::from_random_bytes(digest[..16].try_into().expect("16 bytes")).into_uuid().to_string()
+        }
+        None => uuid::Uuid::new_v4().to_string(),
+    };
     let lifetime = Controller::new();
     // What the conversation was made with besides its messages: some models' reasoning is bound to it.
     let fingerprint = stringify(&serde_json::json!({ "instructions": instructions, "specs": specs }));

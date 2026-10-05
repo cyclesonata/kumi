@@ -230,6 +230,9 @@ pub struct KernelOptions {
     pub signal: Signal,
     /// Continue this conversation instead of starting empty.
     pub checkpoint: Option<KernelCheckpoint>,
+    /// The conversation's own id, which stays the same across restarts: the provider keeps its prompt
+    /// cache for it.
+    pub conversation: Option<String>,
 }
 
 pub type KernelFactory = Rc<dyn Fn(KernelOptions) -> LocalBoxFuture<'static, Result<Rc<dyn Kernel>, RuntimeError>>>;

@@ -4,7 +4,7 @@ use crate::{
     history::open_input_history,
     models::{create_model_control, ModelControlOptions},
     terminal::{create_terminal, Terminal, TerminalOptions},
-    tui::app::{create_tui, PanelTab, TuiOptions},
+    tui::app::{create_tui, ConnectLive, LiveSetup, PanelTab, TuiOptions},
     voice::{create_voice_control, VoiceControlOptions},
 };
 use async_trait::async_trait;
@@ -33,6 +33,58 @@ impl Kernel for UnavailableKernel {
         self.checkpoint.clone().ok_or_else(|| RuntimeError::plain("No checkpoint"))
     }
 }
+/// Live's side of first-run setup, for the app: Live the app, Kumi's bridge in it, and the session
+/// connecting through the bridge once it's in place.
+struct LiveSide {
+    env: Env,
+    run: bridge_setup::Run,
+    /// The bridge configuration the session's integration starts from, and whether it was given
+    /// (`--bridge-config`), so the one put in place doesn't replace it.
+    bridge: Rc<RefCell<Option<String>>>,
+    given: bool,
+    controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
+}
+#[async_trait(?Send)]
+impl LiveSetup for LiveSide {
+    async fn open_live(&self) -> Option<String> {
+        live_app::open_live(&self.run, kumi_runtime::system::platform(), &self.env).await.map(|live| live.app)
+    }
+    async fn ask_to_quit(&self) {
+        live_app::ask_to_quit(&self.run, kumi_runtime::system::platform(), &self.env).await
+    }
+    async fn closed(&self, stop: &Signal) -> bool {
+        live_app::closed(&self.run, kumi_runtime::system::platform(), &self.env, stop).await
+    }
+    async fn install(&self) -> Result<String, String> {
+        let mut options = BridgeSetupIo::quiet(self.env.clone());
+        options.run = Some(self.run.clone());
+        bridge_setup::install_quietly(options).await
+    }
+    async fn start(&self, app: Option<String>) -> bool {
+        live_app::start(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref()).await
+    }
+    async fn connect(&self) {
+        if !self.given {
+            if let Some(found) = find_bridge_config(&self.env) {
+                *self.bridge.borrow_mut() = Some(found);
+            }
+        }
+        // The session may still be starting: a busy one is asked again shortly.
+        for _ in 0..40 {
+            let session = self.controller.borrow().as_ref().and_then(Weak::upgrade);
+            let Some(session) = session else { return };
+            if session.reconnect().await.is_ok() {
+                return;
+            }
+            drop(session);
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+    async fn version(&self, app: Option<String>) -> Option<String> {
+        live_app::version(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref()).await
+    }
+}
+
 pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> doctor::LiveProbe {
     let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
     options.bridge_config = Some(config);
@@ -58,6 +110,58 @@ pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> docto
     .await;
     let _ = integration.close().await;
     result.unwrap_or(doctor::LiveProbe { started: true, connected: Some(false), ..Default::default() })
+}
+/// How the watch for Live paces itself: a look at Live's port every `look_ms`, and while it answers
+/// but the session isn't connected, a reconnect at once and then every `retry_ms`, at most `tries`
+/// times until it stops answering (then the count starts again). It ends after `looks`.
+struct Pace {
+    look_ms: u64,
+    retry_ms: u64,
+    tries: u32,
+    looks: u32,
+}
+const PACE: Pace = Pace { look_ms: 2_000, retry_ms: 20_000, tries: 10, looks: 1_800 };
+
+/// Live answers once it's open with AbletonMcpBridge chosen as a Control Surface: then the session
+/// reconnects by itself. Live can accept connections before it's ready (a dialog open, a Set still
+/// loading), so a failed reconnect is tried again while it answers. Watching ends once connected,
+/// after an hour, or when the session has gone.
+async fn connect_when_live_answers<F, A>(
+    answers: F,
+    controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
+    emit: Rc<dyn Fn(SessionEvent)>,
+    watching: Rc<Cell<bool>>,
+    pace: Pace,
+) where
+    F: Fn() -> A,
+    A: std::future::Future<Output = bool>,
+{
+    let mut tries = 0;
+    let mut next: Option<std::time::Instant> = Some(std::time::Instant::now());
+    for _ in 0..pace.looks {
+        let Some(session) = controller.borrow().as_ref().and_then(Weak::upgrade) else { break };
+        if session.status().connection == ConnectionState::Connected {
+            break;
+        }
+        if answers().await {
+            if tries < pace.tries && next.is_some_and(|at| std::time::Instant::now() >= at) {
+                tries += 1;
+                // A turn under way makes this fail; it's tried again later.
+                if session.has_reconnect() && session.reconnect().await.is_ok() && session.status().connection == ConnectionState::Connected
+                {
+                    emit(SessionEvent::Notice { message: "Live answered, so Kumi is connected to it now.".into() });
+                    break;
+                }
+                next = Some(std::time::Instant::now() + std::time::Duration::from_millis(pace.retry_ms));
+            }
+        } else {
+            tries = 0;
+            next = Some(std::time::Instant::now());
+        }
+        drop(session);
+        tokio::time::sleep(std::time::Duration::from_millis(pace.look_ms)).await;
+    }
+    watching.set(false);
 }
 pub(super) async fn run_session(
     io: CliIo,
@@ -135,6 +239,7 @@ pub(super) async fn run_session(
                 let result = async {
                     let binding = models.binding().await?;
                     Ok::<_, RuntimeError>(Rc::new(create_agent_kernel(AgentKernelOptions {
+                        conversation: options.conversation,
                         instructions: options.instructions,
                         tools: options.tools,
                         signal: options.signal,
@@ -158,14 +263,19 @@ pub(super) async fn run_session(
     let restore_file = load_restore_file(&io.env)?;
     let user_library = live_user_library(&io.env);
     let trace = io.env.get("KUMI_TRACE").is_some_and(|s| s == "1");
+    // Watching for Live to answer, so a chat without Live connects by itself once it does.
+    let watching_live = Rc::new(Cell::new(false));
+    // Where the session finds Live: first-run setup sets it once the bridge is in place.
+    let live_config = Rc::new(RefCell::new(bridge_config.clone()));
     let integration_factory: IntegrationFactory = {
+        let watching_live = watching_live.clone();
         let library = library.clone();
         let emit = emit.clone();
         let controller = controller.clone();
-        let bridge_config = bridge_config.clone();
+        let live_config = live_config.clone();
         let bundled = bundled.clone();
         Box::new(move |on_connection| {
-            let Some(bridge_config) = bridge_config.clone() else {
+            let Some(bridge_config) = live_config.borrow().clone() else {
                 return create_inference_only_integration(Rc::new(move |state| on_connection(state, None)));
             };
             let mut options = AbletonOptions::new(on_connection.clone());
@@ -242,6 +352,8 @@ pub(super) async fn run_session(
             }
             let emit = emit.clone();
             let bundled = bundled.clone();
+            let controller = controller.clone();
+            let watching_live = watching_live.clone();
             with_fallback(
                 factory(options),
                 Rc::new(move || {
@@ -251,19 +363,33 @@ pub(super) async fn run_session(
                 Rc::new(move |message| {
                     let installed = doctor::read_bridge_server(&bridge_config).ok().and_then(|s| s.version);
                     let current = installed.is_some() && installed == bundled;
-                    emit(SessionEvent::Notice {
-                        message: if current {
-                            "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Then /reconnect.".into()
-                        } else {
-                            message
-                        },
-                    })
+                    if !current {
+                        emit(SessionEvent::Notice { message });
+                    } else if !watching_live.replace(true) {
+                        // Said once: the watch's own retries fall back here too, quietly.
+                        emit(SessionEvent::Notice {
+                            message: "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Kumi connects by itself once Live answers.".into(),
+                        });
+                        let config = bridge_config.clone();
+                        tokio::task::spawn_local(connect_when_live_answers(
+                            move || {
+                                let config = config.clone();
+                                async move { bridge_setup::remote_script_answers(&config).await }
+                            },
+                            controller.clone(),
+                            emit.clone(),
+                            watching_live.clone(),
+                            PACE,
+                        ));
+                    }
                 }),
             )
         })
     };
     let mut options = SessionOptions::new(kernel_factory, integration_factory, emit.clone());
-    if bridge_config.is_some() {
+    // Live may come later in this session, once first-run setup has put the bridge in place.
+    let live_possible = bridge_config.is_some() || bridge_missing;
+    if live_possible {
         options.conversations = Some(create_conversation_store(&projects_dir));
     }
     options.memory = Some(create_memory_store(MemoryStoreOptions {
@@ -306,10 +432,22 @@ pub(super) async fn run_session(
     let notice = if bridge_missing {
         Some(format!("The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: {} bridge",io.command()))
     } else {
-        stale.map(|stale| if stale.runtime_migration {
+        stale.as_ref().map(|stale| if stale.runtime_migration {
             format!("The bridge in Live still uses JavaScript. Quit Kumi and Live, then run: {} bridge to switch to the native bridge.", io.command())
         } else {
             format!("The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. Quit Kumi and Live, then run: {} update",stale.installed,stale.bundled,io.command())
+        })
+    };
+    // In the app, first-run setup puts the bridge in place instead, with Live restarting around it.
+    let connect_why = if bridge_missing {
+        Some("The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
+    } else {
+        stale.as_ref().map(|stale| {
+            if stale.runtime_migration {
+                "The bridge in Live still runs on JavaScript.".to_string()
+            } else {
+                format!("The bridge in Live is {}, older than Kumi's {}, so some changes aren't offered.", stale.installed, stale.bundled)
+            }
         })
     };
     let update_after = Rc::new(Cell::new(false));
@@ -340,7 +478,18 @@ pub(super) async fn run_session(
     let ui: Rc<dyn Terminal> = if full_screen {
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);
-        options.startup_notice = notice;
+        options.startup_notice = if connect_why.is_some() { None } else { notice };
+        options.connect_live = live_possible.then(|| ConnectLive {
+            why: connect_why,
+            bridge: bundled.clone().unwrap_or_default(),
+            live: Rc::new(LiveSide {
+                env: io.env.clone(),
+                run: bridge_setup::default_run(),
+                bridge: live_config.clone(),
+                given: io.args.first().is_some_and(|arg| arg == "--bridge-config"),
+                controller: controller.clone(),
+            }),
+        });
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.open_browser = Some(Rc::new(login::open_browser));
@@ -442,5 +591,117 @@ pub(super) async fn run_session(
         super::update_and_reopen(&io).await
     } else {
         Ok(code)
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use kumi_runtime::core::contracts::{ChangeRecord, PinnedNode, SessionStatus, TurnState};
+
+    struct Fake {
+        reconnects: Cell<u32>,
+        connect_on: u32,
+        connected: Cell<bool>,
+    }
+    #[async_trait(?Send)]
+    impl SessionController for Fake {
+        async fn start(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn submit(&self, _: &str, _: Option<PinnedNode>) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn refresh(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn new_conversation(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn cancel(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn status(&self) -> SessionStatus {
+            SessionStatus {
+                state: TurnState::Idle,
+                connection: if self.connected.get() { ConnectionState::Connected } else { ConnectionState::Disconnected },
+                turns: 0,
+                max_turns: None,
+                observation: None,
+            }
+        }
+        async fn undo(&self, _: Option<&str>) -> Result<Option<ChangeRecord>, RuntimeError> {
+            Ok(None)
+        }
+        fn has_reconnect(&self) -> bool {
+            true
+        }
+        async fn reconnect(&self) -> Result<(), RuntimeError> {
+            self.reconnects.set(self.reconnects.get() + 1);
+            if self.reconnects.get() >= self.connect_on {
+                self.connected.set(true);
+            }
+            Ok(())
+        }
+    }
+    async fn watch(connect_on: u32, answers: bool) -> (u32, Vec<String>, bool) {
+        let fake = Rc::new(Fake { reconnects: Cell::new(0), connect_on, connected: Cell::new(false) });
+        let session: Rc<dyn SessionController> = fake.clone();
+        let controller = Rc::new(RefCell::new(Some(Rc::downgrade(&session))));
+        let notices = Rc::new(RefCell::new(Vec::new()));
+        let emit: Rc<dyn Fn(SessionEvent)> = {
+            let notices = notices.clone();
+            Rc::new(move |event| {
+                if let SessionEvent::Notice { message } = event {
+                    notices.borrow_mut().push(message)
+                }
+            })
+        };
+        let watching = Rc::new(Cell::new(true));
+        let pace = Pace { look_ms: 1, retry_ms: 0, tries: 10, looks: 200 };
+        connect_when_live_answers(move || async move { answers }, controller, emit, watching.clone(), pace).await;
+        let notices = notices.borrow().clone();
+        (fake.reconnects.get(), notices, watching.get())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_given_bridge_config_stays_once_setup_puts_the_bridge_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("Remote Scripts/AbletonMcpBridge");
+        std::fs::create_dir_all(&reference).unwrap();
+        let found = dir.path().join("bridge-config.json");
+        std::fs::write(&found, "{}").unwrap();
+        std::fs::write(reference.join("bridge-reference.json"), serde_json::json!({ "config": found }).to_string()).unwrap();
+        let env = Env::from([("KUMI_REMOTE_SCRIPTS_DIR".to_string(), dir.path().join("Remote Scripts").display().to_string())]);
+        let side = |given| LiveSide {
+            env: env.clone(),
+            run: bridge_setup::default_run(),
+            bridge: Rc::new(RefCell::new(Some("/given/bridge-config.json".into()))),
+            given,
+            controller: Rc::new(RefCell::new(None)),
+        };
+        let given = side(true);
+        given.connect().await;
+        assert_eq!(given.bridge.borrow().as_deref(), Some("/given/bridge-config.json"), "--bridge-config stays");
+        let looked_up = side(false);
+        looked_up.connect().await;
+        assert_eq!(looked_up.bridge.borrow().as_deref(), found.to_str(), "the one put in place");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_live_already_answering_is_reconnected_and_tried_again_until_connected() {
+        let (reconnects, notices, watching) = watch(3, true).await;
+        assert_eq!(reconnects, 3, "at once, then again while Live answers and the session isn't connected");
+        assert_eq!(notices, ["Live answered, so Kumi is connected to it now."]);
+        assert!(!watching);
+        // A Live that answers but never connects gets a bounded number of tries.
+        let (reconnects, notices, _) = watch(u32::MAX, true).await;
+        assert_eq!(reconnects, 10);
+        assert!(notices.is_empty());
+        // A Live that never answers isn't asked at all.
+        assert_eq!(watch(1, false).await.0, 0);
     }
 }

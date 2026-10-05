@@ -6,6 +6,7 @@ pub mod history;
 pub mod input;
 pub mod install;
 pub mod library;
+pub mod live_app;
 pub mod live_extension;
 pub mod login;
 pub mod models;

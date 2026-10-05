@@ -42,6 +42,7 @@ Run from the repository root.
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | One test file of one crate |
 | `cargo fmt --all --check` | Formatting, as CI checks it |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lints; advisory in CI for now |
+| `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | A `RefCell` borrow held across an await; fails the Linux CI job |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | The bridge's performance budgets; see [the developer guide](DEVELOPER_GUIDE.md#build-test-and-measure) |
 
 The isolated runner gives the tests a home of their own: `HOME`, `USERPROFILE`,
@@ -115,6 +116,7 @@ run them.
 | `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Live with a disposable copy of a Set open; the bridge, built first with `cargo build --release -p ableton-mcp-server --bins` (for a debug run, the same without `--release`) | Makes every kind of change Kumi can, undoes each with Kumi's undo, plays, bounces, listens and watches, and times reads of a big Set. No model. |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | Your sign-in and model | How the model uses Kumi's tools, against a synthetic bridge with the real bridge's tool schemas, read from its native catalog. Never touches Live. Each case says its time, its tools' share of it, and how many model calls it took; `EVAL_EFFORT` sets the model's reasoning effort, and `EVAL_TRACE=1` prints each call. `EVAL_MEASURE=1`, with no sign-in or model, prints what every request carries: the instructions and each tool's definition in bytes (`EVAL_MEASURE=tools` adds the definitions). |
 | `cargo run --release -p kumi --example probe_inference` | Your sign-in | One authenticated request with a harmless tool. Never touches Live. |
+| `cargo run --release -p kumi --example probe_cache` | Your sign-in and model | Whether a conversation keeps its provider's prompt cache when its kernel is rebuilt, as on a resume: short turns that print their input and cached tokens, rebuilt with the same conversation, another one and none. Never touches Live. |
 
 The synthetic bridge's Operator, Saturator and EQ Eight have every parameter
 Live 12.4 gives them, read from Live into
@@ -140,7 +142,7 @@ Two workflows run on every pull request and every push to `main`:
 
 | Workflow | Jobs | What runs |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`, `Rust / macOS`, `Rust / Windows` | `cargo fmt --check`, the build of every target, every test through the isolated runner with the official SDKs installed (on Windows, the console input tests first), Clippy (advisory) and `git diff --check` |
+| **CI** | `Rust / Linux`, `Rust / macOS`, `Rust / Windows` | `cargo fmt --check`, the build of every target, every test through the isolated runner with the official SDKs installed (on Windows, the console input tests first), Clippy (advisory, except a `RefCell` borrow held across an await, which fails the Linux job) and `git diff --check` |
 | | `Python Remote Script / ubuntu-24.04`, `macos-15`, `windows-2025` (Python 3.11) | The Remote Script's tests; compiles the package |
 | | `Live extension` (Ubuntu, Node 24) | The extension's tests, against its committed build |
 | | `Release scripts` (Ubuntu) | The whitespace check of the change, then the packaging tests |

@@ -41,6 +41,14 @@ The welcome screen shows what changed in the Set since you were last here, a
 newer Kumi when there is one, and, the first time, that Kumi is learning your
 library in the background.
 
+**Setup** comes first when a step is missing: signing in, Kumi's bridge in Live
+(missing, or older than Kumi's), and then the Control Surface. It lists the three
+steps, done ones in mint with what was chosen, and asks what the current one
+needs; a mint waveform under the wordmark moves while Kumi waits (for the
+browser, the install, or Live). ↑↓ and Enter choose, Esc leaves the step for
+later, and the session follows in the same window. A Kumi that's set up starts
+straight into the session.
+
 Below 100 columns the Live pane folds into a two-line strip above the input box
 (where you are and what Kumi is doing, then the last change with its undo).
 Below 24×8 Kumi asks for a bigger window.

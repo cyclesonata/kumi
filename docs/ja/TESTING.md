@@ -39,6 +39,7 @@ Windows では、いくつかのテストがシンボリックリンクを作成
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 一つのクレートの、一つのテストファイルだけを実行します |
 | `cargo fmt --all --check` | CI と同じようにフォーマットを確認します |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint。CI では今のところ参考扱いです |
+| `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | await をまたいで保持される `RefCell` の借用。Linux の CI ジョブを失敗させます |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | ブリッジの性能の基準。[開発者ガイド](DEVELOPER_GUIDE.md#ビルドテスト計測)を参照してください |
 
 分離ランナーはテスト専用のホームを用意します。`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME`、`KUMI_HOME` は新しい一時フォルダーの中を指し、`KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は取り除かれるので、どのテストもあなたの Live のフォルダーや `~/.kumi` には届きません。
@@ -82,6 +83,7 @@ python3 -m compileall -q remote-script/AbletonMcpBridge
 | `cargo run --release -p kumi --example accept_live -- --set "<Set>"` | Set の使い捨てコピーを開いた Live と、先にビルドしておいたブリッジ（`cargo build --release -p ableton-mcp-server --bins`。デバッグ実行では `--release` を付けずに同じコマンド） | Kumi ができるあらゆる種類の変更を行い、それぞれを Kumi の取り消しで元に戻し、再生、バウンス、聴き取り、監視を行い、大きな Set の読み取りにかかる時間を計測します。モデルは使いません。 |
 | `cargo run --release -p kumi --example eval_changes [-- <part of a case name>]` | サインインとモデル | モデルが Kumi のツールをどう使うかを、本物のブリッジのツールスキーマ（ネイティブのカタログから読み込みます）を持つ合成ブリッジに対して評価します。Live には一切触れません。各ケースは、かかった時間、そのうちツールの時間、モデルの呼び出し回数を示します。`EVAL_EFFORT` でモデルの推論の度合いを設定し、`EVAL_TRACE=1` で呼び出しを一つずつ表示します。`EVAL_MEASURE=1` は、サインインもモデルも使わずに、すべてのリクエストが運ぶもの（指示と各ツールの定義）をバイト数で表示します（`EVAL_MEASURE=tools` では定義そのものも表示します）。 |
 | `cargo run --release -p kumi --example probe_inference` | サインイン | 無害なツールを使った認証済みのリクエストを一つ送ります。Live には一切触れません。 |
+| `cargo run --release -p kumi --example probe_cache` | サインインとモデル | 再開のときのようにカーネルを作り直しても、会話がプロバイダーのプロンプトキャッシュを保てるかを確かめます。短いターンごとに入力トークンとキャッシュされたトークンを表示し、同じ会話、別の会話、会話なしで作り直します。Live には一切触れません。 |
 
 合成ブリッジの Operator、Saturator、EQ Eight には、Live から `crates/kumi/examples/fixtures/eval_changes/live-devices.json` に読み込んだ、Live 12.4 のすべてのパラメータがあり、パラメータを設定する Kumi 自身のスクリプトを Live と同じように実行します。
 
@@ -101,7 +103,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 | ワークフロー | ジョブ | 実行内容 |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、すべてのターゲットのビルド、公式 SDK をインストールした状態での分離ランナーによる全テスト（Windows では先にコンソール入力のテスト）、Clippy（参考扱い）、`git diff --check` |
+| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、すべてのターゲットのビルド、公式 SDK をインストールした状態での分離ランナーによる全テスト（Windows では先にコンソール入力のテスト）、Clippy（参考扱い。ただし await をまたいで保持される `RefCell` の借用は Linux ジョブを失敗させます）、`git diff --check` |
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script のテストを実行し、パッケージをコンパイルします |
 | | `Live extension`（Ubuntu、Node 24） | コミットされたビルドに対する、拡張機能のテスト |
 | | `Release scripts`（Ubuntu） | この変更の空白のチェック、続いてパッケージングのテスト |

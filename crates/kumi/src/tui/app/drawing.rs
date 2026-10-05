@@ -64,6 +64,12 @@ impl TuiApp {
             self.0.tty.write(&frame);
             return;
         }
+        if self.setup_active() {
+            let cursor = self.draw_setup(&mut screen, columns, rows).filter(|_| !self.0.state.borrow().closing);
+            let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
+            self.0.tty.write(&frame);
+            return;
+        }
         let (pane, left) = Self::layout_for(columns);
         self.draw_header(&mut screen, columns);
         let layout = self.0.state.borrow().editor.layout((left - 6).max(1));
@@ -108,7 +114,8 @@ impl TuiApp {
     }
     fn status_line(&self) -> (Style, &'static str) {
         let state = self.0.state.borrow();
-        if self.0.options.mode == "inference-only" || matches!(state.connection, ConnectionState::Disconnected | ConnectionState::Error) {
+        // A chat without Live starts disconnected and stays so, unless setup connects Live mid-session.
+        if matches!(state.connection, ConnectionState::Disconnected | ConnectionState::Error) {
             (st::WARN, "Live not connected")
         } else if state.connection == ConnectionState::Connecting {
             (st::FAINT, "connecting to Live…")

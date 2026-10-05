@@ -109,6 +109,7 @@ mod tests {
             let (entered, admitted) = tokio::sync::oneshot::channel();
             let kernel = Rc::new(
                 create_agent_kernel(AgentKernelOptions {
+                    conversation: None,
                     instructions: "fixture".into(),
                     signal: Signal::new(),
                     checkpoint: None,

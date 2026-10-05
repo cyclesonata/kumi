@@ -51,15 +51,13 @@ curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | 
 irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
 ```
 
-続けて、新しいターミナルウィンドウで（Windows では同じウィンドウのままでもかまいません）：
+Kumi はインストールされるとすぐに起動し、セットアップがまだ済んでいないステップだけを進めます：
 
-```sh
-kumi login      # ChatGPT でサインイン、または Anthropic・OpenAI・OpenCode のキーを使う
-kumi bridge     # Live を閉じた状態で：Kumi を Live につなぐ（一回だけ）
-kumi            # Set の横で Kumi を開く
-```
+1. **Sign in**：ChatGPT、または Anthropic・OpenAI・OpenCode のキーでサインインします。
+2. **Connect to Live**：Kumi がブリッジを配置します。Live が開いていれば Kumi が Live の再起動を提案し、その前に Live が作業の保存を求めます。
+3. **Control Surface**：Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** を Control Surface として選びます。Kumi は自分で気づき、Live はこの選択を覚えておきます。
 
-そのあと初めて Live を開いたら、Live の **Settings → Link, Tempo & MIDI** で **AbletonMcpBridge** を Control Surface として選びます。その後は Kumi が自分で Live を見つけます。
+Esc を押すと、そのステップは後回しになります。次回からは `kumi` を実行します（macOS では新しいターミナルウィンドウで）。`kumi login`、`kumi bridge`、`kumi doctor` では、各ステップを個別に行えます。
 
 Kumi の中では `/` でコマンドを表示します。Esc で Kumi の作業を止め、`/stop` で Live を止めます。Kumi が作業中でも、Enter で追加の指示を伝えられます（今のステップの後に読まれます）。Tab は作業が終わった後に送るメッセージ、`/btw` は作業とは別にちょっとした質問をします。
 

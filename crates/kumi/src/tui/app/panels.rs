@@ -550,7 +550,7 @@ impl TuiApp {
             );
         }
     }
-    fn sign_in(&self, provider: ProviderId, then: Option<Action>) {
+    pub(super) fn sign_in(&self, provider: ProviderId, then: Option<Action>) {
         let Some(models) = self.0.options.models.clone() else {
             return;
         };
@@ -605,13 +605,12 @@ impl TuiApp {
                         app.0.state.borrow_mut().panel = None;
                     }
                     if !abort.is_cancelled() && !app.0.state.borrow().closing {
-                        app.notice(
-                            &format!(
-                                "The ChatGPT sign-in didn't finish: {}",
-                                safe_error_message(Some(&error.message()), &app.0.state.borrow().secrets)
-                            ),
-                            NoticeTone::Warn,
+                        let message = format!(
+                            "The ChatGPT sign-in didn't finish: {}",
+                            safe_error_message(Some(&error.message()), &app.0.state.borrow().secrets)
                         );
+                        app.setup_failed(&message);
+                        app.notice(&message, NoticeTone::Warn);
                     }
                 }
             }
@@ -778,6 +777,24 @@ impl TuiApp {
             Ok(())
         });
     }
+    /// Says which model Kumi chose by itself: the provider's own first choice, or a model on this computer.
+    pub(super) fn told_default(&self, chosen: crate::models::DefaultModel) {
+        let Some(models) = &self.0.options.models else { return };
+        let model = chosen.model;
+        let name = models.provider_name(&model.provider);
+        self.notice(
+            &if let Some(place) = model.r#where {
+                format!(
+                    "Kumi talks to {}, in {name} {place}. /model changes it.{}",
+                    model.name,
+                    chosen.note.map(|n| format!(" {n}")).unwrap_or_default()
+                )
+            } else {
+                format!("Kumi talks to {}, {name}'s first choice. /model changes it.", model.name)
+            },
+            NoticeTone::Info,
+        );
+    }
     pub(super) async fn check_model(&self) -> Result<(), RuntimeError> {
         let Some(models) = &self.0.options.models else {
             return Ok(());
@@ -792,20 +809,7 @@ impl TuiApp {
                 return Ok(());
             }
             if let Some(chosen) = chosen {
-                let model = chosen.model;
-                let name = models.provider_name(&model.provider);
-                self.notice(
-                    &if let Some(place) = model.r#where {
-                        format!(
-                            "Kumi talks to {}, in {name} {place}. /model changes it.{}",
-                            model.name,
-                            chosen.note.map(|n| format!(" {n}")).unwrap_or_default()
-                        )
-                    } else {
-                        format!("Kumi talks to {}, {name}'s first choice. /model changes it.", model.name)
-                    },
-                    NoticeTone::Info,
-                );
+                self.told_default(chosen);
                 return Ok(());
             }
             self.notice("Sign in to a provider to talk to its models: ChatGPT with your plan, or others with an API key. Or open Ollama or LM Studio to use models on this computer.",NoticeTone::Info);
@@ -835,7 +839,7 @@ impl TuiApp {
         }
         Ok(())
     }
-    fn action<F, Fut>(&self, f: F) -> Action
+    pub(super) fn action<F, Fut>(&self, f: F) -> Action
     where
         F: Fn(TuiApp) -> Fut + 'static,
         Fut: Future<Output = Result<(), RuntimeError>> + 'static,

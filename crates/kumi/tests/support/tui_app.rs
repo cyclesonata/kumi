@@ -492,6 +492,9 @@ impl Harness {
         .await
         .unwrap_or_else(|_| panic!("Waiting for {description}:\n{}", self.screen().join("\n")));
     }
+    pub async fn wait_for(&self, text: &str) {
+        self.wait_for_screen(&format!("{text:?}"), |lines| has(lines, text)).await;
+    }
     pub async fn wait_until_hidden(&self, text: &str) {
         self.wait_for_screen(&format!("{text:?} to disappear"), |lines| !has(lines, text)).await;
     }

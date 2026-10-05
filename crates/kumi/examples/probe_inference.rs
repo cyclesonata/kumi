@@ -215,6 +215,7 @@ async fn gate_a(probe: &Probe) -> Result<(), RuntimeError> {
     let calls = Rc::new(Cell::new(0));
     let nonce = Rc::new(RefCell::new(None));
     let kernel = create_agent_kernel(AgentKernelOptions {
+        conversation: None,
         instructions: INSTRUCTIONS.into(),
         tools: vec![Rc::new(NonceTool { calls: calls.clone(), nonce: nonce.clone() })],
         signal: Signal::new(),

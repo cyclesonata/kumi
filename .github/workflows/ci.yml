@@ -78,6 +78,10 @@ jobs:
         run: |
           cargo test --workspace --locked --doc
           cargo check --workspace --locked --examples
+      # Everything runs on one thread with Rc<RefCell<…>>: a borrow held across an await panics when another
+      # task borrows the same cell meanwhile. The rest of clippy stays advisory for now.
+      - name: No RefCell borrow held across an await
+        run: cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref
       - name: Clippy (advisory while the port is under way)
         continue-on-error: true
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

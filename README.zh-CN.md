@@ -51,15 +51,13 @@ curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | 
 irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
 ```
 
-然后在新的终端窗口中（Windows 上用同一个窗口即可）：
+Kumi 安装完成后会立即启动，它的设置只完成尚未完成的步骤：
 
-```sh
-kumi login      # 使用 ChatGPT 登录，或使用 Anthropic、OpenAI、OpenCode 的密钥
-kumi bridge     # 在 Live 关闭时：把 Kumi 连接到 Live（只需一次）
-kumi            # 在你的工程旁打开 Kumi
-```
+1. **Sign in**：使用 ChatGPT，或使用 Anthropic、OpenAI、OpenCode 的密钥登录。
+2. **Connect to Live**：Kumi 把桥接放到位。如果 Live 正开着，Kumi 会提出重启它，Live 会先提示你保存工作。
+3. **Control Surface**：在 Live 的 **Settings → Link, Tempo & MIDI** 中把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。
 
-之后首次打开 Live 时，请在 Live 的 **Settings → Link, Tempo & MIDI** 中把 **AbletonMcpBridge** 选为 Control Surface。之后 Kumi 会自己找到 Live。
+按 Esc 可把某一步留到以后。下次运行 `kumi` 即可（在 macOS 上，请在新的终端窗口中运行）。`kumi login`、`kumi bridge` 和 `kumi doctor` 可以单独完成每一步。
 
 在 Kumi 中输入 `/` 查看命令。Esc 停止 Kumi 正在做的事，`/stop` 停止 Live。Kumi 工作时，按 Enter 可以补充说明（它会在当前这一步之后读到），按 Tab 发送一条等它做完再处理的消息，`/btw` 可以顺便问个问题。
 

@@ -1461,6 +1461,7 @@ async fn run_case(model: &Counted, case: &Case, catalog: &Rc<ListToolsResult>, w
         let budget = case.budget;
         Rc::new(move |options: KernelOptions| {
             let made = create_agent_kernel(AgentKernelOptions {
+                conversation: None,
                 instructions: options.instructions,
                 tools: options.tools,
                 signal: options.signal,

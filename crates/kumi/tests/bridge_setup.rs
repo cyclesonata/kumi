@@ -236,6 +236,63 @@ async fn upgrade_keeps_state_and_explains_plan_or_apply_refusal() {
     assert!(w.out.0.borrow().contains("stopped, and put back what was there: apply failed"));
 }
 #[tokio::test(flavor = "current_thread")]
+async fn live_opened_again_before_the_switch_changes_nothing() {
+    let w = World::new(Some("1.0.33"));
+    let mut io = w.io();
+    // Closed at the first look, open again by the switch.
+    let looks = Rc::new(Cell::new(0));
+    io.live_running = Some(Rc::new({
+        let looks = looks.clone();
+        move || {
+            looks.set(looks.get() + 1);
+            let open = looks.get() > 1;
+            async move { open }.boxed_local()
+        }
+    }));
+    assert_eq!(setup_bridge(io).await.unwrap(), 1);
+    assert_eq!(looks.get(), 2);
+    assert!(w.out.0.borrow().contains("Live is open again, so nothing was changed"), "{}", w.out.0.borrow());
+    let calls = w.calls.borrow();
+    assert!(calls.iter().all(|call| !call.args.contains(&"--apply".into())), "planned, never applied: {calls:?}");
+    let left: Vec<_> =
+        fs::read_dir(w.root.path().join("kumi/bridge")).map(|d| d.flatten().map(|e| e.file_name()).collect()).unwrap_or_default();
+    assert!(left.is_empty(), "the unpacked version is gone: {left:?}");
+}
+#[tokio::test(flavor = "current_thread")]
+async fn the_in_app_install_keeps_quiet_and_says_what_went_wrong_in_a_sentence() {
+    // Done: the bundled bridge's version, nothing printed, nothing asked, no wait for Live.
+    let w = World::new(None);
+    let mut io = w.io();
+    io.wait_ms = None;
+    io.yes = false;
+    assert_eq!(install_quietly(io).await, Ok("1.0.34".into()));
+    assert!(w.out.0.borrow().is_empty(), "{}", w.out.0.borrow());
+    // Live open: the setup's to fix, said as such.
+    let w = World::new(Some("1.0.33"));
+    let mut io = w.io();
+    io.live_running = Some(Rc::new(|| async { true }.boxed_local()));
+    assert_eq!(install_quietly(io).await, Err("Live is open again: quit it, then Try again.".into()));
+    // Live opening again just before the switch says the same.
+    let w = World::new(Some("1.0.33"));
+    let mut io = w.io();
+    let looks = Rc::new(Cell::new(0));
+    io.live_running = Some(Rc::new({
+        let looks = looks.clone();
+        move || {
+            looks.set(looks.get() + 1);
+            let open = looks.get() > 1;
+            async move { open }.boxed_local()
+        }
+    }));
+    assert_eq!(install_quietly(io).await, Err("Live is open again: quit it, then Try again.".into()));
+    // Anything else: the last thing the installer said.
+    let w = World::new(Some("1.0.33"));
+    w.answers
+        .borrow_mut()
+        .extend([answered(json!({"state":"planned"})), Ran { code: 1, stdout: "".into(), stderr: "apply failed\n".into() }]);
+    assert_eq!(install_quietly(w.io()).await, Err("The bridge's installer stopped, and put back what was there: apply failed".into()));
+}
+#[tokio::test(flavor = "current_thread")]
 async fn activation_waits_until_remote_script_answers_and_records_connection() {
     let w = World::new(Some("1.0.33"));
     w.answers.borrow_mut().extend([

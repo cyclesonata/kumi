@@ -51,15 +51,13 @@ curl -fsSL https://raw.githubusercontent.com/user1303836/kumi/main/install.sh | 
 irm https://raw.githubusercontent.com/user1303836/kumi/main/install.ps1 | iex
 ```
 
-Then, in a new terminal window (on Windows, the same window works):
+Kumi starts as soon as it's installed, and its setup runs the steps still missing:
 
-```sh
-kumi login      # sign in with ChatGPT, or an Anthropic, OpenAI or OpenCode key
-kumi bridge     # with Live closed: connect Kumi to Live (once)
-kumi            # open Kumi next to your Set
-```
+1. **Sign in**: ChatGPT, or an Anthropic, OpenAI or OpenCode key.
+2. **Connect to Live**: Kumi puts its bridge in place. If Live is open, Kumi offers to restart it, and Live asks you to save your work first.
+3. **Control Surface**: in Live, pick **AbletonMcpBridge** as a Control Surface in **Settings → Link, Tempo & MIDI**. Kumi notices by itself, and Live remembers the choice.
 
-The first time you open Live afterwards, pick **AbletonMcpBridge** as a Control Surface in Live's **Settings → Link, Tempo & MIDI**. After that, Kumi finds Live by itself.
+Esc leaves a step for later. Next time, run `kumi` (on macOS, in a new terminal window). `kumi login`, `kumi bridge` and `kumi doctor` do each step on its own.
 
 Inside Kumi, type `/` for commands. Esc stops what Kumi is doing, and `/stop` stops Live. While Kumi works, Enter tells it more (it reads it after the step under way), Tab sends a message for after, and `/btw` asks something on the side.
 

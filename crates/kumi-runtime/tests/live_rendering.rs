@@ -498,6 +498,7 @@ async fn cancelled_kernel_audition_restores_main_and_removes_scratch_tracks_afte
             input.insert("from_beat".into(), from);
             let kernel = Rc::new(
                 create_agent_kernel(AgentKernelOptions {
+                    conversation: None,
                     instructions: "fixture".into(),
                     tools: vec![audition],
                     signal: Signal::new(),
