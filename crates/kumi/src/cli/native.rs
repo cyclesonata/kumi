@@ -359,7 +359,22 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     io.out.write("\n");
     let updated = if io.installed() {
-        install::update_installed(installed_io(io)).await?
+        // The TUI's Ctrl-C handler is gone, but the process keeps its SIGINT disposition: Ctrl-C now
+        // stops the download, as the source's default handler ended a stuck update.
+        let cancel = kumi_common::abort::Signal::new();
+        let stop = SignalTask(io.signals.then(|| {
+            let cancel = cancel.clone();
+            tokio::task::spawn_local(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    cancel.cancel();
+                }
+            })
+        }));
+        let mut installed = installed_io(io);
+        installed.cancel = Some(cancel);
+        let updated = install::update_installed(installed).await;
+        drop(stop);
+        updated?
     } else {
         update::run_update(UpdateIo::new(io.out.clone(), io.env.clone())).await
     };

@@ -129,10 +129,12 @@ pub struct InstalledIo {
     pub live_running: Option<AsyncBool>,
     pub confirm: Option<Confirm>,
     pub update_bridge: Option<Rc<dyn Fn(String) -> LocalBoxFuture<'static, i32>>>,
+    /// The producer's Ctrl-C while an update downloads: it stops the download, and nothing changes.
+    pub cancel: Option<kumi_common::abort::Signal>,
 }
 impl InstalledIo {
     pub fn new(out: Rc<dyn TtyOutput>, env: Env) -> Self {
-        Self { out, env, input: None, run: None, fetcher: None, live_running: None, confirm: None, update_bridge: None }
+        Self { out, env, input: None, run: None, fetcher: None, live_running: None, confirm: None, update_bridge: None, cancel: None }
     }
 }
 async fn ask(io: &InstalledIo, question: &str) -> bool {
@@ -270,14 +272,21 @@ impl Drop for Cleanup {
         }
     }
 }
-async fn download(url: &str, file: &str, fetch: Rc<dyn Fetch>) -> Result<(), RuntimeError> {
-    let response = fetch.fetch(url, FetchInit { signal: Some(abort::timeout(600000)), ..Default::default() }).await.map_err(error)?;
+async fn download(url: &str, file: &str, fetch: Rc<dyn Fetch>, cancel: Option<abort::Signal>) -> Result<(), RuntimeError> {
+    let signal = abort::any(std::iter::once(abort::timeout(600000)).chain(cancel));
+    let response = fetch.fetch(url, FetchInit { signal: Some(signal.clone()), ..Default::default() }).await.map_err(error)?;
     if !response.ok() {
         return Err(RuntimeError::plain(format!("the download failed ({})", response.status)));
     }
     let mut bytes = vec![];
     if let Some(mut body) = response.body {
-        while let Some(chunk) = body.next().await {
+        loop {
+            // The body's chunks race the signal too: a stalled connection stops when it fires.
+            let chunk = tokio::select! {
+                chunk = body.next() => chunk,
+                _ = signal.cancelled() => return Err(RuntimeError::plain("the download was stopped")),
+            };
+            let Some(chunk) = chunk else { break };
             bytes.extend(chunk.map_err(error)?);
         }
     }
@@ -313,14 +322,19 @@ pub async fn update_installed(io: InstalledIo) -> Result<i32, RuntimeError> {
     let fresh = join(&home, "app.new");
     let mut cleanup = Cleanup(vec![fresh.clone(), bundle.clone()]);
     let result: Result<i32, RuntimeError> = async {
-        step(
+        let downloaded = step(
             io.out.clone(),
             &io.env,
             &format!("Downloading Kumi {}…", manifest.kumi),
-            download(&format!("{}/{}", release_base(&io.env), manifest.bundle), &bundle, fetch),
+            download(&format!("{}/{}", release_base(&io.env), manifest.bundle), &bundle, fetch, io.cancel.clone()),
             true,
         )
-        .await?;
+        .await;
+        if downloaded.is_err() && io.cancel.as_ref().is_some_and(|cancel| cancel.is_cancelled()) {
+            say("The download was stopped, so nothing was changed.".into());
+            return Ok(1);
+        }
+        downloaded?;
         if hex::encode(Sha256::digest(fs::read(&bundle).map_err(error)?)) != manifest.sha256 {
             say("The download didn't match its checksum, so nothing was changed. Try again in a moment.".into());
             return Ok(1);

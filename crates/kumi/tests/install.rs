@@ -653,3 +653,42 @@ async fn startup_switch_with_the_same_remote_script_is_quiet_and_never_moves_a_l
     put(dir.path().join("Remote Scripts/AbletonMcpBridge/ableton_mcp_remote_script.py"), "BRIDGE = '1.0.73'\n");
     assert!(!only_the_host_differs(&env));
 }
+
+/// A release whose bundle download starts and then never sends another byte.
+struct Stalled(Value);
+#[async_trait(?Send)]
+impl Fetch for Stalled {
+    async fn fetch(&self, url: &str, _: FetchInit) -> Result<Response, LanguageModelError> {
+        if url.ends_with(".json") {
+            return Ok(Response::json_response(200, self.0.clone()));
+        }
+        let first = futures::stream::iter(vec![Ok::<Vec<u8>, LanguageModelError>(vec![0u8; 1024])]);
+        Ok(Response {
+            body: Some(Box::pin(futures::StreamExt::chain(first, futures::stream::pending()))),
+            ..Response::text_response(200, "")
+        })
+    }
+}
+#[tokio::test]
+async fn ctrl_c_stops_a_stalled_update_download_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = env(dir.path());
+    let home = Path::new(&env["KUMI_HOME"]);
+    put(home.join("app/package.json"), json!({"version":KUMI_VERSION}).to_string());
+    put(home.join("app").join(executable_name("kumi")), "earlier");
+    let (mut installed, out) = io(&env);
+    installed.fetcher = Some(Rc::new(Stalled(manifest("99.0.0"))));
+    let cancel = kumi_common::abort::Signal::new();
+    installed.cancel = Some(cancel.clone());
+    let pressed = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel.cancel();
+    });
+    let updated =
+        tokio::time::timeout(std::time::Duration::from_secs(10), update_installed(installed)).await.expect("the download stopped");
+    pressed.await.unwrap();
+    assert_eq!(updated.unwrap(), 1);
+    assert!(out.0.borrow().contains("The download was stopped, so nothing was changed."), "{}", out.0.borrow());
+    assert_eq!(fs::read_to_string(home.join("app").join(executable_name("kumi"))).unwrap(), "earlier");
+    assert!(!home.join("app.new").exists() && !home.join("downloads/kumi.tar.gz").exists());
+}
