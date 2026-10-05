@@ -67,7 +67,7 @@ Something off? `kumi doctor` checks everything and says what to run. `kumi repor
 
 Kumi tells you when there's a newer version as it starts. `/update` inside Kumi, or `kumi update` in a terminal, gets it and brings the bridge along; `kumi update --check` only asks, and `kumi update --rollback` goes back. To stop the check, put `"updateCheck": false` in `~/.kumi/settings.json`.
 
-Updating from the current 1.7.5 installer? Close Live, run `kumi update`, then open Kumi as usual.
+Updating from Kumi 1.7.5 or earlier? Close Live, run `kumi update`, then open Kumi as usual.
 Your settings, sign-ins, conversations and library stay in place. The native app switches the
 existing bridge on first startup. [Migration and rollback details](docs/en/KUMI_GUIDE.md#updating-reporting-and-uninstalling).
 
@@ -75,8 +75,8 @@ existing bridge on first startup. [Migration and rollback details](docs/en/KUMI_
 
 ## Status
 
-- Kumi 1.7.5, the last TypeScript release, is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
-- The native 1.7.6 port has source comparison and isolated migration tests; validation against real Live is still pending. Please send a `kumi report` when something breaks.
+- Kumi 1.7.6 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
+- 1.7.6 is the first native release, tested with Live on macOS. On Windows, installing and updating are tested; using it with Live there is still new. Please send a `kumi report` when something breaks.
 - Support for Reaper and Renoise are planned
 
 ## Development

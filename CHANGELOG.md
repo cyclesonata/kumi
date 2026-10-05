@@ -3,15 +3,21 @@
 Kumi's releases. The Ableton bridge (`apps/mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
-## 1.7.6 — Unreleased
+## 1.7.6 — 2026-10-04
 
 Ships with bridge 1.0.74.
 
 - Kumi and its bridge run as native Rust executables. Fresh installs need no Node runtime.
-- Current 1.7.4 and 1.7.5 installer users keep using `kumi update`. Settings, sign-ins, conversations,
-  library data and the configured Kumi home stay in place.
-- On first native startup with Live closed, the existing JavaScript bridge switches to the native
-  bridge, including when both are version 1.0.74. Its secret, ports and configuration paths stay.
+- Kumi opens in about half the time, small changes in Live are 2–3× faster, and library learning is
+  1.7× faster on about a sixth of the memory.
+- Current 1.7.4 and 1.7.5 installer users keep using `kumi update`. The one-time update downloads
+  only their platform's build. Settings, sign-ins, conversations, library data and the configured
+  Kumi home stay in place.
+- The existing JavaScript bridge switches to the native bridge the first time Kumi starts with Live
+  closed, including when both are version 1.0.74. Until then Kumi works through the Remote Script
+  already in Live; coming from 1.7.5, whose Remote Script is the same, nothing is shown. The
+  bridge's secret, ports and configuration paths stay.
+- On Windows, the first native start replaces the Node launcher.
 - `kumi update --rollback` restores the previous app and its bridge generation. Close Live before
   rolling back to the JavaScript app. Another rollback returns to the retained native app.
 - YouTube downloads reuse the managed Node runtime retained from an older installation for
@@ -19,8 +25,8 @@ Ships with bridge 1.0.74.
 - Existing npm commands build the current checkout when Cargo is installed; otherwise they hand
   off to a published native release using the same Kumi home.
 
-The optimized release and platform installer checks are required before publication. Native
-real-Live validation remains separate from source comparisons and isolated migration tests.
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
 
 ## 1.7.5 — 2026-10-04
 
