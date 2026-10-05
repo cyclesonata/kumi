@@ -48,7 +48,10 @@ earlier model's private reasoning, which belongs to that model.
 
 When an answer fails because a sign-in is missing or was refused, Kumi offers to
 sign in and then sends your message again. When the provider doesn't offer the
-chosen model, Kumi offers to choose another.
+chosen model, Kumi offers to choose another. When an answer breaks off partway
+(a dropped connection, say), Kumi carries on once from where it stopped and says
+so in the status line; if it breaks off again, Kumi offers to send your message
+again.
 
 ### Models on your computer
 
