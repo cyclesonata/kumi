@@ -32,6 +32,8 @@ impl Rendering {
         {
             return Ok(None);
         }
+        // The connection the setup runs on: one that drops meanwhile isn't Ears failing.
+        let lifetime = self.connection().lifetime.clone();
         let setup = self.ears_setup.borrow().clone();
         let setup = if let Some(setup) = setup {
             setup
@@ -85,7 +87,9 @@ impl Rendering {
         let link = setup.await;
         if link.is_none() {
             *self.ears_setup.borrow_mut() = None;
-            self.ears_failed_at.set(Some(now_ms()));
+            if !lifetime.is_cancelled() {
+                self.ears_failed_at.set(Some(now_ms()));
+            }
         }
         signal.check()?;
         Ok(link)
