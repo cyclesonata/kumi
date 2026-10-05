@@ -14,7 +14,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # A pull request's newer push replaces its run. Every other run (each push to main, a tag, the nightly)
+  # has a group of its own, so a newer one can't cancel it while it waits for a runner.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -38,7 +40,7 @@ jobs:
           # JavaScript release with it.
           full=true
           if [[ "${{ github.event_name }}" == "pull_request" ]] && ! git diff --name-only "origin/${GITHUB_BASE_REF}...HEAD" \
-            | grep -q -E '^(install\.(sh|ps1)|scripts/|\.github/workflows/installer\.yml|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|crates/kumi/src/(install|update|bridge_setup)|crates/ableton-mcp-server/src/(lifecycle|delivery))'; then
+            | grep -q -E '^(install\.(sh|ps1)|scripts/|\.github/workflows/installer\.yml|Cargo\.(toml|lock)|crates/[^/]+/Cargo\.toml|crates/kumi/src/(install|update|bridge_setup|cli/)|crates/ableton-mcp-server/src/(lifecycle|delivery|migrate|setup|install_remote_script|platform)|remote-script/)'; then
             full=false
           fi
           echo "full=$full" >> "$GITHUB_OUTPUT"
