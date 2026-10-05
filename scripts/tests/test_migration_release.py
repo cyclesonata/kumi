@@ -548,13 +548,17 @@ class MigrationRelease(unittest.TestCase):
 import {pathToFileURL} from 'node:url';
 const {updateInstalled, rollbackInstalled} = await import(pathToFileURL(process.argv[2]));
 const manifest = JSON.parse(readFileSync(process.argv[3] + '/kumi-release.json'));
-const env = {KUMI_HOME:process.argv[4], KUMI_RELEASES:'https://fixture.invalid', KUMI_REMOTE_SCRIPTS_DIR:process.argv[4]+'/absent'};
+const env = {KUMI_HOME:process.argv[4], KUMI_RELEASES:process.env.KUMI_RELEASES, KUMI_REMOTE_SCRIPTS_DIR:process.argv[4]+'/absent'};
 const io = {env, out:process.stdout, fetcher: async url => new Response(url.endsWith('.json') ? JSON.stringify(manifest) : readFileSync(process.argv[3] + '/' + manifest.bundle))};
 if (await updateInstalled(io) !== 0) throw new Error('old update failed');
 if (await rollbackInstalled(io) !== 0) throw new Error('old rollback failed');
 if (await rollbackInstalled(io) !== 0) throw new Error('old return-to-native failed');
 ''', encoding="utf-8")
-        completed = subprocess.run(["node", str(test), str(reference), str(self.out), str(home)], capture_output=True, text=True, encoding="utf-8")
+        # The probe the old updater runs (the new app's adapter) downloads its platform's archive from
+        # KUMI_RELEASES, which it inherits from this process, as an installed updater's probe does.
+        with self.release_server(self.out) as base:
+            completed = subprocess.run(["node", str(test), str(reference), str(self.out), str(home)], capture_output=True, text=True, encoding="utf-8",
+                                       env=dict(os.environ, KUMI_RELEASES=base))
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
         self.assertIn("Kumi is now 99.0.0", completed.stdout)
         self.assertTrue((home / "app" / self.binary).exists())
