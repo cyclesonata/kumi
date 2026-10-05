@@ -200,6 +200,31 @@ fn if_no_earlier_exchange_fits_the_note_goes_on_this_turn() {
 }
 
 #[test]
+fn a_turn_whose_latest_results_alone_are_past_the_limit_has_them_cut_to_fit() {
+    let part = |id: &str| {
+        ToolPart::ToolResult(ToolResultPart {
+            tool_call_id: id.into(),
+            tool_name: "read_web".into(),
+            output: ToolResultOutput::text(read(id, 30_000)),
+            provider_options: None,
+        })
+    };
+    let turn = vec![user(&observed("now")), called("t1"), Message::Tool { content: vec![part("t1"), part("t2")], provider_options: None }];
+    let history: Vec<Message> = vec![];
+    let budget = budget(4096.0, 16.0 * 1024.0);
+    let fitted = fit(&history, &turn, &budget);
+    assert!(size(&[fitted.history.as_ref(), fitted.turn.as_ref()].concat()) as f64 <= budget.limit);
+    assert_eq!(text_of(fitted.turn.first()), text_of(turn.first()));
+    let Some(Message::Tool { content, .. }) = fitted.turn.last() else { panic!("the results stay last") };
+    for (part, id) in content.iter().zip(["t1", "t2"]) {
+        let ToolPart::ToolResult(ToolResultPart { output: ToolResultOutput::Text { value, .. }, .. }) = part else {
+            panic!("a text result")
+        };
+        assert!(value.starts_with(&format!("{{\"changed\":\"{id}\"")) && value.ends_with("to see more.]"), "{value}");
+    }
+}
+
+#[test]
 fn drop_earliest_keeps_whole_exchanges_from_the_end_starting_where_the_producer_spoke() {
     let messages = vec![user("1"), said("2"), result("3", "three", false), user("4"), said("5")];
     assert_eq!(drop_earliest(&messages, 10_000), &messages[..]);
