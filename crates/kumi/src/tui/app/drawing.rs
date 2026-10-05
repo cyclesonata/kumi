@@ -453,6 +453,9 @@ impl TuiApp {
         }
         let panel_hint = state.panel.as_ref().map(|p| match &*p.borrow() {
             Panel::Btw { .. } => "↑↓ to scroll · c copies · esc to close",
+            Panel::Pick { picker, .. } if picker.borrow().options.answers => {
+                "a number, then enter answers · or type your own · esc to close"
+            }
             Panel::Pick { .. } => "↑↓ to move · enter to choose · esc to close",
             Panel::Key { .. } => "enter to save · esc to cancel",
             Panel::ChatGpt { url, .. } => {
