@@ -186,6 +186,8 @@ pub const STOPPED_NOTE: &str =
 /// The result of a call a stopped batch never ran, and of the one it was running.
 pub const STOPPED_BEFORE_RUNNING: &str = "Stopped before running; nothing was done.";
 pub const STOPPED_WHILE_RUNNING: &str = "Stopped while running; it may have changed Live, so check before running it again.";
+/// The result of a read away from Live that was stopped while it ran.
+pub const STOPPED_READING: &str = "Stopped while running; nothing came back.";
 
 /// The turn under way: guidance waiting for its next step, what it has said and done so far, and when it settles.
 struct Running {
@@ -812,7 +814,8 @@ impl Turn {
                 return self.stopped(results, finished, calls);
             }
             let rest = &calls[results.len()..];
-            let together = rest.iter().take_while(|(call, _)| TOGETHER.contains(&call.tool_name.as_str())).count();
+            // At most four at once: a reply can ask for many pages, and search services limit bursts.
+            let together = rest.iter().take_while(|(call, _)| TOGETHER.contains(&call.tool_name.as_str())).take(4).count();
             let group = &rest[..together.max(1)];
             let ran = if group.len() > 1 {
                 let began = perf_now();
@@ -824,7 +827,11 @@ impl Turn {
             };
             for ((call, _), ran) in group.iter().zip(ran) {
                 let outcome = match ran {
-                    Ran::Stopped => Outcome { text: STOPPED_WHILE_RUNNING.into(), is_error: true, images: Vec::new() },
+                    Ran::Stopped => {
+                        // A read away from Live can't have changed it.
+                        let text = if TOGETHER.contains(&call.tool_name.as_str()) { STOPPED_READING } else { STOPPED_WHILE_RUNNING };
+                        Outcome { text: text.into(), is_error: true, images: Vec::new() }
+                    }
                     Ran::Done { outcome, reply } => {
                         finished += 1;
                         match reply.filter(|_| !outcome.is_error) {

@@ -23,7 +23,7 @@ use kumi_runtime::core::errors::{FailureKind, RuntimeError};
 use kumi_runtime::integrations::ableton::{integration::Ableton, observation::ObservationHost, options::AbletonOptions};
 use kumi_runtime::kernel::agent::{
     create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, STOPPED_BEFORE_RUNNING, STOPPED_NOTE,
-    STOPPED_WHILE_RUNNING,
+    STOPPED_READING, STOPPED_WHILE_RUNNING,
 };
 use kumi_runtime::kernel::budget::ContextBudget;
 use kumi_runtime::mcp::{
@@ -1378,7 +1378,7 @@ async fn reads_stopped_together_keep_what_finished_and_mark_what_was_running() {
         let results: Vec<_> = tool_message(&messages[2]).iter().map(|part| (output_type(part), js(part))).collect();
         assert_eq!(results.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(), ["text", "error-text", "error-text"]);
         assert!(results[0].1.contains("three reverb chains"));
-        assert!(results[1].1.contains(STOPPED_WHILE_RUNNING) && results[2].1.contains(STOPPED_BEFORE_RUNNING));
+        assert!(results[1].1.contains(STOPPED_READING) && results[2].1.contains(STOPPED_BEFORE_RUNNING));
         h.kernel.close().await;
     })
     .await
