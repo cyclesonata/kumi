@@ -949,14 +949,7 @@ local_test!(technique_is_removed_before_whole_and_streamed_plans_and_kept_when_p
     let plan = h.record.created.borrow()[0].tools[0].clone();
     assert!(plan.description().starts_with("Make changes. When the plan builds"));
     assert!(plan.input_schema()["properties"]["technique"].is_object());
-    for way in [false, true] {
-        streamed.set(way);
-        h.session.submit("build a Reese", None).await.unwrap();
-        assert_eq!(received.borrow().last().unwrap(), json!({"steps":[{"tool":"load_device"}]}).as_object().unwrap());
-        h.session.watch(WatchEvent::Action(ActionEvent { title: "Playing".into(), playing: Some(true), recording: None }));
-        delay(10).await;
-    }
-    assert_eq!(
+    let kept = || {
         h.events
             .borrow()
             .iter()
@@ -964,9 +957,22 @@ local_test!(technique_is_removed_before_whole_and_streamed_plans_and_kept_when_p
                 SessionEvent::Technique(t) => Some(t.action),
                 _ => None,
             })
-            .collect::<Vec<_>>(),
-        [TechniqueAction::Kept, TechniqueAction::Updated]
-    );
+            .collect::<Vec<_>>()
+    };
+    for (round, way) in [false, true].into_iter().enumerate() {
+        streamed.set(way);
+        h.session.submit("build a Reese", None).await.unwrap();
+        assert_eq!(received.borrow().last().unwrap(), json!({"steps":[{"tool":"load_device"}]}).as_object().unwrap());
+        h.session.watch(WatchEvent::Action(ActionEvent { title: "Playing".into(), playing: Some(true), recording: None }));
+        // Keeping it writes the store first; a busy runner's disk takes longer than a few ms.
+        for _ in 0..1000 {
+            if kept().len() > round {
+                break;
+            }
+            delay(2).await;
+        }
+    }
+    assert_eq!(kept(), [TechniqueAction::Kept, TechniqueAction::Updated]);
     assert_eq!(h.session.techniques().await.unwrap()[0].name, "Reese stack");
     let id = store.list().await.unwrap()[0].id.clone();
     assert!(h.session.forget_technique(&id).await.unwrap());
