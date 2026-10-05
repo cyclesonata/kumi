@@ -88,6 +88,7 @@ async fn budget_a_plan_that_finishes_the_request_is_one_model_reply_with_no_repl
         budget: None,
     };
     let kernel = create_agent_kernel(AgentKernelOptions {
+        conversation: None,
         binding,
         instructions: "budget".into(),
         tools: vec![Rc::new(Plan)],

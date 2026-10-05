@@ -179,6 +179,7 @@ async fn run(binding: Rc<LocalBinding>, instructions: &str, tools: Vec<Rc<dyn Ke
     let prepare = binding.clone();
     let budget = binding.clone();
     let kernel = create_agent_kernel(AgentKernelOptions {
+        conversation: None,
         instructions: instructions.into(),
         tools,
         signal: Signal::new(),

@@ -171,6 +171,7 @@ pub(super) async fn run_session(
                 let result = async {
                     let binding = models.binding().await?;
                     Ok::<_, RuntimeError>(Rc::new(create_agent_kernel(AgentKernelOptions {
+                        conversation: options.conversation,
                         instructions: options.instructions,
                         tools: options.tools,
                         signal: options.signal,

@@ -182,6 +182,7 @@ fn try_harness(script: impl Fn(&CallOptions, usize) -> Scripted + 'static, optio
         budget: None,
     };
     let kernel = create_agent_kernel(AgentKernelOptions {
+        conversation: None,
         binding,
         instructions: options.instructions.unwrap_or_else(|| "fixture instructions".into()),
         tools: options.tools,
@@ -352,6 +353,44 @@ async fn a_picture_goes_with_its_own_request_only_and_is_named_after() {
         assert!(!later.contains("\"type\":\"file\""), "{later}");
         assert!(later.contains("The producer showed synth.png with this message"), "{later}");
         h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn a_conversation_keeps_its_prompt_cache_key_across_kernels_and_restarts() {
+    local(async {
+        let keys = Rc::new(RefCell::new(Vec::<String>::new()));
+        for conversation in [Some("k3j2h1abc"), Some("k3j2h1abc"), Some("other123"), None, None] {
+            let keys = keys.clone();
+            let model = ScriptedModel { script: Rc::new(|_, _| answer("ok")), requests: Rc::new(RefCell::new(Vec::new())) };
+            let kernel = create_agent_kernel(AgentKernelOptions {
+                conversation: conversation.map(str::to_owned),
+                binding: ModelBinding {
+                    id: "test/fixture".into(),
+                    model: Rc::new(model),
+                    prepare: Box::new(move |request| {
+                        keys.borrow_mut().push(request.session_id.clone());
+                        CallOptions { prompt: request.messages, ..CallOptions::default() }
+                    }),
+                    budget: None,
+                },
+                instructions: "fixture instructions".into(),
+                tools: vec![],
+                signal: signal(),
+                checkpoint: None,
+                max_steps: None,
+                budget: None,
+            })
+            .unwrap();
+            kernel.run("hi", signal(), ignore()).await.unwrap();
+            kernel.close().await;
+        }
+        let keys = keys.borrow();
+        assert_eq!(keys[0], keys[1], "the same conversation, carried on");
+        assert_ne!(keys[0], keys[2], "another conversation");
+        assert_ne!(keys[3], keys[4], "kernels without a conversation");
+        assert!(uuid::Uuid::parse_str(&keys[0]).is_ok());
     })
     .await
 }

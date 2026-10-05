@@ -787,6 +787,7 @@ impl Session {
                 tools,
                 signal: lifetime.clone(),
                 checkpoint,
+                conversation: Some(self.0.state.borrow().conversation_id.clone()),
             })
             .await?;
             if !self.current(op) {
