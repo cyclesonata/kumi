@@ -1346,6 +1346,26 @@ async fn independent_reads_away_from_live_run_together_in_order_and_one_failure_
 }
 
 #[tokio::test]
+async fn huge_results_of_reads_run_together_are_each_cut_to_their_opening() {
+    local(async {
+        let huge = "x".repeat(1024 * 1024);
+        let h = harness(
+            |_, n| match n {
+                1 => Scripted::Parts(vec![call_id("search_web", "{}", "w1"), call_id("read_web", "{}", "w2"), tool_calls()]),
+                _ => answer("done"),
+            },
+            Options { tools: vec![saying("search_web", &huge), saying("read_web", &huge)], ..Options::default() },
+        );
+        h.kernel.run(&observed("read both"), signal(), ignore()).await.unwrap();
+        let sent = js(&h.request(1).prompt);
+        assert!(sent.len() < 140 * 1024, "{} bytes went to the model", sent.len());
+        assert_eq!(sent.matches("Kumi cut the rest of this result: it was 1024 KB").count(), 2, "both results are cut");
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn reads_stopped_together_keep_what_finished_and_mark_what_was_running() {
     local(async {
         let h = Rc::new(harness(
