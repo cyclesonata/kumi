@@ -73,6 +73,7 @@ async fn kernel(model: &str, checkpoint: Option<KernelCheckpoint>, conversation:
         env: Some(env),
         fetch: Some(Rc::new(Showing(HttpFetch::default()))),
         effort: None,
+        service_tier: None,
     })
     .await?;
     create_agent_kernel(AgentKernelOptions {
