@@ -37,7 +37,11 @@ fn legacy_app() -> PathBuf {
         let unpacked = staging.path().join("app");
         fs::create_dir_all(&unpacked).unwrap();
         // Windows' own tar: Git's GNU tar reads "D:\…" as a remote host.
-        let tar = if cfg!(windows) { PathBuf::from(std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into())).join("System32\\tar.exe") } else { "tar".into() };
+        let tar = if cfg!(windows) {
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into())).join("System32\\tar.exe")
+        } else {
+            "tar".into()
+        };
         assert!(Command::new(tar).arg("-xzf").arg(&archive).arg("-C").arg(&unpacked).status().unwrap().success());
         // Another test process may have put its copy in place first.
         let _ = fs::rename(&unpacked, &cache);
