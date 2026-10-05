@@ -5,6 +5,12 @@ each Kumi release names the bridge it ships with.
 
 ## Unreleased
 
+### Bridge 1.0.76
+
+- A search of Live's Browser keeps what it walked for ten minutes rather than one: a walk holds Live
+  for 0.6–0.75 s with Live's own library, longer with packs and plug-ins. A search that finds nothing
+  in what's kept walks again, at most once a minute, for what's new since.
+
 ### Bridge 1.0.75
 
 - Live's own timer serves Kumi between Live's display ticks, so a look at the Set takes about 20 ms
