@@ -504,9 +504,9 @@ fn settled_end(messages: &[Message]) -> usize {
     }
 }
 
-/// A reply's first call, running while it's written; `begun` is when its work started (0 before).
+/// A reply's first call, running while it's written; `begun` is when its work started.
 struct Early {
-    begun: Rc<Cell<f64>>,
+    begun: Rc<Cell<Option<f64>>>,
     call: Box<dyn StreamingCall>,
 }
 
@@ -659,16 +659,16 @@ impl InputStream for TurnInput<'_> {
         self.calls.set(calls + 1);
         if calls == 0 {
             if let Some(tool) = tool {
-                let begun = Rc::new(Cell::new(0.0));
+                let begun = Rc::new(Cell::new(None));
                 let on_start: Rc<dyn Fn()> = {
                     let begun = begun.clone();
                     let deliver = self.turn.deliver.clone();
                     let (id, name) = (id.to_string(), name.to_string());
                     Rc::new(move || {
-                        if begun.get() != 0.0 {
+                        if begun.get().is_some() {
                             return;
                         }
-                        begun.set(perf_now());
+                        begun.set(Some(perf_now()));
                         deliver(KernelEvent::ToolStart { id: id.clone(), name: name.clone() });
                     })
                 };
@@ -798,16 +798,16 @@ impl Turn {
         for (call, input) in calls {
             self.abort.check()?;
             let streamed = self.early.borrow().get(&call.tool_call_id).cloned();
-            let begun = streamed.as_ref().map_or(0.0, |entry| entry.begun.get());
-            let started = if begun != 0.0 { begun } else { perf_now() };
-            if begun == 0.0 {
+            let begun = streamed.as_ref().and_then(|entry| entry.begun.get());
+            let started = begun.unwrap_or_else(perf_now);
+            if begun.is_none() {
                 (self.deliver)(KernelEvent::ToolStart { id: call.tool_call_id.clone(), name: call.tool_name.clone() });
             }
             // A streamed call that hadn't begun (its first step waiting for the next, to batch them) begins in
             // finish: it's started now, so beginning there doesn't say so a second time.
             if let Some(entry) = &streamed {
-                if entry.begun.get() == 0.0 {
-                    entry.begun.set(started);
+                if entry.begun.get().is_none() {
+                    entry.begun.set(Some(started));
                 }
             }
             let tool = self.inner.tools.get(&call.tool_name).cloned();
