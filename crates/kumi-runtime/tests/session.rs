@@ -188,7 +188,8 @@ fn harness(run: Option<Run>, config: impl FnOnce(&mut SessionOptions)) -> Harnes
     let mut options = SessionOptions::new(factory, integration, Rc::new(move |e| out.borrow_mut().push(e)));
     options.timeout_ms = Some(5000);
     options.cancel_grace_ms = Some(10);
-    options.close_timeout_ms = Some(25);
+    // Long enough for a slow disk to finish the saves close waits for; a test of a stuck close sets its own.
+    options.close_timeout_ms = Some(2000);
     options.missing_after_ms = Some(30);
     config(&mut options);
     Harness { session: create_session(options).unwrap(), record, events, observation }
