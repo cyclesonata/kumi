@@ -42,6 +42,7 @@ Run from the repository root.
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | One test file of one crate |
 | `cargo fmt --all --check` | Formatting, as CI checks it |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lints; advisory in CI for now |
+| `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | A `RefCell` borrow held across an await; fails the Linux CI job |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | The bridge's performance budgets; see [the developer guide](DEVELOPER_GUIDE.md#build-test-and-measure) |
 
 The isolated runner gives the tests a home of their own: `HOME`, `USERPROFILE`,
@@ -140,7 +141,7 @@ Two workflows run on every pull request and every push to `main`:
 
 | Workflow | Jobs | What runs |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`, `Rust / macOS`, `Rust / Windows` | `cargo fmt --check`, the build of every target, every test through the isolated runner with the official SDKs installed (on Windows, the console input tests first), Clippy (advisory) and `git diff --check` |
+| **CI** | `Rust / Linux`, `Rust / macOS`, `Rust / Windows` | `cargo fmt --check`, the build of every target, every test through the isolated runner with the official SDKs installed (on Windows, the console input tests first), Clippy (advisory, except a `RefCell` borrow held across an await, which fails the Linux job) and `git diff --check` |
 | | `Python Remote Script / ubuntu-24.04`, `macos-15`, `windows-2025` (Python 3.11) | The Remote Script's tests; compiles the package |
 | | `Live extension` (Ubuntu, Node 24) | The extension's tests, against its committed build |
 | | `Release scripts` (Ubuntu) | The whitespace check of the change, then the packaging tests |

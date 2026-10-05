@@ -39,6 +39,7 @@ python3 -m unittest discover -s scripts/tests -p 'test_*release.py'
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 只运行一个 crate 的一个测试文件 |
 | `cargo fmt --all --check` | 按 CI 的方式检查格式 |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint 检查；目前在 CI 中仅供参考 |
+| `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | 跨 await 持有的 `RefCell` 借用；会使 Linux CI 任务失败 |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | 桥接的性能预算；见[开发者指南](DEVELOPER_GUIDE.md#构建测试与测量) |
 
 隔离运行器为测试提供独立的主目录：`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME` 和 `KUMI_HOME` 都指向一个全新的临时文件夹，`KUMI_REMOTE_SCRIPTS_DIR` 和 `KUMI_LIVE_EXTENSIONS_DIR` 则被移除，因此任何测试都无法触及你的 Live 文件夹或 `~/.kumi`。
@@ -101,7 +102,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 | 工作流 | 作业 | 运行内容 |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、构建所有目标、在装好官方 SDK 的情况下通过隔离运行器运行全部测试（在 Windows 上先运行控制台输入测试）、Clippy（仅供参考）和 `git diff --check` |
+| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、构建所有目标、在装好官方 SDK 的情况下通过隔离运行器运行全部测试（在 Windows 上先运行控制台输入测试）、Clippy（仅供参考，但跨 await 持有 `RefCell` 借用会使 Linux 任务失败）和 `git diff --check` |
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script 的测试；编译该包 |
 | | `Live extension`（Ubuntu，Node 24） | 针对已提交的构建运行扩展的测试 |
 | | `Release scripts`（Ubuntu） | 检查本次修改的空白字符，然后运行打包测试 |

@@ -39,6 +39,7 @@ Windows では、いくつかのテストがシンボリックリンクを作成
 | `sh scripts/test-isolated.sh -p kumi-runtime --test hands_transport` | 一つのクレートの、一つのテストファイルだけを実行します |
 | `cargo fmt --all --check` | CI と同じようにフォーマットを確認します |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Lint。CI では今のところ参考扱いです |
+| `cargo clippy --workspace --lib --bins --examples --locked -- -A clippy::all -D clippy::await_holding_refcell_ref` | await をまたいで保持される `RefCell` の借用。Linux の CI ジョブを失敗させます |
 | `cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark` | ブリッジの性能の基準。[開発者ガイド](DEVELOPER_GUIDE.md#ビルドテスト計測)を参照してください |
 
 分離ランナーはテスト専用のホームを用意します。`HOME`、`USERPROFILE`、`APPDATA`、`LOCALAPPDATA`、`XDG_CONFIG_HOME`、`KUMI_HOME` は新しい一時フォルダーの中を指し、`KUMI_REMOTE_SCRIPTS_DIR` と `KUMI_LIVE_EXTENSIONS_DIR` は取り除かれるので、どのテストもあなたの Live のフォルダーや `~/.kumi` には届きません。
@@ -101,7 +102,7 @@ python3 -m unittest discover -s scripts/tests -p test_native_release.py
 
 | ワークフロー | ジョブ | 実行内容 |
 | --- | --- | --- |
-| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、すべてのターゲットのビルド、公式 SDK をインストールした状態での分離ランナーによる全テスト（Windows では先にコンソール入力のテスト）、Clippy（参考扱い）、`git diff --check` |
+| **CI** | `Rust / Linux`、`Rust / macOS`、`Rust / Windows` | `cargo fmt --check`、すべてのターゲットのビルド、公式 SDK をインストールした状態での分離ランナーによる全テスト（Windows では先にコンソール入力のテスト）、Clippy（参考扱い。ただし await をまたいで保持される `RefCell` の借用は Linux ジョブを失敗させます）、`git diff --check` |
 | | `Python Remote Script / ubuntu-24.04`、`macos-15`、`windows-2025`（Python 3.11） | Remote Script のテストを実行し、パッケージをコンパイルします |
 | | `Live extension`（Ubuntu、Node 24） | コミットされたビルドに対する、拡張機能のテスト |
 | | `Release scripts`（Ubuntu） | この変更の空白のチェック、続いてパッケージングのテスト |
