@@ -625,7 +625,7 @@ async fn retries_up_to_three_times_before_any_output_escapes_but_never_after_tex
             Options::default(),
         );
         assert!(streamed.kernel.run("q", signal(), ignore()).await.unwrap_err().to_string().contains("overloaded right now (HTTP 503)"));
-        assert_eq!(streamed.count(), 1);
+        assert_eq!(streamed.count(), 2, "after words were shown it carries on once, not three times, then stops");
         retried.kernel.close().await;
         streamed.kernel.close().await;
     })
@@ -1523,6 +1523,47 @@ async fn a_reply_that_breaks_off_after_its_plan_began_isnt_asked_for_again_one_t
         assert_eq!(retried.count(), 2, "nothing had begun, so the reply was asked for again");
         assert!(early.borrow()[0].abandoned.get());
         retried.kernel.close().await;
+    })
+    .await
+}
+
+/// An answer's stream that broke off after the response began (it keeps its 200).
+fn broke_off() -> LanguageModelError {
+    let mut error = ApiCallError::new("the stream ended early", "u", Some(json!({})), Some(200));
+    error.is_retryable = true;
+    LanguageModelError::ApiCall(error)
+}
+
+#[tokio::test]
+async fn an_answer_that_breaks_off_after_its_words_began_carries_on_once_from_what_was_shown() {
+    local(async {
+        let h = harness(
+            |_, n| match n {
+                1 => Scripted::Parts([text("The Reese needs"), vec![StreamPart::Error { error: broke_off() }]].concat()),
+                _ => answer(" a darker filter."),
+            },
+            Options::default(),
+        );
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("why is my bass harsh?", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(h.count(), 2, "one more request carries on");
+        assert_eq!(texts(&events.borrow()).concat(), "The Reese needs a darker filter.");
+        assert!(
+            events.borrow().iter().any(|e| matches!(e, KernelEvent::Retry { reason, wait_ms: 0 } if reason.contains("broke off"))),
+            "the status line says so"
+        );
+        let carried = js(&h.request(1).prompt);
+        assert!(carried.contains("The Reese needs") && carried.contains("connection dropped partway"), "{carried}");
+        h.kernel.close().await;
+
+        // Once a turn: breaking off again ends it, as before.
+        let twice = harness(
+            |_, _| Scripted::Parts([text("The Reese"), vec![StreamPart::Error { error: broke_off() }]].concat()),
+            Options::default(),
+        );
+        assert!(twice.kernel.run("why is my bass harsh?", signal(), ignore()).await.is_err());
+        assert_eq!(twice.count(), 2);
+        twice.kernel.close().await;
     })
     .await
 }

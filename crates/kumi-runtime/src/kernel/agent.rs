@@ -177,6 +177,9 @@ const MAX_TOOL_IMAGES: usize = 16;
 const IMAGE_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 /// Says what a side question is, ahead of its words.
 const ASIDE_NOTE: &str = "(A side question while you work. Answer it briefly, in plain words, from what's above; use no tools. It doesn't change the request you're working on, and your answer isn't kept in the conversation.)";
+/// What the model is told when its answer broke off and Kumi carries on.
+pub const CARRY_ON_NOTE: &str =
+    "(The connection dropped partway through your answer. Carry on from where it stopped, without repeating what you said.)";
 /// Ends a stopped turn's kept steps, for the model and in the transcript.
 pub const STOPPED_NOTE: &str =
     "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
@@ -499,6 +502,9 @@ struct Turn {
     /// A call already running while the model writes it (a plan whose first steps are under way).
     early: RefCell<HashMap<String, Rc<Early>>>,
     spoke: Cell<bool>,
+    /// The words the step in progress has shown, and whether its answer broke off after they began.
+    shown: RefCell<String>,
+    broke_off: Cell<bool>,
 }
 
 async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit, state: Rc<Running>) -> Result<TurnResult, RuntimeError> {
@@ -525,6 +531,8 @@ async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit,
         earlier: Rc::new(RefCell::new(inner.history.borrow().clone())),
         early: RefCell::new(HashMap::new()),
         spoke: Cell::new(false),
+        shown: RefCell::new(String::new()),
+        broke_off: Cell::new(false),
     };
     let usage = RefCell::new(Usage::default());
     let reported = Cell::new(false);
@@ -540,6 +548,7 @@ async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit,
         })
     });
     let outcome: Result<TurnResult, StepError> = async {
+        let mut carried_on = false;
         for step in 0.. {
             if step == inner.max_steps {
                 abort.check()?;
@@ -554,7 +563,18 @@ async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit,
                 session_id: inner.session_id.clone(),
             });
             turn.early.borrow_mut().clear();
-            let result = turn.stream(request).await?;
+            let result = match turn.stream(request).await {
+                Ok(result) => result,
+                // An answer that broke off after its words began showing, with nothing that changes Live begun:
+                // once a turn, Kumi carries on from the steps it finished and the words shown, and says so.
+                Err(StepError::Model(error)) if !carried_on && turn.can_carry_on(&error) => {
+                    carried_on = true;
+                    (turn.deliver)(KernelEvent::Retry { reason: retry_reason(&error, &inner.binding.id), wait_ms: 0 });
+                    turn.carry_on();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             add(&mut usage.borrow_mut(), &result.usage);
             reported.set(true);
             if !result.content.is_empty() {
@@ -700,6 +720,25 @@ impl Turn {
         }
     }
 
+    /// Whether a step that failed can carry on: its answer broke off (the connection, or the provider
+    /// mid-answer) after its words began showing, and no call that changes Live had begun.
+    fn can_carry_on(&self, error: &LanguageModelError) -> bool {
+        let broke_off = retry_delay_ms(error, 0).is_some() || matches!(error, LanguageModelError::Other(_));
+        self.broke_off.get() && broke_off && !self.abort.is_cancelled() && !self.early.borrow().values().any(|entry| entry.call.started())
+    }
+
+    /// The next request carries on: the words shown so far stay as the model's, with a note to go on
+    /// from where they stopped.
+    fn carry_on(&self) {
+        self.early.borrow_mut().clear();
+        let shown = self.shown.borrow().clone();
+        let mut messages = self.messages.borrow_mut();
+        if !trim(&shown).is_empty() {
+            messages.push(Message::assistant_text(shown));
+        }
+        messages.push(Message::user_text(CARRY_ON_NOTE));
+    }
+
     /// A stopped turn (cancelled, timed out or failed) keeps the steps it finished, each model reply
     /// with all its tool results, so the conversation says what those steps changed in Live. The
     /// step in progress goes; a turn that finished no tool round leaves no trace.
@@ -719,9 +758,11 @@ impl Turn {
             let delivered = Cell::new(false);
             let calls = Cell::new(0usize);
             let input = TurnInput { turn: self, calls: &calls };
+            self.shown.borrow_mut().clear();
             let on_text = |text: &str| {
                 delivered.set(true);
                 self.spoke.set(true);
+                self.shown.borrow_mut().push_str(text);
                 (self.deliver)(KernelEvent::Text { text: text.to_string() });
             };
             let attempted: Result<StepResult, StepError> = async {
@@ -748,6 +789,7 @@ impl Turn {
                 }
                 Err(error) => {
                     let escaped = delivered.get() || self.early.borrow().values().any(|entry| entry.call.started());
+                    self.broke_off.set(delivered.get());
                     let wait = match &error {
                         StepError::Model(model) if attempt < MAX_RETRIES && !escaped && !self.abort.is_cancelled() => {
                             retry_delay_ms(model, attempt).map(|wait| (wait, retry_reason(model, &self.inner.binding.id)))
