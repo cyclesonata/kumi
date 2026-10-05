@@ -210,6 +210,8 @@ struct State {
     strip: Strip,
     tree_cursor: Option<usize>,
     pinned: Option<Pin>,
+    /// Files the producer added, which go with the next message.
+    attachments: Vec<Attachment>,
     refreshing: Option<&'static str>,
     tree_refresh: Option<JoinHandle<()>>,
     wake_timer: Option<JoinHandle<()>>,
@@ -280,6 +282,7 @@ impl State {
             strip: Strip::default(),
             tree_cursor: None,
             pinned: None,
+            attachments: vec![],
             refreshing: None,
             tree_refresh: None,
             wake_timer: None,

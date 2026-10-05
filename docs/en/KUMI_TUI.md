@@ -31,8 +31,9 @@ closes, crashes or is stopped.
   or **kept** / **no undo** / **check Live** when it can't be undone. **GOAL**
   shows a `/goal` ("No goal yet" until there is one): the target, the best
   score with its trend, the leading candidate, and the time.
-- **Input box** (bottom left): messages waiting to be sent show above it, and a
-  pinned device as a chip. Empty, it says "ctrl+t to talk". While Kumi listens,
+- **Input box** (bottom left): messages waiting to be sent show above it, a
+  pinned device as a chip, and the files that go with your next message (name,
+  kind, size and ×). Empty, it says "ctrl+t to talk". While Kumi listens,
   its bottom line shows a pulsing mint `●`, the time and a level meter, with the
   keys that apply at its right; no red, which in Live means recording.
 
@@ -115,6 +116,8 @@ answering; during an answer, Kumi says so and leaves things as they are.
 | Ctrl-W, Alt-Backspace, Ctrl-Backspace | Delete the word before the cursor |
 | Ctrl-K / Ctrl-U | Delete to the end / start of the line |
 | Ctrl-T | Talk instead of typing: press it again to stop, or hold it while you talk. What you said lands in the box at the cursor; Enter stops and sends at once, Esc drops it |
+| Ctrl-V | Add the picture on the clipboard (a screenshot, say) to your next message; files dragged into the window are added the same way |
+| Backspace, in an empty box | Take back the last file added |
 
 **Stopping and moving around**
 

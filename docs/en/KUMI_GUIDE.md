@@ -142,6 +142,14 @@ under way), Tab sends a message for after the answer, and `/btw` asks something
 on the side without interrupting. Esc stops the answer; the steps it finished
 stay. `/stop` stops Live (clips, the transport and recording) at any time.
 
+To show Kumi something, drag files into the window or press **Ctrl-V** for a
+picture on the clipboard, such as a screenshot of a synth: "make this". Each
+shows above the input box and goes with your next message; × or Backspace in an
+empty box takes one back. The model sees PNG, JPEG, GIF and WebP pictures up to
+5 MB. Other files, such as reference audio, a preset or a Live Set, go by their
+path for Kumi to use. A saved conversation keeps each file's name and path but
+not the picture itself. Clipboard pictures are kept in `~/.kumi/attachments`.
+
 ## Talking to Kumi
 
 Press **Ctrl-T** and say what you want, then press it again. What you said lands
@@ -617,7 +625,8 @@ says which need which.
 ## Privacy: what leaves your computer
 
 - **Your model provider** gets your messages, the conversation, what Kumi reads
-  from the Set, the frames of videos it watches and the pictures it reads. With a
+  from the Set, the frames of videos it watches, the pictures it reads and the
+  pictures you add to a message. With a
   model on your computer, they stay on it (a server named in `settings.json` gets
   them wherever it runs).
 - **Web search and reading** go to the search services above, and the pages Kumi

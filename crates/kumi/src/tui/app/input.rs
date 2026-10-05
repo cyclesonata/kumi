@@ -1,4 +1,5 @@
 use super::super::{
+    attach,
     keys::{Modifiers, MouseAction, MouseButton, WheelDirection},
     tree::TreeRole,
 };
@@ -47,6 +48,13 @@ impl TuiApp {
             return;
         }
         match event {
+            InputEvent::Paste { text } if self.0.options.controller.has_attachments() && attach::pasted_files(&text).is_some() => {
+                // Files dragged in arrive as their paths: they go with the next message instead.
+                let files: Vec<Attachment> =
+                    attach::pasted_files(&text).unwrap_or_default().iter().filter_map(|path| attach::attachment(path)).collect();
+                self.0.tabs.leave();
+                self.add_attachments(files);
+            }
             InputEvent::Text { text } | InputEvent::Paste { text } => {
                 self.0.tabs.leave();
                 let mut state = self.0.state.borrow_mut();
@@ -173,6 +181,10 @@ impl TuiApp {
             }
             return;
         }
+        if ctrl && name == "v" && self.0.options.controller.has_attachments() {
+            self.paste_picture();
+            return;
+        }
         if ctrl && name == "d" {
             if self.0.state.borrow().editor.is_empty() && !self.busy() {
                 drop(self.finish(0, None));
@@ -214,6 +226,9 @@ impl TuiApp {
         let mut state = self.0.state.borrow_mut();
         if name == "enter" || (ctrl && name == "j") {
             state.editor.insert("\n");
+            return;
+        }
+        if name == "backspace" && state.editor.is_empty() && state.attachments.pop().is_some() {
             return;
         }
         if name == "backspace" {
@@ -654,18 +669,52 @@ impl TuiApp {
     fn clear_editor(&self) {
         self.0.state.borrow_mut().editor.clear();
     }
+    /// Files that go with the next message; the same file twice is added once.
+    pub(super) fn add_attachments(&self, files: Vec<Attachment>) {
+        let mut state = self.0.state.borrow_mut();
+        for file in files {
+            if !state.attachments.iter().any(|a| a.path == file.path) {
+                state.attachments.push(file);
+            }
+        }
+        drop(state);
+        self.0.scheduler.request();
+    }
+    /// ctrl+v: a picture on the clipboard, such as a screenshot, goes with the next message.
+    fn paste_picture(&self) {
+        self.task(|app| async move {
+            let env: kumi_runtime::system::Env = std::env::vars().collect();
+            let folder = std::path::PathBuf::from(crate::config::kumi_dir(&env)).join("attachments");
+            match attach::clipboard_picture(&folder).await {
+                Ok(Some(path)) => app.add_attachments(attach::attachment(&path).into_iter().collect()),
+                Ok(None) => app.notice("There's no picture on the clipboard. Drag a file in, or paste its path.", NoticeTone::Info),
+                Err(why) => app.notice(&format!("Kumi couldn't read the clipboard: {why}"), NoticeTone::Warn),
+            }
+            Ok(())
+        });
+    }
     pub(super) async fn send(&self, raw: &str) -> bool {
-        let pinned = {
+        let (pinned, attachments) = {
             let mut state = self.0.state.borrow_mut();
             if state.closing {
                 return false;
             }
             state.activity = "thinking".into();
             state.pending_turn = true;
-            state.pinned.as_ref().map(|p| p.pin.clone())
+            (state.pinned.as_ref().map(|p| p.pin.clone()), std::mem::take(&mut state.attachments))
         };
         self.0.scheduler.request();
-        if let Err(error) = self.0.options.controller.submit(raw, pinned).await {
+        let sent = if attachments.is_empty() {
+            self.0.options.controller.submit(raw, pinned).await
+        } else {
+            self.0.options.controller.submit_with(raw, pinned, attachments.clone()).await
+        };
+        if let Err(error) = sent {
+            // Files that didn't go stay, to change or send again.
+            let mut state = self.0.state.borrow_mut();
+            let added = std::mem::replace(&mut state.attachments, attachments);
+            state.attachments.extend(added);
+            drop(state);
             self.0.state.borrow_mut().pending_turn = false;
             if !self.0.state.borrow().closing {
                 self.error(&error);
@@ -817,7 +866,7 @@ pub(super) struct Command {
     pub about: &'static str,
 }
 
-pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · ctrl+c clears the box, then quits · type / for commands";
+pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
 pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/new", about: "Forget this conversation and start fresh" },
     Command { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },

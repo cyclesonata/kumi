@@ -249,6 +249,26 @@ impl FileConversationStore {
         Ok(())
     }
 }
+/// A message as kept on disk: a picture the producer added is named, not kept, so one screenshot
+/// can't crowd out the conversation.
+fn without_pictures(message: &Value) -> Value {
+    let Some(parts) = message["content"].as_array().filter(|_| message["role"] == "user") else { return message.clone() };
+    if !parts.iter().any(|part| part["type"] == "file") {
+        return message.clone();
+    }
+    let mut kept = message.clone();
+    kept["content"] = parts
+        .iter()
+        .map(|part| {
+            if part["type"] != "file" {
+                return part.clone();
+            }
+            let name = part["filename"].as_str().unwrap_or("a picture");
+            json!({"type":"text","text":format!("[The producer showed {name} here; pictures aren't kept with saved conversations.]")})
+        })
+        .collect();
+    kept
+}
 // Disk checkpoints also contain older string-form messages; keep those forms intact.
 fn bounded_messages(all: &[Value]) -> Vec<Value> {
     let sizes: Vec<_> = all.iter().map(|m| stringify(m).len() + 1).collect();
@@ -307,7 +327,7 @@ impl ConversationStore for FileConversationStore {
         Ok(Self::read(&file).await)
     }
     async fn save(&self, place: &str, id: &str, conversation: &SavedConversation) -> Result<(), RuntimeError> {
-        let all = &conversation.checkpoint.messages;
+        let all: &Vec<Value> = &conversation.checkpoint.messages.iter().map(without_pictures).collect();
         let messages = bounded_messages(all);
         if messages.is_empty() {
             return Ok(());

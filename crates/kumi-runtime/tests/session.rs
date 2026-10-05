@@ -67,6 +67,11 @@ impl Kernel for TestKernel {
             Ok(complete())
         }
     }
+    async fn run_with(&self, input: &str, pictures: Vec<Picture>, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
+        let names: Vec<_> = pictures.iter().map(|p| format!("{} {} {}", p.name, p.media_type, p.data.len())).collect();
+        self.record.calls.borrow_mut().push(format!("pictures: {}", names.join(", ")));
+        self.run(input, signal, emit).await
+    }
     async fn close(&self) {
         self.record.closes.set(self.record.closes.get() + 1);
     }
@@ -600,6 +605,50 @@ local_test!(reconnect_carries_same_set_but_other_saved_set_starts_fresh, {
     h.session.close().await.unwrap();
 });
 
+local_test!(added_files_go_with_the_words_and_pictures_to_the_model, {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, bytes: usize| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, vec![7u8; bytes]).unwrap();
+        path
+    };
+    let attach = |path: &std::path::Path, media_type: &str| Attachment {
+        path: path.to_string_lossy().into_owned(),
+        name: path.file_name().unwrap().to_string_lossy().into_owned(),
+        media_type: media_type.into(),
+        bytes: std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+    };
+    let (picture, reference) = (file("synth.png", 1500), file("reference.wav", 3 * 1024 * 1024 + 1));
+    let h = harness(None, |_| {});
+    h.session.start().await.unwrap();
+    h.session.submit_with("make this", None, vec![attach(&picture, "image/png"), attach(&reference, "audio/wav")]).await.unwrap();
+    {
+        let calls = h.record.calls.borrow();
+        assert_eq!(calls[0], "pictures: synth.png image/png 1500");
+        let said = format!(
+            "make this\n\n[The producer added: synth.png (image/png, 2 KB) at {}; reference.wav (audio/wav, 3.0 MB) at {}]",
+            picture.display(),
+            reference.display()
+        );
+        assert!(calls[1].starts_with(&format!("{said}{OBSERVATION_MARKER}")), "{}", calls[1]);
+    }
+    // What can't go is refused before anything is sent, with what to do instead.
+    let missing = dir.path().join("gone.png");
+    let cases = [
+        (attach(&missing, "image/png"), "gone.png isn't there any more; add it again."),
+        (attach(&file("scan.tiff", 10), "image/tiff"), "The model sees PNG, JPEG, GIF and WebP pictures; save scan.tiff as one of those"),
+        (attach(&file("huge.png", 5 * 1024 * 1024 + 1), "image/png"), "huge.png is 5.0 MB; the model takes pictures up to 5 MB."),
+        (attach(dir.path(), "application/octet-stream"), "is a folder; add the files in it instead."),
+    ];
+    for (attachment, refusal) in cases {
+        let error = h.session.submit_with("make this", None, vec![attachment]).await.unwrap_err();
+        assert!(error.message().contains(refusal), "{}", error.message());
+    }
+    let many = vec![attach(&reference, "audio/wav"); 11];
+    assert!(h.session.submit_with("make this", None, many).await.unwrap_err().message().contains("at most 10 files"));
+    assert_eq!(h.record.calls.borrow().len(), 2);
+    h.session.close().await.unwrap();
+});
 async fn saved(store: &dyn ConversationStore, place: &str, turns: u32) -> CurrentConversation {
     // Up to 2 s: a busy Windows runner writes slowly, and close waits for the save only so long.
     for _ in 0..1000 {

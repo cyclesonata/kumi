@@ -179,6 +179,11 @@ fn absent() -> RuntimeError {
 #[async_trait(?Send)]
 pub trait Kernel {
     async fn run(&self, input: &str, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError>;
+    /// `run` with pictures the model sees beside the words.
+    async fn run_with(&self, input: &str, pictures: Vec<Picture>, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
+        let _ = pictures;
+        self.run(input, signal, emit).await
+    }
     async fn close(&self);
     fn has_checkpoint(&self) -> bool {
         false
@@ -1536,6 +1541,25 @@ pub struct LessonEntry {
     pub at: f64,
 }
 
+/// A file the producer added to a request, pasted or dragged in: a picture the model sees, or any
+/// file, which the model works with by its path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    pub path: String,
+    pub name: String,
+    pub media_type: String,
+    pub bytes: u64,
+}
+
+/// A picture the model sees with the producer's words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Picture {
+    pub name: String,
+    pub media_type: String,
+    pub data: Vec<u8>,
+}
+
 /// What running a recipe did, in words.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1551,6 +1575,17 @@ pub trait SessionController {
     async fn start(&self) -> Result<(), RuntimeError>;
     /// `pinned`: what the producer points at in Kumi, which "this" means in the message.
     async fn submit(&self, input: &str, pinned: Option<PinnedNode>) -> Result<(), RuntimeError>;
+    fn has_attachments(&self) -> bool {
+        false
+    }
+    /// `submit` with files the producer added: pictures go to the model to see, and every file by its path.
+    async fn submit_with(&self, input: &str, pinned: Option<PinnedNode>, attachments: Vec<Attachment>) -> Result<(), RuntimeError> {
+        if attachments.is_empty() {
+            self.submit(input, pinned).await
+        } else {
+            Err(RuntimeError::plain("Kumi can't take files here."))
+        }
+    }
     fn has_steer(&self) -> bool {
         false
     }

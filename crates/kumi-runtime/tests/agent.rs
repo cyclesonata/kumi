@@ -12,11 +12,12 @@ use kumi_common::js::json::stringify;
 use kumi_runtime::ai::error::{ApiCallError, LanguageModelError};
 use kumi_runtime::ai::types::{
     AssistantPart, CallOptions, DataContent, FileData, FinishReason, FinishReasonUnified, InputTokens, Message, OutputTokens,
-    ProviderMetadata, StreamPart, StreamParts, ToolCall, ToolPart, ToolResultContentItem, ToolResultOutput, Usage as ModelUsage,
+    ProviderMetadata, StreamPart, StreamParts, TextPart, ToolCall, ToolPart, ToolResultContentItem, ToolResultOutput, Usage as ModelUsage,
+    UserPart,
 };
 use kumi_runtime::core::contracts::{
-    ChangeState, Integration, JsonObject, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, StopReason, StreamingCall, ToolImage,
-    ToolResult, TranscriptLine, TranscriptRole, Usage,
+    ChangeState, Integration, JsonObject, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, Picture, StopReason, StreamingCall,
+    ToolImage, ToolResult, TranscriptLine, TranscriptRole, Usage,
 };
 use kumi_runtime::core::errors::{FailureKind, RuntimeError};
 use kumi_runtime::integrations::ableton::{integration::Ableton, observation::ObservationHost, options::AbletonOptions};
@@ -317,6 +318,22 @@ async fn streams_text_reports_summed_usage_and_settles_the_turn_into_history() {
         assert_eq!(result.stop_reason, StopReason::Completed);
         assert_eq!(result.usage, Some(Usage { input_tokens: 3.0, output_tokens: 2.0, cache_read_tokens: 1.0, cache_write_tokens: 0.0 }));
         assert_eq!(h.messages(), vec![user("hi"), assistant("hello")]);
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn pictures_the_producer_added_go_beside_their_words_in_the_request() {
+    local(async {
+        let h = harness(|_, _| answer("a warm pad"), Options::default());
+        let picture = Picture { name: "synth.png".into(), media_type: "image/png".into(), data: vec![137, 80, 78, 71] };
+        h.kernel.run_with("make this", vec![picture], signal(), ignore()).await.unwrap();
+        let Message::User { content, .. } = &h.request(0).prompt[0] else { panic!("the producer's message comes first") };
+        assert_eq!(content[0], UserPart::Text(TextPart::new("make this")));
+        let UserPart::File(file) = &content[1] else { panic!("the picture follows the words") };
+        assert_eq!((file.filename.as_deref(), file.media_type.as_str()), (Some("synth.png"), "image/png"));
+        assert_eq!(file.data, FileData::Data { data: DataContent::Bytes(vec![137, 80, 78, 71]) });
         h.kernel.close().await;
     })
     .await

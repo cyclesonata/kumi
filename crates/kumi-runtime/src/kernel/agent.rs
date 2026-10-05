@@ -24,12 +24,12 @@ use super::budget::{fit, put_away_images, transcript_of, ContextBudget, DEFAULT_
 use super::failure::{describe_failure, retry_delay_ms, MAX_RETRIES};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
-    AssistantPart, CallOptions, DataContent, FileData, FinishReason, FinishReasonUnified, FunctionTool, Message, Prompt, ProviderMetadata,
-    ReasoningPart, StreamPart, StreamParts, TextPart, ToolCall, ToolCallPart, ToolPart, ToolResultContentItem, ToolResultOutput,
-    ToolResultPart, Usage as ModelUsage, UserPart,
+    AssistantPart, CallOptions, DataContent, FileData, FilePart, FinishReason, FinishReasonUnified, FunctionTool, Message, Prompt,
+    ProviderMetadata, ReasoningPart, StreamPart, StreamParts, TextPart, ToolCall, ToolCallPart, ToolPart, ToolResultContentItem,
+    ToolResultOutput, ToolResultPart, Usage as ModelUsage, UserPart,
 };
 use crate::core::contracts::{
-    JsonObject, Kernel, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, OnText, StopReason, StreamingCall, ToolImage,
+    JsonObject, Kernel, KernelCheckpoint, KernelEmit, KernelEvent, KernelTool, OnText, Picture, StopReason, StreamingCall, ToolImage,
     TranscriptLine, TurnResult, Usage,
 };
 use crate::core::errors::{FailureKind, KumiError, RuntimeError};
@@ -296,6 +296,17 @@ impl Drop for TurnGuard {
 
 impl AgentKernel {
     pub async fn run(&self, input: &str, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
+        self.run_with(input, vec![], signal, emit).await
+    }
+
+    /// A turn whose request carries pictures beside the words, for the model to see.
+    pub async fn run_with(
+        &self,
+        input: &str,
+        pictures: Vec<Picture>,
+        signal: Signal,
+        emit: KernelEmit,
+    ) -> Result<TurnResult, RuntimeError> {
         if self.inner.closing.borrow().is_some() {
             return Err(RuntimeError::plain("Kernel is closed"));
         }
@@ -309,7 +320,16 @@ impl AgentKernel {
         let state = Rc::new(Running { steering: RefCell::new(Vec::new()), context: RefCell::new(None), done: settled });
         *self.inner.running.borrow_mut() = Some(state.clone());
         let _guard = TurnGuard { inner: self.inner.clone(), done };
-        turn(self.inner.clone(), input.to_string(), signal, emit, state).await
+        let mut content = vec![UserPart::Text(TextPart::new(input))];
+        content.extend(pictures.into_iter().map(|picture| {
+            UserPart::File(FilePart {
+                filename: Some(picture.name),
+                data: FileData::Data { data: DataContent::Bytes(picture.data) },
+                media_type: picture.media_type,
+                provider_options: None,
+            })
+        }));
+        turn(self.inner.clone(), Message::User { content, provider_options: None }, signal, emit, state).await
     }
 
     /// Queue guidance for the running turn; it enters at the next model boundary. False when idle.
@@ -442,6 +462,9 @@ impl Kernel for AgentKernel {
     async fn run(&self, input: &str, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
         AgentKernel::run(self, input, signal, emit).await
     }
+    async fn run_with(&self, input: &str, pictures: Vec<Picture>, signal: Signal, emit: KernelEmit) -> Result<TurnResult, RuntimeError> {
+        AgentKernel::run_with(self, input, pictures, signal, emit).await
+    }
     async fn close(&self) {
         AgentKernel::close(self).await
     }
@@ -501,7 +524,7 @@ struct Turn {
     spoke: Cell<bool>,
 }
 
-async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit, state: Rc<Running>) -> Result<TurnResult, RuntimeError> {
+async fn turn(inner: Rc<Inner>, first: Message, signal: Signal, emit: KernelEmit, state: Rc<Running>) -> Result<TurnResult, RuntimeError> {
     let failed = Controller::new();
     let abort = Abort::new(vec![signal.clone(), inner.lifetime.signal.clone(), failed.signal.clone()]);
     // A throwing listener must not leave a half-delivered turn in history.
@@ -521,7 +544,7 @@ async fn turn(inner: Rc<Inner>, input: String, signal: Signal, emit: KernelEmit,
         inner: inner.clone(),
         abort: abort.clone(),
         deliver,
-        messages: Rc::new(RefCell::new(vec![Message::user_text(&input)])),
+        messages: Rc::new(RefCell::new(vec![first])),
         earlier: Rc::new(RefCell::new(inner.history.borrow().clone())),
         early: RefCell::new(HashMap::new()),
         spoke: Cell::new(false),

@@ -270,6 +270,60 @@ fn span(ms: u64) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
+/// The kinds of picture every provider takes, and the most a picture may weigh.
+const PICTURES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_PICTURE: u64 = 5 * 1024 * 1024;
+const MAX_ATTACHMENTS: usize = 10;
+
+fn size_words(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{} KB", bytes.div_ceil(1024))
+    }
+}
+fn refused(message: String) -> RuntimeError {
+    KumiError::new(FailureKind::Request, message).into()
+}
+/// The producer's words with a line naming each file they added, and the pictures among them read
+/// for the model to see. A file that's gone, a picture of a kind or size the model can't take, or too
+/// many files is refused with what to do instead.
+async fn attached(input: &str, attachments: &[Attachment]) -> Result<(String, Vec<Picture>), RuntimeError> {
+    if attachments.is_empty() {
+        return Ok((input.to_owned(), vec![]));
+    }
+    if attachments.len() > MAX_ATTACHMENTS {
+        return Err(refused(format!("Add at most {MAX_ATTACHMENTS} files to one message.")));
+    }
+    let mut pictures = vec![];
+    let mut named = vec![];
+    for attachment in attachments {
+        let name = &attachment.name;
+        let metadata =
+            tokio::fs::metadata(&attachment.path).await.map_err(|_| refused(format!("{name} isn't there any more; add it again.")))?;
+        if !metadata.is_file() {
+            return Err(refused(format!("{name} is a folder; add the files in it instead.")));
+        }
+        if attachment.media_type.starts_with("image/") {
+            if !PICTURES.contains(&attachment.media_type.as_str()) {
+                return Err(refused(format!(
+                    "The model sees PNG, JPEG, GIF and WebP pictures; save {name} as one of those and add it again."
+                )));
+            }
+            if metadata.len() > MAX_PICTURE {
+                return Err(refused(format!(
+                    "{name} is {}; the model takes pictures up to 5 MB. Crop or shrink it, then add it again.",
+                    size_words(metadata.len())
+                )));
+            }
+            let data = tokio::fs::read(&attachment.path).await.map_err(|_| refused(format!("Kumi couldn't read {name}; add it again.")))?;
+            pictures.push(Picture { name: name.clone(), media_type: attachment.media_type.clone(), data });
+        }
+        named.push(format!("{name} ({}, {}) at {}", attachment.media_type, size_words(metadata.len()), attachment.path));
+    }
+    Ok((format!("{input}\n\n[The producer added: {}]", named.join("; ")), pictures))
+}
+
 pub fn create_session(options: SessionOptions) -> Result<Session, RuntimeError> {
     let timeout_ms = options.timeout_ms.unwrap_or(120_000);
     let idle_ms = options.idle_timeout_ms.or(options.timeout_ms).unwrap_or(600_000);
@@ -1290,6 +1344,13 @@ impl SessionController for Session {
         .await
     }
     async fn submit(&self, input: &str, pinned: Option<PinnedNode>) -> Result<(), RuntimeError> {
+        self.submit_with(input, pinned, vec![]).await
+    }
+    fn has_attachments(&self) -> bool {
+        true
+    }
+    async fn submit_with(&self, input: &str, pinned: Option<PinnedNode>, attachments: Vec<Attachment>) -> Result<(), RuntimeError> {
+        let (text, pictures) = attached(input, &attachments).await?;
         {
             let mut s = self.0.state.borrow_mut();
             if s.state == TurnState::Closed {
@@ -1310,13 +1371,13 @@ impl SessionController for Session {
             s.turns += 1;
             s.interrupted = None;
         }
-        let text = input.to_owned();
+        let said = text.clone();
         self.perform(
             true,
             Phase::Refresh,
-            Box::new(move |this, op| async move { this.submit_turn(op, text, pinned).await }.boxed_local()),
+            Box::new(move |this, op| async move { this.submit_turn(op, text, pinned, pictures).await }.boxed_local()),
             None,
-            Some(input.to_owned()),
+            Some(said),
         )?
         .await
     }

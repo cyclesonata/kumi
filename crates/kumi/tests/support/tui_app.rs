@@ -161,6 +161,21 @@ impl SessionController for Control {
         self.pins.borrow_mut().push(pin);
         Ok(())
     }
+    fn has_attachments(&self) -> bool {
+        true
+    }
+    async fn submit_with(&self, s: &str, pin: Option<PinnedNode>, attachments: Vec<Attachment>) -> Result<(), RuntimeError> {
+        if attachments.is_empty() {
+            return self.submit(s, pin).await;
+        }
+        if let Some(error) = self.get::<String>("submit-error") {
+            return Err(RuntimeError::plain(error));
+        }
+        let files: Vec<_> = attachments.iter().map(|a| format!("{} {} {}", a.name, a.media_type, a.bytes)).collect();
+        self.call(format!("submit-with:{s} [{}]", files.join(", ")));
+        self.pins.borrow_mut().push(pin);
+        Ok(())
+    }
     async fn refresh(&self) -> Result<(), RuntimeError> {
         self.call("refresh");
         Ok(())
