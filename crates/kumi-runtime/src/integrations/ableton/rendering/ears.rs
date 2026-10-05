@@ -6,6 +6,9 @@ use crate::ears::{
     link::{open_ears_link, EarsOptions, Tap},
 };
 use regex::Regex;
+/// How long a listening device that couldn't be set up is left alone: one wait (up to about 9 s) each
+/// time at most, not one an audition (a match run auditions a dozen times).
+pub(super) const EARS_RETRY_MS: i64 = 10 * 60_000;
 pub(super) struct TapError {
     pub error: RuntimeError,
     pub silent: bool,
@@ -18,6 +21,9 @@ impl From<RuntimeError> for TapError {
 impl Rendering {
     pub(super) async fn ears_ready(self: &Rc<Self>, signal: Signal) -> Result<Option<Rc<dyn EarsLink>>, RuntimeError> {
         if self.ears_disabled || std::env::var("KUMI_EARS").ok().as_deref() == Some("0") || self.ears_refused.get() {
+            return Ok(None);
+        }
+        if self.ears_failed_at.get().is_some_and(|at| now_ms() - at < EARS_RETRY_MS) {
             return Ok(None);
         }
         if !self.connection().has("live_browser_load_preview")
@@ -79,6 +85,7 @@ impl Rendering {
         let link = setup.await;
         if link.is_none() {
             *self.ears_setup.borrow_mut() = None;
+            self.ears_failed_at.set(Some(now_ms()));
         }
         signal.check()?;
         Ok(link)
