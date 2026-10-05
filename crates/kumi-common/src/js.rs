@@ -12,6 +12,11 @@ pub mod json {
         out
     }
 
+    /// [`stringify`], appended to `out`.
+    pub fn write_into(value: &Value, out: &mut String) {
+        write(value, out, None, 0);
+    }
+
     /// `JSON.stringify(value, null, indent)`.
     pub fn stringify_pretty(value: &Value, indent: usize) -> String {
         if indent == 0 {
@@ -166,11 +171,23 @@ pub mod json {
 
     /// A string as `JSON.stringify` writes it, quotes included.
     pub fn escape(s: &str, out: &mut String) {
+        // Room for the text at once: text full of quotes (JSON inside JSON) is copied in short runs.
+        out.reserve(s.len() + 2);
         out.push('"');
-        // Runs without anything to escape are copied whole. The escaped characters are all ASCII, so
-        // their byte positions are character boundaries.
+        let bytes = s.as_bytes();
         let mut start = 0;
-        for (at, byte) in s.bytes().enumerate() {
+        let mut at = 0;
+        while at < bytes.len() {
+            // Eight bytes at a time while none of them needs escaping (a quote, a backslash or a
+            // control character): most text has long runs of those.
+            if let Some(chunk) = bytes.get(at..at + 8) {
+                let word = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+                if !needs_escape(word) {
+                    at += 8;
+                    continue;
+                }
+            }
+            let byte = bytes[at];
             let escaped = match byte {
                 b'"' => "\\\"",
                 b'\\' => "\\\\",
@@ -180,18 +197,32 @@ pub mod json {
                 b'\r' => "\\r",
                 b'\t' => "\\t",
                 0..0x20 => "",
-                _ => continue,
+                _ => {
+                    at += 1;
+                    continue;
+                }
             };
+            // The escaped characters are all ASCII, so their positions are character boundaries.
             out.push_str(&s[start..at]);
             if escaped.is_empty() {
                 out.push_str(&format!("\\u{byte:04x}"));
             } else {
                 out.push_str(escaped);
             }
-            start = at + 1;
+            at += 1;
+            start = at;
         }
         out.push_str(&s[start..]);
         out.push('"');
+    }
+
+    /// Whether any byte of `word` is a quote, a backslash or below 0x20.
+    fn needs_escape(word: u64) -> bool {
+        const ONES: u64 = 0x0101_0101_0101_0101;
+        const HIGHS: u64 = 0x8080_8080_8080_8080;
+        let zero_byte = |x: u64| x.wrapping_sub(ONES) & !x & HIGHS;
+        let below_space = word.wrapping_sub(ONES * 0x20) & !word & HIGHS;
+        (zero_byte(word ^ (ONES * b'"' as u64)) | zero_byte(word ^ (ONES * b'\\' as u64)) | below_space) != 0
     }
 
     /// `JSON.stringify(text)`: a string, quoted and escaped.
@@ -557,5 +588,50 @@ mod tests {
         assert_eq!(number::parse(" 12 "), Some(12.0));
         assert_eq!(number::parse("12px"), None);
         assert_eq!(number::parse(""), Some(0.0));
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::json::escape;
+
+    /// JSON.stringify's escaping, one character at a time.
+    fn reference(s: &str) -> String {
+        let mut out = String::from('"');
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\u{8}' => out.push_str("\\b"),
+                '\u{c}' => out.push_str("\\f"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    }
+
+    #[test]
+    fn eight_bytes_at_a_time_escapes_exactly_as_one_at_a_time() {
+        let specials =
+            ['"', '\\', '\n', '\r', '\t', '\u{8}', '\u{c}', '\u{0}', '\u{1f}', '\u{7f}', ' ', '!', '#', '[', ']', 'é', '音', '🎛'];
+        for length in 0..24 {
+            for position in 0..length.max(1) {
+                for special in specials {
+                    let text: String = (0..length).map(|i| if i == position { special } else { (b'a' + (i % 26) as u8) as char }).collect();
+                    let mut out = String::new();
+                    escape(&text, &mut out);
+                    assert_eq!(out, reference(&text), "{text:?}");
+                }
+            }
+        }
+        let mixed = "Kick \"808\" → C:\\Samples\\kick.wav\n\tvelocity\u{1}: 100 🎛 ".repeat(50);
+        let mut out = String::new();
+        escape(&mixed, &mut out);
+        assert_eq!(out, reference(&mixed));
     }
 }

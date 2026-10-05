@@ -22,6 +22,7 @@ flate2 = "1"
 futures = "0.3"
 hex = "0.4"
 hmac = "0.12"
+ring = "0.17"
 home = "0.5"
 # JavaScript's Map: insertion order kept.
 indexmap = "2"

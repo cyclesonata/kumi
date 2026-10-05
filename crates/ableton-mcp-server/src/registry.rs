@@ -165,9 +165,10 @@ fn canonical_into(value: &Value, limits: &CanonicalLimits, depth: usize, out: &m
         return Err(CanonicalError::TooDeep);
     }
     match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) => out.push_str(&json::stringify(value)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => json::write_into(value, out),
         Value::String(text) => {
-            if js_string::utf16_len(text) > limits.max_string_length {
+            // UTF-16 never takes more units than UTF-8 takes bytes: only a long text needs counting.
+            if text.len() > limits.max_string_length && js_string::utf16_len(text) > limits.max_string_length {
                 return Err(CanonicalError::StringTooLarge);
             }
             json::escape(text, out);
@@ -190,7 +191,12 @@ fn canonical_into(value: &Value, limits: &CanonicalLimits, depth: usize, out: &m
                 return Err(CanonicalError::ObjectTooLarge);
             }
             let mut keys: Vec<&String> = object.keys().collect();
-            keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            // JavaScript orders by UTF-16 code units, which is byte order for ASCII keys (nearly all).
+            if keys.iter().all(|key| key.is_ascii()) {
+                keys.sort_unstable();
+            } else {
+                keys.sort_by(|left, right| left.encode_utf16().cmp(right.encode_utf16()));
+            }
             out.push('{');
             for (index, key) in keys.into_iter().enumerate() {
                 if index > 0 {

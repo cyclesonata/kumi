@@ -19,6 +19,7 @@ dependencies = [
  "memchr",
  "rand 0.9.5",
  "regex",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

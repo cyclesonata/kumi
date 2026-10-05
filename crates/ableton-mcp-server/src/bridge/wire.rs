@@ -2,7 +2,6 @@
 use crate::live::LiveError;
 use crate::registry::{canonical_json, CanonicalError, CanonicalLimits, WIRE_CANONICAL_LIMITS};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::Value;
@@ -29,9 +28,10 @@ pub(super) fn mac(secret: &str, value: &Value, extension: bool) -> Result<String
     if !extension && encoded.len() > MAX_FRAME_BYTES {
         return Err(LiveError::error("wire payload is too large"));
     }
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(encoded.as_bytes());
-    Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
+    // Every frame is hashed whole (megabytes for a large read): ring's HMAC-SHA256 uses the CPU's SHA
+    // instructions (ARMv8, SHA-NI), where sha2 0.10 hashes in software on ARM.
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, secret.as_bytes());
+    Ok(URL_SAFE_NO_PAD.encode(ring::hmac::sign(&key, encoded.as_bytes()).as_ref()))
 }
 pub(super) fn signed(secret: &str, mut value: Value, extension: bool) -> Result<Value, LiveError> {
     value["mac"] = mac(secret, &value, extension)?.into();

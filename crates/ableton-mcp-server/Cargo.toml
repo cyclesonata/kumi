@@ -54,6 +54,7 @@ flate2.workspace = true
 futures.workspace = true
 hex.workspace = true
 hmac.workspace = true
+ring.workspace = true
 home.workspace = true
 memchr.workspace = true
 rand.workspace = true

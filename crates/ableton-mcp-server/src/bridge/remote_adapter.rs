@@ -1059,7 +1059,24 @@ impl AsyncLiveAdapter for RemoteScriptLiveAdapter {
             return Err(LiveError::error("remote discovery returned an unexpected kind"));
         }
         result["kind"] = translated.into();
-        Ok(serde_json::from_value(result)?)
+        // The page's rows move into the result as they are: from_value would rebuild every row's map.
+        let rows = result.get_mut("items").map(Value::take);
+        if rows.is_some() {
+            result["items"] = Value::Array(Vec::new());
+        }
+        let mut page: LiveDiscoveryResult = serde_json::from_value(result)?;
+        page.items = match rows {
+            Some(Value::Array(rows)) => rows
+                .into_iter()
+                .map(|row| match row {
+                    Value::Object(row) => Ok(row),
+                    other => Err(<serde_json::Error as serde::de::Error>::invalid_type(unexpected(&other), &"a map")),
+                })
+                .collect::<Result<_, _>>()?,
+            Some(other) => return Err(<serde_json::Error as serde::de::Error>::invalid_type(unexpected(&other), &"a sequence").into()),
+            None => return Err(<serde_json::Error as serde::de::Error>::missing_field("items").into()),
+        };
+        Ok(page)
     }
     async fn get_async(&self, reference: &LiveRef, context: Option<&LiveOperationContext>) -> Result<Option<Value>, LiveError> {
         self.ensure_connected(context).await?;
@@ -1227,5 +1244,22 @@ fn truthy(value: &Value) -> bool {
         Value::Number(v) => v.as_f64().is_some_and(|v| v != 0.0),
         Value::String(v) => !v.is_empty(),
         _ => true,
+    }
+}
+
+/// How serde names a value's type in an "invalid type" error.
+fn unexpected(value: &Value) -> serde::de::Unexpected<'_> {
+    use serde::de::Unexpected;
+    match value {
+        Value::Null => Unexpected::Unit,
+        Value::Bool(flag) => Unexpected::Bool(*flag),
+        Value::Number(number) => number
+            .as_i64()
+            .map(Unexpected::Signed)
+            .or_else(|| number.as_u64().map(Unexpected::Unsigned))
+            .unwrap_or_else(|| Unexpected::Float(number.as_f64().unwrap_or_default())),
+        Value::String(text) => Unexpected::Str(text),
+        Value::Array(_) => Unexpected::Seq,
+        Value::Object(_) => Unexpected::Map,
     }
 }
