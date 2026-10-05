@@ -49,7 +49,10 @@ earlier model's private reasoning, which belongs to that model.
 
 When an answer fails because a sign-in is missing or was refused, Kumi offers to
 sign in and then sends your message again. When the provider doesn't offer the
-chosen model, Kumi offers to choose another.
+chosen model, Kumi offers to choose another. When an answer breaks off partway
+(a dropped connection, say), Kumi carries on once from where it stopped and says
+so in the status line; if it breaks off again, Kumi offers to send your message
+again.
 
 ### Models on your computer
 
@@ -444,6 +447,9 @@ technique.
   GitHub for code. The same search within 20 minutes isn't made again.
 - **Reading** covers pages, PDFs, text and code files, GitHub repositories, Max
   patches and Max for Live devices, and pictures, which the model sees.
+- **Searches and reads** that don't touch Live (the web, sounds, presets, your
+  Sets, the Live manual, earlier conversations) run at the same time, up to four
+  at once. Changes to Live still run one after another.
 
 What Kumi looked up shows above its answer, a line each. It reads only public
 addresses, never your computer or your network, and treats what a page says as

@@ -22,10 +22,10 @@ use kumi_runtime::core::contracts::{
 use kumi_runtime::core::errors::{FailureKind, RuntimeError};
 use kumi_runtime::integrations::ableton::{integration::Ableton, observation::ObservationHost, options::AbletonOptions};
 use kumi_runtime::kernel::agent::{
-    create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, STOPPED_BEFORE_RUNNING, STOPPED_NOTE,
-    STOPPED_WHILE_RUNNING,
+    create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, CARRY_ON_NOTE, STOPPED_BEFORE_RUNNING,
+    STOPPED_NOTE, STOPPED_READING, STOPPED_WHILE_RUNNING,
 };
-use kumi_runtime::kernel::budget::ContextBudget;
+use kumi_runtime::kernel::budget::{transcript_of, ContextBudget, SHORTENED};
 use kumi_runtime::mcp::{
     client::{McpEndpoint, StderrStatus},
     types::{CallToolResult, Implementation, ListToolsResult},
@@ -696,7 +696,7 @@ async fn retries_up_to_three_times_before_any_output_escapes_but_never_after_tex
             Options::default(),
         );
         assert!(streamed.kernel.run("q", signal(), ignore()).await.unwrap_err().to_string().contains("overloaded right now (HTTP 503)"));
-        assert_eq!(streamed.count(), 1);
+        assert_eq!(streamed.count(), 2, "after words were shown it carries on once, not three times, then stops");
         retried.kernel.close().await;
         streamed.kernel.close().await;
     })
@@ -1324,6 +1324,126 @@ async fn a_batch_stopped_on_its_second_call_keeps_the_first_calls_result_and_the
 }
 
 #[tokio::test]
+async fn independent_reads_away_from_live_run_together_in_order_and_one_failure_keeps_the_rest() {
+    local(async {
+        let slow = |name: &str, words: &'static str, fail: bool| {
+            tool(name, move |_| async move {
+                sleep(Duration::from_millis(300)).await;
+                if fail {
+                    Err(RuntimeError::plain("the site didn't answer"))
+                } else {
+                    Ok(ToolResult::text(words))
+                }
+            })
+        };
+        let h = harness(
+            |_, n| match n {
+                1 => Scripted::Parts(vec![
+                    call_id("search_web", "{}", "w1"),
+                    call_id("read_web", "{}", "w2"),
+                    call_id("find_sounds", "{}", "w3"),
+                    call_id("make_changes", "{}", "c1"),
+                    call_id("search_web", "{}", "w4"),
+                    tool_calls(),
+                ]),
+                _ => answer("done"),
+            },
+            Options {
+                tools: vec![
+                    slow("search_web", "three reverb chains", false),
+                    slow("read_web", "", true),
+                    slow("find_sounds", "a warm pad", false),
+                    slow("make_changes", "Added Reverb", false),
+                ],
+                ..Options::default()
+            },
+        );
+        let began = Instant::now();
+        h.kernel.run("go", signal(), ignore()).await.unwrap();
+        // Three reads together, then the change, then the last read: three waits of 300 ms, not five.
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(1400), "{took:?}");
+        let messages = h.messages();
+        let results: Vec<_> = tool_message(&messages[2])
+            .iter()
+            .map(|part| match part {
+                ToolPart::ToolResult(result) => (result.tool_call_id.clone(), output_type(part), js(&result.output)),
+                other => panic!("not a result: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            results.iter().map(|(id, kind, _)| (id.as_str(), *kind)).collect::<Vec<_>>(),
+            [("w1", "text"), ("w2", "error-text"), ("w3", "text"), ("c1", "text"), ("w4", "text")],
+            "the reply's order, the failed read's error beside the others' results"
+        );
+        assert!(
+            results[0].2.contains("three reverb chains") && results[1].2.contains("didn't answer") && results[2].2.contains("a warm pad")
+        );
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn huge_results_of_reads_run_together_are_each_cut_to_their_opening() {
+    local(async {
+        let huge = "x".repeat(1024 * 1024);
+        let h = harness(
+            |_, n| match n {
+                1 => Scripted::Parts(vec![call_id("search_web", "{}", "w1"), call_id("read_web", "{}", "w2"), tool_calls()]),
+                _ => answer("done"),
+            },
+            Options { tools: vec![saying("search_web", &huge), saying("read_web", &huge)], ..Options::default() },
+        );
+        h.kernel.run(&observed("read both"), signal(), ignore()).await.unwrap();
+        let sent = js(&h.request(1).prompt);
+        assert!(sent.len() < 140 * 1024, "{} bytes went to the model", sent.len());
+        assert_eq!(sent.matches("Kumi cut the rest of this result: it was 1024 KB").count(), 2, "both results are cut");
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reads_stopped_together_keep_what_finished_and_mark_what_was_running() {
+    local(async {
+        let h = Rc::new(harness(
+            |_, n| match n {
+                1 => Scripted::Parts(vec![
+                    call_id("search_web", "{}", "w1"),
+                    call_id("read_web", "{}", "w2"),
+                    call_id("make_changes", "{}", "c1"),
+                    tool_calls(),
+                ]),
+                _ => answer("done"),
+            },
+            Options {
+                tools: vec![
+                    saying("search_web", "three reverb chains"),
+                    tool("read_web", |_| std::future::pending()),
+                    saying("make_changes", "Added Reverb"),
+                ],
+                ..Options::default()
+            },
+        ));
+        let controller = Controller::new();
+        let held = h.clone();
+        let stop_signal = controller.signal.clone();
+        let stopped = spawn_local(async move { held.kernel.run("go", stop_signal, ignore()).await });
+        sleep(Duration::from_millis(20)).await;
+        controller.abort();
+        assert_eq!(stopped.await.unwrap().unwrap().stop_reason, StopReason::Cancelled);
+        let messages = h.messages();
+        let results: Vec<_> = tool_message(&messages[2]).iter().map(|part| (output_type(part), js(part))).collect();
+        assert_eq!(results.iter().map(|(kind, _)| *kind).collect::<Vec<_>>(), ["text", "error-text", "error-text"]);
+        assert!(results[0].1.contains("three reverb chains"));
+        assert!(results[1].1.contains(STOPPED_READING) && results[2].1.contains(STOPPED_BEFORE_RUNNING));
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn when_a_stopped_turns_steps_are_kept_so_is_the_budgets_trimming_for_them_with_its_note() {
     local(async {
         let mode = Rc::new(Cell::new(Mode::Answer));
@@ -1611,6 +1731,53 @@ async fn a_reply_that_breaks_off_after_its_plan_began_isnt_asked_for_again_one_t
         assert_eq!(retried.count(), 2, "nothing had begun, so the reply was asked for again");
         assert!(early.borrow()[0].abandoned.get());
         retried.kernel.close().await;
+    })
+    .await
+}
+
+/// An answer's stream that broke off after the response began (it keeps its 200).
+fn broke_off() -> LanguageModelError {
+    let mut error = ApiCallError::new("the stream ended early", "u", Some(json!({})), Some(200));
+    error.is_retryable = true;
+    LanguageModelError::ApiCall(error)
+}
+
+#[tokio::test]
+async fn an_answer_that_breaks_off_after_its_words_began_carries_on_once_from_what_was_shown() {
+    local(async {
+        let h = harness(
+            |_, n| match n {
+                1 => Scripted::Parts([text("The Reese needs"), vec![StreamPart::Error { error: broke_off() }]].concat()),
+                _ => answer(" a darker filter."),
+            },
+            Options::default(),
+        );
+        let (events, emit) = collect();
+        assert_eq!(h.kernel.run("why is my bass harsh?", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(h.count(), 2, "one more request carries on");
+        assert_eq!(texts(&events.borrow()).concat(), "The Reese needs a darker filter.");
+        assert!(
+            events.borrow().iter().any(|e| matches!(e, KernelEvent::Retry { reason, wait_ms: 0 } if reason.contains("broke off"))),
+            "the status line says so"
+        );
+        let carried = js(&h.request(1).prompt);
+        assert!(carried.contains("The Reese needs") && carried.contains("connection dropped partway"), "{carried}");
+        assert_eq!(h.transcript_texts(), ["why is my bass harsh?", "The Reese needs a darker filter."], "the note isn't the producer's");
+        let kept_from_the_note = [
+            json!({"role": "user", "content": format!("{SHORTENED}{CARRY_ON_NOTE}")}),
+            json!({"role": "assistant", "content": " a darker filter."}),
+        ];
+        assert_eq!(transcript_of(&kept_from_the_note).iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["a darker filter."]);
+        h.kernel.close().await;
+
+        // Once a turn: breaking off again ends it, as before.
+        let twice = harness(
+            |_, _| Scripted::Parts([text("The Reese"), vec![StreamPart::Error { error: broke_off() }]].concat()),
+            Options::default(),
+        );
+        assert!(twice.kernel.run("why is my bass harsh?", signal(), ignore()).await.is_err());
+        assert_eq!(twice.count(), 2);
+        twice.kernel.close().await;
     })
     .await
 }
