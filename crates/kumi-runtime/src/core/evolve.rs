@@ -162,7 +162,7 @@ impl Evolution {
     pub fn freeze(&mut self, name: &str, keys: &HashSet<String>) {
         if let Some(slot) = self.slots.iter_mut().find(|s| s.name == name) {
             let keep: Vec<_> = slot.knobs.iter().map(|k| !keys.contains(&format!("{}|{}", k.device, k.name))).collect();
-            slot.elite = slot.elite.iter().enumerate().filter(|(i, _)| keep[*i]).map(|(_, v)| *v).collect();
+            slot.elite = slot.elite.iter().enumerate().filter(|(i, _)| keep.get(*i).copied().unwrap_or(false)).map(|(_, v)| *v).collect();
             slot.knobs = slot.knobs.drain(..).enumerate().filter(|(i, _)| keep[*i]).map(|(_, k)| k).collect();
         }
     }
@@ -214,7 +214,8 @@ impl Evolution {
                 trials.push(Trial { slot: slot.name.clone(), values, how: TrialHow::Random });
                 continue;
             }
-            let mut values = slot.elite.clone();
+            // One value per knob, whatever happened to the elite (a reseed or a refused knob).
+            let mut values: Vec<f64> = slot.knobs.iter().enumerate().map(|(i, k)| slot.elite.get(i).copied().unwrap_or(k.value)).collect();
             let count = 1 + ((self.random)() * self.options.moves.min(slot.knobs.len()) as f64).floor() as usize;
             for _ in 0..count {
                 let i = ((self.random)() * slot.knobs.len() as f64).floor() as usize;
@@ -284,7 +285,30 @@ impl Evolution {
         };
         let slot = &mut self.slots[index];
         slot.elite = if slot.chain == leader.chain {
-            leader.elite
+            // The leader's best for each of this slot's knobs, matched by device and knob (the n-th of
+            // a repeated one to the leader's n-th). A knob Live refused on the leader was frozen out of
+            // its elite: this slot keeps its own value there, so its elite stays one value per knob.
+            let key = |k: &Knob| (k.device.clone(), k.name.clone());
+            let mut seen: HashMap<(String, String), usize> = HashMap::new();
+            slot.knobs
+                .iter()
+                .enumerate()
+                .map(|(i, knob)| {
+                    let n = {
+                        let count = seen.entry(key(knob)).or_default();
+                        *count += 1;
+                        *count - 1
+                    };
+                    leader
+                        .knobs
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, k)| key(k) == key(knob))
+                        .nth(n)
+                        .and_then(|(at, _)| leader.elite.get(at).copied())
+                        .unwrap_or_else(|| slot.elite.get(i).copied().unwrap_or(knob.value))
+                })
+                .collect()
         } else {
             slot.knobs.iter().map(|k| snap(k, k.min + (self.random)() * (k.max - k.min))).collect()
         };

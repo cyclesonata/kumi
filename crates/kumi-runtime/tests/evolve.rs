@@ -115,3 +115,28 @@ fn held_best_is_heard_again_so_a_lucky_render_cannot_hold_the_search() {
     assert!(hows.contains(&TrialHow::Recheck));
     assert!(e.best().unwrap() < 90.0);
 }
+#[test]
+fn a_knob_live_refused_on_the_leader_never_breaks_a_reseeded_slot() {
+    // Live refuses one of the leader's knobs (frozen out of its elite); a stuck slot of the same chain
+    // is then reseeded from the leader. Every slot keeps one value per knob, so the search goes on.
+    let mut e = Evolution::new(seeded(5), EvolveOptions { moves: 3, crossover: 0.0, random: 0.0, patience: 2, recheck: 99 });
+    e.add(slot("A", "Operator", &[0.5, 0.6, 0.7, 0.8]));
+    e.add(slot("B", "Operator", &[0.1, 0.1, 0.1, 0.1]));
+    scored(&mut e, &[("A", 50.0), ("B", 40.0)]);
+    e.freeze("A", &HashSet::from(["Operator|Knob 1".to_string()]));
+    for _ in 0..12 {
+        scored(&mut e, &[("A", 50.0), ("B", 10.0)]);
+        for slot in &e.slots {
+            assert_eq!(slot.elite.len(), slot.knobs.len(), "{}", slot.name);
+        }
+        for trial in e.propose() {
+            let knobs = e.slots.iter().find(|s| s.name == trial.slot).unwrap().knobs.len();
+            assert_eq!(trial.values.len(), knobs, "{}", trial.slot);
+        }
+    }
+    // B was reseeded from A: A's values for the knobs they share, B's own where A has none.
+    let a = e.slots.iter().find(|s| s.name == "A").unwrap();
+    assert_eq!(a.knobs.len(), 3);
+    let b = e.slots.iter().find(|s| s.name == "B").unwrap();
+    assert_eq!(b.knobs.len(), 4);
+}
