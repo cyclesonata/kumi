@@ -18,7 +18,7 @@ use kumi_runtime::{
     providers::{
         api_key_for,
         local::{self, LocalBinding, LocalKind, LocalModelOptions, LocalServer},
-        models::{check_api_key, list_models, ApiKeyCheck, EffortInfo, ListOptions, ModelInfo, Transport},
+        models::{check_api_key, list_models, ApiKeyCheck, EffortInfo, ListOptions, ModelInfo, ServiceTier, Transport},
         parse_model_id, provider_info, resolve_model, Effort, KeySource, ProviderId, ResolveModelOptions, SignIn, PROVIDERS,
     },
     system::Env,
@@ -72,6 +72,9 @@ pub struct CurrentModel {
     pub pinned: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r#where: Option<String>,
+    /// The faster tier in use ("Fast"): `/fast` is on and this model's provider offers one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fast: Option<ServiceTier>,
 }
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DefaultModel {
@@ -146,12 +149,14 @@ impl BindingInfo {
 struct CachedBinding {
     model: String,
     effort: Option<Effort>,
+    tier: Option<String>,
     binding: Bound,
 }
 type Defaulting = Shared<LocalBoxFuture<'static, Result<Option<DefaultModel>, RuntimeError>>>;
 struct State {
     model: Option<String>,
     effort: Option<Effort>,
+    fast: bool,
     catalog: HashMap<String, Vec<ModelInfo>>,
     bound: Option<CachedBinding>,
     named: Option<Vec<LocalServer>>,
@@ -183,6 +188,7 @@ pub fn create_model_control(options: ModelControlOptions) -> ModelControl {
             state: RefCell::new(State {
                 model,
                 effort: settings.effort,
+                fast: settings.fast == Some(true),
                 catalog: HashMap::new(),
                 bound: None,
                 named: None,
@@ -237,9 +243,30 @@ impl ModelControl {
         if let Some(effort) = state.effort {
             settings["effort"] = json!(effort);
         }
+        if state.fast {
+            settings["fast"] = json!(true);
+        }
         write_settings(&self.inner.options.settings_file, &settings)
     }
-    async fn bind(&self, id: &str, effort: Option<Effort>) -> Result<Bound, RuntimeError> {
+    /// The faster tier this model's provider lists for it, if any (read from its model list, once).
+    async fn tier_of(&self, id: &str) -> Option<ServiceTier> {
+        let parsed = self.parse(Some(id))?;
+        if parsed.server.is_some() {
+            return None;
+        }
+        if self.info_for(Some(id)).is_none() {
+            let _ = self.models(&parsed.provider, false).await;
+        }
+        self.info_for(Some(id))?.service_tiers.into_iter().next()
+    }
+    /// The tier to ask for: `/fast` is on and the model has one.
+    async fn tier_for(&self, id: &str) -> Option<String> {
+        if !self.inner.state.borrow().fast {
+            return None;
+        }
+        self.tier_of(id).await.map(|tier| tier.id)
+    }
+    async fn bind(&self, id: &str, effort: Option<Effort>, tier: Option<String>) -> Result<Bound, RuntimeError> {
         if let Some(Parsed { server: Some(server), model, .. }) = self.parse(Some(id)) {
             let weak = Rc::downgrade(&self.inner);
             return Ok(Bound::Local(Rc::new(local::resolve_local_model(
@@ -263,6 +290,7 @@ impl ModelControl {
                 env: Some(self.inner.options.env.clone()),
                 fetch: self.inner.options.fetch.clone(),
                 effort,
+                service_tier: tier,
             })
             .await?,
         )))
@@ -274,7 +302,9 @@ impl ModelControl {
         };
         let info = self.info_for(model.as_deref());
         let parsed = self.parse(model.as_deref());
+        let fast = self.inner.state.borrow().fast;
         CurrentModel {
+            fast: info.as_ref().filter(|_| fast).and_then(|i| i.service_tiers.first()).cloned(),
             model: model.filter(|s| !s.is_empty()),
             provider: parsed.as_ref().map(|p| p.provider.clone()),
             name: info.as_ref().map(|i| i.name.clone()),
@@ -425,12 +455,13 @@ impl ModelControl {
             .borrow()
             .effort
             .filter(|effort| info.as_ref().is_none_or(|info| info.efforts.iter().any(|level| level.effort == *effort)));
-        let binding = self.bind(next, keep).await?;
+        let tier = self.tier_for(next).await;
+        let binding = self.bind(next, keep, tier.clone()).await?;
         {
             let mut state = self.inner.state.borrow_mut();
             state.model = Some(next.into());
             state.effort = keep;
-            state.bound = Some(CachedBinding { model: next.into(), effort: keep, binding: binding.clone() });
+            state.bound = Some(CachedBinding { model: next.into(), effort: keep, tier, binding: binding.clone() });
         }
         self.save()?;
         (self.inner.options.changed)().await?;
@@ -447,6 +478,30 @@ impl ModelControl {
         }
         self.save()?;
         (self.inner.options.changed)().await
+    }
+    /// Whether `/fast` is on, whether or not the current model has a faster tier.
+    pub fn fast_enabled(&self) -> bool {
+        self.inner.state.borrow().fast
+    }
+    /// Turn the model's faster tier on or off. On: the tier the model's provider lists, or None (and
+    /// nothing changes) when it lists none.
+    pub async fn set_fast(&self, on: bool) -> Result<Option<ServiceTier>, RuntimeError> {
+        let model = self.inner.state.borrow().model.clone();
+        let tier = match model {
+            Some(model) if on => self.tier_of(&model).await,
+            _ => None,
+        };
+        if on && tier.is_none() {
+            return Ok(None);
+        }
+        {
+            let mut state = self.inner.state.borrow_mut();
+            state.fast = on;
+            state.bound = None;
+        }
+        self.save()?;
+        (self.inner.options.changed)().await?;
+        Ok(tier)
     }
     pub async fn set_effort_name(&self, next: Option<&str>) -> Result<(), RuntimeError> {
         let effort = next
@@ -537,11 +592,12 @@ impl ModelControl {
         let model = model
             .filter(|s| !s.is_empty())
             .ok_or_else(|| KumiError::new(FailureKind::Config, "Choose a model to talk to: type /model."))?;
-        let binding = if let Some(cached) = cached.filter(|b| b.model == model && b.effort == effort) {
+        let tier = self.tier_for(&model).await;
+        let binding = if let Some(cached) = cached.filter(|b| b.model == model && b.effort == effort && b.tier == tier) {
             cached.binding
         } else {
-            let binding = self.bind(&model, effort).await?;
-            self.inner.state.borrow_mut().bound = Some(CachedBinding { model, effort, binding: binding.clone() });
+            let binding = self.bind(&model, effort, tier.clone()).await?;
+            self.inner.state.borrow_mut().bound = Some(CachedBinding { model, effort, tier, binding: binding.clone() });
             if let Some(asked) = binding.asked() {
                 let control = self.clone();
                 let saying = binding.clone();
@@ -572,6 +628,15 @@ pub trait ModelController {
     async fn models(&self, provider: &str, refresh: bool) -> Result<Vec<ModelInfo>, RuntimeError>;
     async fn choose(&self, next: &str) -> Result<Option<String>, RuntimeError>;
     async fn set_effort(&self, next: Option<Effort>) -> Result<(), RuntimeError>;
+    /// Whether `/fast` is on (the setting, whether or not this model has a faster tier).
+    fn fast_enabled(&self) -> bool {
+        false
+    }
+    /// `/fast`: the model's faster tier on or off; None when turning it on and the model has none.
+    async fn set_fast(&self, on: bool) -> Result<Option<ServiceTier>, RuntimeError> {
+        let _ = on;
+        Ok(None)
+    }
     async fn save_key(&self, provider: ProviderId, key: &str, signal: Option<Signal>) -> Result<ApiKeyCheck, RuntimeError>;
     async fn sign_in_chatgpt(&self, io: ChatGptSignIn) -> Result<(), RuntimeError>;
     async fn sign_out(&self, provider: ProviderId) -> Result<bool, RuntimeError>;
@@ -601,6 +666,12 @@ impl ModelController for ModelControl {
     }
     async fn set_effort(&self, next: Option<Effort>) -> Result<(), RuntimeError> {
         ModelControl::set_effort(self, next).await
+    }
+    fn fast_enabled(&self) -> bool {
+        ModelControl::fast_enabled(self)
+    }
+    async fn set_fast(&self, on: bool) -> Result<Option<ServiceTier>, RuntimeError> {
+        ModelControl::set_fast(self, on).await
     }
     async fn save_key(&self, provider: ProviderId, key: &str, signal: Option<Signal>) -> Result<ApiKeyCheck, RuntimeError> {
         ModelControl::save_key(self, provider, key, signal).await

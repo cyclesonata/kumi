@@ -1776,6 +1776,7 @@ async fn run() -> Result<i32, RuntimeError> {
         env: Some(env.clone()),
         fetch: None,
         effort: level,
+        service_tier: None,
     })
     .await?;
     let model = Counted::new(binding);
