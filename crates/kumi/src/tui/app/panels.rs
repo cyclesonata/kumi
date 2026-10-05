@@ -20,7 +20,9 @@ use std::collections::HashMap;
 
 /// A word of a /recipe line: quoted when it has spaces, quotes or backslashes, so the line reads back the same.
 fn recipe_word(text: &str) -> String {
-    if !text.is_empty() && !text.chars().any(|c| c.is_whitespace() || c == '"' || c == '\\') {
+    // A name like 808 or true goes in quotes too, so it stays a name rather than a number or a switch.
+    let reads_as_value = serde_json::from_str::<Value>(text).is_ok_and(|v| v.is_number() || v.is_boolean());
+    if !text.is_empty() && !reads_as_value && !text.chars().any(|c| c.is_whitespace() || c == '"' || c == '\\') {
         return text.into();
     }
     format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))

@@ -90,7 +90,7 @@ message, not a command.
 | `/memory` | Everything Kumi keeps: notes about you and this Set, what it learned from your Sets, techniques, recipes and lessons; choose one to forget it (a note to change its words or pin it, a recipe to run or forget) |
 | `/note <id> <new words>` | Change a note's words without the model; a note's "Change the words" in `/memory` starts it for you |
 | `/recipes` | Your recipes: run one or forget it. One with blanks starts a `/recipe` line for you to finish, with what's pinned filled in |
-| `/recipe <name> blank=value …` | Run a recipe now, with no model call; a value with spaces goes in quotes, and Kumi names any blank left empty |
+| `/recipe <name> blank=value …` | Run a recipe now, with no model call; a value with spaces goes in quotes, an unquoted number or true/false goes as itself (quote it to keep it words), and Kumi names any blank left empty |
 | `/status` | What Kumi is connected to, the model, how far it has got learning your library, and on an API key the tokens this session used |
 | `/voice` | Talking instead of typing: start or stop, "Send when you stop", the language you speak and the microphone |
 | `/update` | Get the newest Kumi: it asks, closes, updates and opens again with the same conversation |
