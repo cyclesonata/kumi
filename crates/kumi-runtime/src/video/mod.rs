@@ -41,6 +41,8 @@ use tokio::io::AsyncWriteExt;
 
 pub const VIDEO_EXTENSIONS: [&str; 6] = [".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"];
 pub const MAX_SOUND: f64 = 120.0;
+/// The most frames one watch shows (each moment in each part of look_at's views counts).
+pub const MAX_SHOTS: usize = 16;
 #[derive(Clone, Default)]
 pub struct WatchRequest {
     pub url: String,
@@ -48,6 +50,8 @@ pub struct WatchRequest {
     pub to: Option<f64>,
     pub look_at: Option<Vec<f64>>,
     pub zoom: Option<Region>,
+    /// Several parts of the picture for each moment in look_at (None: the whole frame), in place of zoom.
+    pub views: Vec<Option<Region>>,
     pub frames: Option<f64>,
     pub listen: Option<SoundSpan>,
 }
@@ -845,6 +849,7 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
         lines.push(line);
     }
     let region = request.zoom;
+    let looked = request.look_at.as_ref().is_some_and(|v| !v.is_empty());
     let wanted = if let Some(look) = request.look_at.filter(|v| !v.is_empty()) {
         let mut unique = Vec::new();
         for at in look.into_iter().filter(|t| *t >= 0.0 && (end == 0.0 || *t <= end)).map(|t| round(t * 10.0) / 10.0) {
@@ -867,29 +872,38 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             },
         )
     };
+    // Each frame Kumi takes, and the part of the picture: with views, each moment in each part, at most
+    // MAX_SHOTS of them.
+    let views = if looked && !request.views.is_empty() { request.views.clone() } else { vec![region] };
+    let mut shots: Vec<(f64, Option<Region>)> = wanted.iter().flat_map(|at| views.iter().map(move |view| (*at, *view))).collect();
+    if shots.len() > MAX_SHOTS {
+        notes.push(format!(
+            "That's {} views; Kumi showed the first {MAX_SHOTS} (the earliest moments): ask for the rest in another look.",
+            shots.len()
+        ));
+        shots.truncate(MAX_SHOTS);
+    }
     let mut frames = Vec::new();
     let mut sound = None;
     let listen = request.listen.filter(|span| span.to > span.from);
-    if (!wanted.is_empty() || listen.is_some()) && ffmpeg.is_none() {
+    if (!shots.is_empty() || listen.is_some()) && ffmpeg.is_none() {
         notes.push(format!("Frames and the video's sound need ffmpeg ({}); this is the transcript alone.", ffmpeg_hint()));
     } else if let Some(ffmpeg) = ffmpeg {
-        let frame_path = |time| {
+        let frame_path = |time, region: Option<Region>| {
             join(
                 &join(&folder, "frames"),
                 &format!("{}{}.jpg", to_fixed(time, 1), region.map_or_else(String::new, |r| format!("-{}", r.as_str()))),
             )
         };
-        let missing = wanted.iter().any(|time| !Path::new(&frame_path(*time)).exists());
-        let input = if missing {
+        let missing = shots.iter().any(|(time, region)| !Path::new(&frame_path(*time, *region)).exists());
+        // Whole frames from the video's stream; close-ups from its sharpest.
+        let (input, sharp) = if missing {
             let sources = watcher.streams().await?;
-            if region.is_some() {
-                sources.sharp
-            } else {
-                sources.video
-            }
+            (sources.video, sources.sharp)
         } else {
-            None
+            (None, None)
         };
+        let input = if shots.iter().any(|(_, region)| region.is_none()) { input } else { sharp.clone() };
         if missing && input.is_none() {
             notes.push("Kumi couldn't find a stream of that video to take frames from; this is the transcript alone.".into());
         } else {
@@ -899,18 +913,19 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             };
             let mut missed = Vec::new();
             let mut tried = 0;
-            for chunk in wanted.chunks(3) {
+            for chunk in shots.chunks(3) {
                 let before = missed.len();
                 let mut tasks = FuturesUnordered::new();
-                for time in chunk {
+                for (time, region) in chunk {
                     watcher.progress(&format!("looking at {}{slowly}", format_time(*time)));
-                    let path = frame_path(*time);
-                    let input = input.as_ref();
+                    let path = frame_path(*time, *region);
+                    let input = if region.is_some() { sharp.as_ref().or(input.as_ref()) } else { input.as_ref() };
                     let ffmpeg = &ffmpeg;
                     let signal = signal.clone();
-                    tasks.push(async move { (*time, frame_at(ffmpeg, input, *time, &path, signal, region).await) });
+                    let region = *region;
+                    tasks.push(async move { (*time, region, frame_at(ffmpeg, input, *time, &path, signal, region).await) });
                 }
-                while let Some((time, frame)) = tasks.next().await {
+                while let Some((time, region, frame)) = tasks.next().await {
                     match frame {
                         Ok(frame) => frames.push(WatchedFrame {
                             at: time,
@@ -933,8 +948,10 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
                     break;
                 }
             }
-            frames.sort_by(|a, b| a.at.total_cmp(&b.at));
-            notes.extend(missed_frames(&missed, wanted.len() - tried));
+            // By time, then each moment's parts in the order they were asked for (they finish in any order).
+            let part = |frame: &WatchedFrame| views.iter().position(|view| *view == frame.region);
+            frames.sort_by(|a, b| a.at.total_cmp(&b.at).then_with(|| part(a).cmp(&part(b))));
+            notes.extend(missed_frames(&missed, shots.len() - tried));
         }
         if let Some(listen) = listen {
             let start = listen.from.max(0.0);
