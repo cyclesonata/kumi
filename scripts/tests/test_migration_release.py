@@ -507,7 +507,9 @@ class MigrationRelease(unittest.TestCase):
         self.assertIn(f"Kumi is now {manifest['kumi']}", updated)
         self.assertTrue((home / "app" / self.binary).is_file())
         self.assertEqual(config.read_bytes(), config_before, "the old version-only updater leaves the bridge for native startup")
-        self.check_windows_launcher(launcher, original_launcher)
+        # A newer bridge has the native binary run the bridge step during the update, and its first start writes
+        # the installer's launcher; with the same bridge, the first launch below does.
+        self.check_windows_launcher(launcher, original_launcher if manifest["bridge"] == old["packageVersion"] else self.native_windows_launcher())
         self.assertEqual(self.launched(launcher, env, "--version"), f"Kumi {manifest['kumi']}\n")
         self.check_windows_launcher(launcher, self.native_windows_launcher())
         self.assertIn("anthropic/claude-sonnet-5-5", self.launched(launcher, env, "model"))
