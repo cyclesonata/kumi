@@ -147,7 +147,10 @@ fn fifty_thousand_sounds_search_with_bounded_latency() {
         }
         times.sort();
         eprintln!("50k search {:?}: {:?}", query.words, times[2]);
-        assert!(times[2] < std::time::Duration::from_millis(100), "median {:?}: {:?}", query.words, times[2]);
+        // 100 ms for an optimized build; a debug build on a shared runner gets more, which still catches a search
+        // that stops using its index.
+        let bound = std::time::Duration::from_millis(if cfg!(debug_assertions) { 250 } else { 100 });
+        assert!(times[2] < bound, "median {:?}: {:?}", query.words, times[2]);
     }
     assert_eq!(index.search(&SoundQuery { words: vec!["kick".into(), "dark".into()], limit: 5, ..Default::default() }).hits.len(), 5);
 }

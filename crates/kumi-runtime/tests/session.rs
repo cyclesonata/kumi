@@ -1036,7 +1036,18 @@ local_test!(set_save_keeps_a_draft_and_failed_answer_abandons_it, {
             h.observation.borrow_mut().saved_at = Some(2000.);
             h.session.refresh().await.unwrap();
         }
-        delay(10).await;
+        // Keeping the draft writes the store; a busy runner's disk takes longer than a few ms. An abandoned
+        // draft gets the same 10 ms it always had to show up wrongly.
+        if fail {
+            delay(10).await;
+        } else {
+            for _ in 0..1000 {
+                if !store.list().await.unwrap().is_empty() {
+                    break;
+                }
+                delay(2).await;
+            }
+        }
         h.session.close().await.unwrap();
         assert_eq!(store.list().await.unwrap().len(), usize::from(!fail));
         assert_eq!(h.error("Inference failed"), fail);
