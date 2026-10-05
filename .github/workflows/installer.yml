@@ -132,7 +132,9 @@ jobs:
           pattern: native-*
           path: native-releases
       - name: Keep the manifest consumed by existing Node 24 installs
-        run: python3 scripts/build-migration-release.py native-releases/*/kumi-release.json --node "$(node -p process.versions.node)" --out release
+        # One artifact (a pull request's Linux-only build) is extracted straight into the folder; several
+        # get a folder each. Each bundle sits beside its manifest either way.
+        run: python3 scripts/build-migration-release.py $(find native-releases -name kumi-release.json | sort) --node "$(node -p process.versions.node)" --out release
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: kumi-release
