@@ -43,11 +43,15 @@ pub async fn open_live(run: &Run, platform: &str, env: &Env) -> Option<OpenLive>
     }
 }
 
-/// Ask Live to quit, as its own menu does: with unsaved work it asks the producer to save first.
+/// Ask Live to quit, as its own menu does: with unsaved work it asks the producer to save first. This
+/// returns at once, not when Live has answered: the producer may still be deciding about saving.
 pub async fn ask_to_quit(run: &Run, platform: &str, env: &Env) {
     match platform {
         "darwin" => {
-            run("osascript".into(), args(&["-e", "tell application id \"com.ableton.live\" to quit"]), None).await;
+            // Without `ignoring application responses`, osascript waits for Live's answer, which comes
+            // only once the save dialog is answered (or after AppleScript's two-minute timeout).
+            let quit = ["ignoring application responses", "tell application id \"com.ableton.live\" to quit", "end ignoring"];
+            run("osascript".into(), args(&["-e", quit[0], "-e", quit[1], "-e", quit[2]]), None).await;
         }
         "win32" => {
             let close = "Get-Process -Name 'Ableton Live*' -ErrorAction SilentlyContinue | ForEach-Object { [void]$_.CloseMainWindow() }";
@@ -149,7 +153,10 @@ mod tests {
         assert!(start(&run, "darwin", &env, None).await);
         {
             let calls = calls.borrow();
-            assert_eq!(calls[1], "osascript -e tell application id \"com.ableton.live\" to quit");
+            assert_eq!(
+                calls[1],
+                "osascript -e ignoring application responses -e tell application id \"com.ableton.live\" to quit -e end ignoring"
+            );
             assert_eq!(calls.iter().filter(|c| c.starts_with("pgrep")).count(), 3);
             assert_eq!(&calls[calls.len() - 2..], ["open /Applications/Ableton Live 12 Beta.app", "open -b com.ableton.live"]);
         }

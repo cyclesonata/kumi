@@ -404,8 +404,8 @@ async fn connect_then_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
             "Live loads the bridge when it starts, so Live has to start again: Kumi asks it to quit, and it asks you to save your work.\n",
         );
         if bridge_setup::ask_yes_no(Some(io.input.clone()), io.out.clone(), "Restart Live now?").await {
-            live_app::ask_to_quit(&run, platform, &io.env).await;
             io.out.write("Waiting for Live to close (answer it if it asks about saving). Enter stops waiting.\n");
+            live_app::ask_to_quit(&run, platform, &io.env).await;
         } else {
             io.out.write("Quit Live when you're ready; Kumi waits for it. Enter stops waiting.\n");
         }
