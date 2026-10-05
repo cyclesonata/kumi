@@ -424,6 +424,9 @@ async fn connect_then_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     let mut options = BridgeSetupIo::new(io.out.clone(), io.env.clone());
     options.input = Some(io.input.clone());
     options.yes = true;
+    // Don't wait here for Live to answer: Kumi starts Live only after this, and the reopened app
+    // connects by itself once Live answers.
+    options.wait_ms = Some(0);
     if bridge_setup::setup_bridge(options).await? == 0 {
         io.out.write("Opening Live…\n");
         if !live_app::start(&run, platform, &io.env, open.as_ref().map(|live| live.app.as_str())).await {
