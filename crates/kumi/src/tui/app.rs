@@ -73,6 +73,15 @@ pub struct TuiOptions {
     pub panel_tab: Option<PanelTab>,
     pub updates: Option<UpdateControl>,
     pub voice: Option<Rc<dyn VoiceController>>,
+    /// Live isn't connected to Kumi yet, or its bridge is older than Kumi's: offered once the app has started.
+    pub connect_live: Option<ConnectLive>,
+}
+/// Kumi's bridge isn't in Live yet, or is older than Kumi's.
+pub struct ConnectLive {
+    /// Why, in a sentence.
+    pub why: String,
+    /// The app closes to connect: the bridge goes in place, with Live restarting around it, and Kumi opens again.
+    pub request: Rc<dyn Fn()>,
 }
 impl TuiOptions {
     pub fn new(controller: Rc<dyn SessionController>, input: Rc<dyn TtyInput>, output: Rc<dyn TtyOutput>, mode: impl Into<String>) -> Self {
@@ -94,6 +103,7 @@ impl TuiOptions {
             panel_tab: None,
             updates: None,
             voice: None,
+            connect_live: None,
         }
     }
 }
@@ -624,6 +634,10 @@ impl Terminal for TuiApp {
         self.task(|app| async move {
             if let Err(error) = app.check_model().await {
                 app.panel_failed(&error);
+            }
+            // Signing in comes first; connecting to Live once that's out of the way.
+            if app.0.options.connect_live.is_some() {
+                app.offer_connect().await;
             }
             Ok(())
         });

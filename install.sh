@@ -144,19 +144,21 @@ LAUNCHER
   say ""
   say "${bold}Kumi $kumi_version is installed.${reset}"
   case "$added" in "$HOME"/*) added="~/${added#"$HOME"/}" ;; esac
-  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in $added.${reset}"; fi
-  say ""
-  if [ -z "$on_path" ]; then
-    say "Open a new terminal window (or run: export PATH=\"$bin:\$PATH\"), then:"
-  else
-    say "Next:"
-  fi
-  say ""
-  say "  kumi login      sign in (ChatGPT, or an Anthropic, OpenAI or OpenCode key)"
-  say "  kumi bridge     with Live closed: connect Kumi to Ableton Live (once)"
-  say "  kumi            open Kumi next to your Set"
-  say ""
+  if [ -n "$added" ]; then say "${dim}Added $bin to your PATH in $added, for new terminal windows.${reset}"; fi
   say "${dim}Update with: kumi update · Remove with: kumi uninstall${reset}"
+  say ""
+  # Kumi starts here and now: it signs you in and connects to Live. Its keyboard is the terminal's, since
+  # this script's own input is the download.
+  if [ -z "${KUMI_NO_LAUNCH:-}" ] && [ -z "${CI:-}" ] && [ -t 1 ] && { : </dev/tty; } 2>/dev/null; then
+    say "Starting Kumi…"
+    exec "$bin/kumi" </dev/tty
+  fi
+  if [ -z "$on_path" ]; then
+    say "Next, in a new terminal window (or after: export PATH=\"$bin:\$PATH\"): kumi"
+  else
+    say "Next: kumi"
+  fi
+  say "${dim}It signs you in and connects to Live.${reset}"
 }
 
 main "$@"

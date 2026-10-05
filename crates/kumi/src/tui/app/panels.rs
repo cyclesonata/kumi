@@ -1351,6 +1351,49 @@ impl TuiApp {
         );
         Ok(())
     }
+    /// Once no panel is open: connect Kumi to Live now (the app closes for it and opens again), or later.
+    pub(super) async fn offer_connect(&self) {
+        // Up to twenty minutes of signing in.
+        for _ in 0..4800 {
+            if self.0.state.borrow().closing {
+                return;
+            }
+            if self.0.state.borrow().panel.is_none() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        let Some(connect) = &self.0.options.connect_live else { return };
+        if self.0.state.borrow().panel.is_some() || self.0.state.borrow().closing {
+            return;
+        }
+        let why = connect.why.clone();
+        self.pick(
+            Picker::new(
+                "Connect Kumi to Live",
+                vec![
+                    item(
+                        "Connect now",
+                        "connect",
+                        format!(
+                            "{why} Kumi closes, puts its bridge in Live and opens again; an open Live restarts, asking you to save first"
+                        ),
+                    ),
+                    item("Later", "later", "Chat without Live for now; Kumi offers this again next time"),
+                ],
+            ),
+            |app, answer| async move {
+                app.close_panel();
+                if answer.value.as_deref() == Some("connect") {
+                    if let Some(connect) = &app.0.options.connect_live {
+                        (connect.request)();
+                    }
+                    app.finish(0, None).await;
+                }
+                Ok(())
+            },
+        );
+    }
     pub(super) fn insert_spoken(&self, text: &str) {
         let clean = self.clean(text, usize::MAX);
         let mut state = self.0.state.borrow_mut();

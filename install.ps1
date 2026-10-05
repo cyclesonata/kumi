@@ -171,15 +171,17 @@ exit /b %errorlevel%
     Say ''
     Write-Host "Kumi $($release.kumi) is installed." -ForegroundColor White
     if ($added) { Write-Host "Added $bin to your PATH." -ForegroundColor DarkGray }
-    Say ''
-    Say 'Next (in this window, or any new one):'
-    Say ''
-    Say '  kumi login      sign in (ChatGPT, or an Anthropic, OpenAI or OpenCode key)'
-    Say '  kumi bridge     with Live closed: connect Kumi to Ableton Live (once)'
-    Say '  kumi            open Kumi next to your Set'
-    Say ''
     Write-Host 'Kumi looks best in Windows Terminal (from the Microsoft Store, built into Windows 11).' -ForegroundColor DarkGray
     Write-Host 'Update with: kumi update · Remove with: kumi uninstall' -ForegroundColor DarkGray
+    Say ''
+    # Kumi starts here and now: it signs you in and connects to Live.
+    if (-not $env:KUMI_NO_LAUNCH -and -not $env:CI -and [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected) {
+      Say 'Starting Kumi…'
+      & (Join-Path $bin 'kumi.cmd')
+    } else {
+      Say 'Next (in this window, or any new one): kumi'
+      Write-Host 'It signs you in and connects to Live.' -ForegroundColor DarkGray
+    }
   } catch {
     if ($_.Exception.Message -ne 'KumiInstallFailed') {
       Write-Host ''

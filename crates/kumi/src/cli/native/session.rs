@@ -4,7 +4,7 @@ use crate::{
     history::open_input_history,
     models::{create_model_control, ModelControlOptions},
     terminal::{create_terminal, Terminal, TerminalOptions},
-    tui::app::{create_tui, PanelTab, TuiOptions},
+    tui::app::{create_tui, ConnectLive, PanelTab, TuiOptions},
     voice::{create_voice_control, VoiceControlOptions},
 };
 use async_trait::async_trait;
@@ -58,6 +58,42 @@ pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> docto
     .await;
     let _ = integration.close().await;
     result.unwrap_or(doctor::LiveProbe { started: true, connected: Some(false), ..Default::default() })
+}
+/// Live starts answering once it's open with AbletonMcpBridge chosen as a Control Surface: then the
+/// session reconnects by itself. Watching stops after an hour, or when the session has gone.
+async fn connect_when_live_answers(
+    config: String,
+    controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
+    emit: Rc<dyn Fn(SessionEvent)>,
+    watching: Rc<Cell<bool>>,
+) {
+    let mut answered = bridge_setup::remote_script_answers(&config).await;
+    for _ in 0..1800 {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let answers = bridge_setup::remote_script_answers(&config).await;
+        if answers && !answered {
+            // A turn under way finishes first.
+            for _ in 0..150 {
+                let Some(session) = controller.borrow().as_ref().and_then(Weak::upgrade) else { break };
+                if !session.has_reconnect() {
+                    break;
+                }
+                if session.reconnect().await.is_ok() {
+                    if session.status().connection == ConnectionState::Connected {
+                        emit(SessionEvent::Notice { message: "Live answered, so Kumi is connected to it now.".into() });
+                    }
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            break;
+        }
+        answered = answers;
+        if controller.borrow().as_ref().and_then(Weak::upgrade).is_none() {
+            break;
+        }
+    }
+    watching.set(false);
 }
 pub(super) async fn run_session(
     io: CliIo,
@@ -158,7 +194,10 @@ pub(super) async fn run_session(
     let restore_file = load_restore_file(&io.env)?;
     let user_library = live_user_library(&io.env);
     let trace = io.env.get("KUMI_TRACE").is_some_and(|s| s == "1");
+    // Watching for Live to answer, so a chat without Live connects by itself once it does.
+    let watching_live = Rc::new(Cell::new(false));
     let integration_factory: IntegrationFactory = {
+        let watching_live = watching_live.clone();
         let library = library.clone();
         let emit = emit.clone();
         let controller = controller.clone();
@@ -242,6 +281,8 @@ pub(super) async fn run_session(
             }
             let emit = emit.clone();
             let bundled = bundled.clone();
+            let controller = controller.clone();
+            let watching_live = watching_live.clone();
             with_fallback(
                 factory(options),
                 Rc::new(move || {
@@ -253,11 +294,19 @@ pub(super) async fn run_session(
                     let current = installed.is_some() && installed == bundled;
                     emit(SessionEvent::Notice {
                         message: if current {
-                            "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Then /reconnect.".into()
+                            "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Kumi connects by itself once Live answers.".into()
                         } else {
                             message
                         },
-                    })
+                    });
+                    if current && !watching_live.replace(true) {
+                        tokio::task::spawn_local(connect_when_live_answers(
+                            bridge_config.clone(),
+                            controller.clone(),
+                            emit.clone(),
+                            watching_live.clone(),
+                        ));
+                    }
                 }),
             )
         })
@@ -306,12 +355,25 @@ pub(super) async fn run_session(
     let notice = if bridge_missing {
         Some(format!("The Ableton bridge isn't installed yet, so Kumi can't see Live; chatting without it. To connect Live, quit Live and run: {} bridge",io.command()))
     } else {
-        stale.map(|stale| if stale.runtime_migration {
+        stale.as_ref().map(|stale| if stale.runtime_migration {
             format!("The bridge in Live still uses JavaScript. Quit Kumi and Live, then run: {} bridge to switch to the native bridge.", io.command())
         } else {
             format!("The bridge in Live is {}, older than this Kumi's ({}), so some changes aren't offered. Quit Kumi and Live, then run: {} update",stale.installed,stale.bundled,io.command())
         })
     };
+    // In the app, connecting Live is offered instead: it closes, the bridge goes in place, and it opens again.
+    let connect_why = if bridge_missing {
+        Some("The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".to_string())
+    } else {
+        stale.as_ref().map(|stale| {
+            if stale.runtime_migration {
+                "The bridge in Live still runs on JavaScript.".to_string()
+            } else {
+                format!("The bridge in Live is {}, older than Kumi's {}, so some changes aren't offered.", stale.installed, stale.bundled)
+            }
+        })
+    };
+    let connect_after = Rc::new(Cell::new(false));
     let update_after = Rc::new(Cell::new(false));
     let updates = update::UpdateControl {
         current: KUMI_VERSION.into(),
@@ -340,7 +402,14 @@ pub(super) async fn run_session(
     let ui: Rc<dyn Terminal> = if full_screen {
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);
-        options.startup_notice = notice;
+        options.connect_live = connect_why.map(|why| ConnectLive {
+            why,
+            request: {
+                let connect_after = connect_after.clone();
+                Rc::new(move || connect_after.set(true))
+            },
+        });
+        options.startup_notice = if options.connect_live.is_some() { None } else { notice };
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.open_browser = Some(Rc::new(login::open_browser));
@@ -440,6 +509,8 @@ pub(super) async fn run_session(
     controller.borrow_mut().take();
     if update_after.get() {
         super::update_and_reopen(&io).await
+    } else if connect_after.get() {
+        super::connect_and_reopen(&io).await
     } else {
         Ok(code)
     }

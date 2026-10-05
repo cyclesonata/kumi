@@ -8,6 +8,7 @@ use crate::{
     input::TerminalInput,
     install::{self, InstalledIo},
     library::{run_library, LibraryIo},
+    live_app,
     login::{self, AuthIo, LoginIo},
     report::{write_report, ReportIo},
     spinner::step,
@@ -383,6 +384,53 @@ async fn reopen_after_update(io: &CliIo) -> Result<i32, RuntimeError> {
         return Ok(updated);
     }
     io.out.write("\nOpening Kumi again…\n");
+    reopen(io).await
+}
+/// From the app's "Connect Kumi to Live": the bridge goes in place, with Live quitting first when it's
+/// open (it asks to save its work) and opening again after, then Kumi opens again.
+async fn connect_and_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
+    let result = connect_then_reopen(io).await;
+    io.exit_after_reopen.set(result.is_ok());
+    result
+}
+async fn connect_then_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
+    io.input.pause();
+    io.out.write("\n");
+    let run = bridge_setup::default_run();
+    let platform = kumi_runtime::system::platform();
+    let open = live_app::open_live(&run, platform, &io.env).await;
+    if open.is_some() {
+        io.out.write(
+            "Live loads the bridge when it starts, so Live has to start again: Kumi asks it to quit, and it asks you to save your work.\n",
+        );
+        if bridge_setup::ask_yes_no(Some(io.input.clone()), io.out.clone(), "Restart Live now?").await {
+            live_app::ask_to_quit(&run, platform, &io.env).await;
+            io.out.write("Waiting for Live to close (answer it if it asks about saving). Ctrl-C stops waiting.\n");
+        } else {
+            io.out.write("Quit Live when you're ready; Kumi waits for it. Ctrl-C stops waiting.\n");
+        }
+        let (stop, _interrupt) = interrupt_signal(io);
+        if !live_app::closed(&run, platform, &io.env, &stop).await {
+            io.out.write("\nLive is still open, so nothing was changed. Opening Kumi again…\n");
+            return reopen(io).await;
+        }
+    }
+    let mut options = BridgeSetupIo::new(io.out.clone(), io.env.clone());
+    options.input = Some(io.input.clone());
+    options.yes = true;
+    if bridge_setup::setup_bridge(options).await? == 0 {
+        io.out.write("Opening Live…\n");
+        if !live_app::start(&run, platform, &io.env, open.as_ref().map(|live| live.app.as_str())).await {
+            io.out.write("Kumi couldn't open Live; open it yourself, and Kumi connects once it answers.\n");
+        }
+    } else {
+        io.out.write("\nThe bridge isn't in place, so Kumi opens without Live for now.\n");
+    }
+    io.out.write("Opening Kumi again…\n");
+    reopen(io).await
+}
+/// Open Kumi again, with the same arguments and conversation.
+async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     io.input.pause();
     if let Some(reopen) = &io.reopen {
         return Ok(reopen().await);
