@@ -43,10 +43,14 @@ fn legacy_app() -> PathBuf {
             "tar".into()
         };
         assert!(Command::new(tar).arg("-xzf").arg(&archive).arg("-C").arg(&unpacked).status().unwrap().success());
-        // Another test process may have put its copy in place first.
-        let _ = fs::rename(&unpacked, &cache);
-        assert!(lifecycle(&cache), "the Kumi 1.7.5 bundle has no bridge lifecycle");
-        cache
+        assert!(lifecycle(&unpacked), "the Kumi 1.7.5 bundle has no bridge lifecycle");
+        // Another test process may have put its copy in place first. When the move fails otherwise (an
+        // interrupted run's copy is in the way, or Windows is still scanning the new files), this copy
+        // serves where it is.
+        if fs::rename(&unpacked, &cache).is_ok() || lifecycle(&cache) {
+            return cache;
+        }
+        staging.keep().join("app")
     })
     .clone()
 }
