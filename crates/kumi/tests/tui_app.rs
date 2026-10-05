@@ -818,5 +818,10 @@ case!(a_provider_wait_shows_why_and_counts_down_until_the_model_answers, async {
     h.has("esc to stop");
     h.emit(json!({"type":"text","text":"Raised the master 2 dB."}));
     assert!(!has(&h.screen(), "retrying in"), "the answer ends the wait");
+    // An answer that broke off carries on at once: no countdown, until the model's next words.
+    h.emit(json!({"type":"retry","reason":"ChatGPT's answer broke off","waitMs":0}));
+    h.has("carrying on · ChatGPT's answer");
+    h.emit(json!({"type":"text","text":" Then the low end."}));
+    assert!(!has(&h.screen(), "carrying on"), "the next words end it");
     h.close().await;
 });

@@ -888,11 +888,12 @@ impl Terminal for PlainTerminal {
             }
             "retry" => {
                 if !self.0.state.borrow().suppress {
-                    self.notice(&format!(
-                        "[wait] {}; trying again in {} s",
-                        get("reason"),
-                        (value["waitMs"].as_f64().unwrap_or(0.) / 1000.).ceil().max(1.)
-                    ));
+                    let wait = value["waitMs"].as_f64().unwrap_or(0.);
+                    self.notice(&if wait > 0. {
+                        format!("[wait] {}; trying again in {} s", get("reason"), (wait / 1000.).ceil().max(1.))
+                    } else {
+                        format!("[wait] {}; carrying on", get("reason"))
+                    });
                 }
             }
             "tool-end" => {

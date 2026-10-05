@@ -75,7 +75,7 @@ pub fn transcript_of(messages: &[Value]) -> Vec<TranscriptLine> {
             TranscriptRole::User => text.split(OBSERVATION_MARKER).next().unwrap_or("").replacen(SHORTENED, "", 1),
             TranscriptRole::Assistant => text,
         };
-        if role == TranscriptRole::User && words == CARRY_ON_NOTE {
+        if role == TranscriptRole::User && trim(&words).ends_with(CARRY_ON_NOTE) {
             carried_on = true;
             continue;
         }

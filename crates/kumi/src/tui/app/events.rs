@@ -23,7 +23,9 @@ impl TuiApp {
         match kind {
             "retry" => {
                 let reason = self.clean_line(get("reason"), 80);
-                self.0.state.borrow_mut().retry = Some((reason, perf_now() + n("waitMs")));
+                // No wait: Kumi carries on at once, and the model's next words end it.
+                let until = if n("waitMs") > 0. { perf_now() + n("waitMs") } else { f64::INFINITY };
+                self.0.state.borrow_mut().retry = Some((reason, until));
             }
             "state" => {
                 {

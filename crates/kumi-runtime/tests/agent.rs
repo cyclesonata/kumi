@@ -21,10 +21,10 @@ use kumi_runtime::core::contracts::{
 use kumi_runtime::core::errors::{FailureKind, RuntimeError};
 use kumi_runtime::integrations::ableton::{integration::Ableton, observation::ObservationHost, options::AbletonOptions};
 use kumi_runtime::kernel::agent::{
-    create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, STOPPED_BEFORE_RUNNING, STOPPED_NOTE,
-    STOPPED_WHILE_RUNNING,
+    create_agent_kernel, plain_words, AgentKernel, AgentKernelOptions, LanguageModel, ModelBinding, CARRY_ON_NOTE, STOPPED_BEFORE_RUNNING,
+    STOPPED_NOTE, STOPPED_WHILE_RUNNING,
 };
-use kumi_runtime::kernel::budget::ContextBudget;
+use kumi_runtime::kernel::budget::{transcript_of, ContextBudget, SHORTENED};
 use kumi_runtime::mcp::{
     client::{McpEndpoint, StderrStatus},
     types::{CallToolResult, Implementation, ListToolsResult},
@@ -1555,6 +1555,11 @@ async fn an_answer_that_breaks_off_after_its_words_began_carries_on_once_from_wh
         let carried = js(&h.request(1).prompt);
         assert!(carried.contains("The Reese needs") && carried.contains("connection dropped partway"), "{carried}");
         assert_eq!(h.transcript_texts(), ["why is my bass harsh?", "The Reese needs a darker filter."], "the note isn't the producer's");
+        let kept_from_the_note = [
+            json!({"role": "user", "content": format!("{SHORTENED}{CARRY_ON_NOTE}")}),
+            json!({"role": "assistant", "content": " a darker filter."}),
+        ];
+        assert_eq!(transcript_of(&kept_from_the_note).iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["a darker filter."]);
         h.kernel.close().await;
 
         // Once a turn: breaking off again ends it, as before.

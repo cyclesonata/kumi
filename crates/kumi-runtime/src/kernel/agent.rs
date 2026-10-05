@@ -177,9 +177,9 @@ const MAX_TOOL_IMAGES: usize = 16;
 const IMAGE_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 /// Says what a side question is, ahead of its words.
 const ASIDE_NOTE: &str = "(A side question while you work. Answer it briefly, in plain words, from what's above; use no tools. It doesn't change the request you're working on, and your answer isn't kept in the conversation.)";
-/// What the model is told when its answer broke off and Kumi carries on.
+/// What the model is told when its answer broke off and Kumi carries on. `[Kumi]` marks it as Kumi's, not the producer's.
 pub const CARRY_ON_NOTE: &str =
-    "(The connection dropped partway through your answer. Carry on from where it stopped, without repeating what you said.)";
+    "[Kumi] The connection dropped partway through your answer. Carry on from where it stopped, without repeating what you said.";
 /// Ends a stopped turn's kept steps, for the model and in the transcript.
 pub const STOPPED_NOTE: &str =
     "(Stopped before finishing. The steps above happened; the one in progress may have too, so check Live before carrying on.)";
