@@ -837,6 +837,40 @@ async fn quitting_right_after_a_change_leaves_nothing_running() {
     assert_eq!(code, 0);
     assert!(tokio::time::timeout(std::time::Duration::from_millis(500), local).await.is_ok(), "a task outlived the app");
 }
+case!(a_question_with_numbered_options_answers_by_number_and_free_text_still_works, async {
+    let h = Harness::new(120, 36);
+    h.start().await;
+    h.connect();
+    let ask = |h: &Harness| {
+        h.emit(json!({"type":"state","state":"running"}));
+        h.emit(json!({"type":"text","text":"Which bass should duck under the kick?\n\n1. **Sub Bass**\n2. Reese\n3. Both"}));
+        h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":900}));
+        h.emit(json!({"type":"state","state":"idle"}));
+    };
+    h.type_text("sidechain the bass\r").await;
+    ask(&h);
+    h.has("Your answer");
+    h.has("2. Reese");
+    h.has("a number, then enter answers");
+    h.type_text("2").await;
+    assert!(!h.calls().iter().any(|c| c == "submit:Reese"), "a number picks; it doesn't send");
+    h.type_text("\r").await;
+    h.wait_for_call("submit:Reese").await;
+    assert!(!has(&h.screen(), "Your answer"), "answering closes the choices");
+    ask(&h);
+    h.type_text("2 dB quieter, keep both").await;
+    assert!(!has(&h.screen(), "Your answer"), "typing goes to the input box");
+    h.has("2 dB quieter, keep both");
+    assert_eq!(h.calls().iter().filter(|c| c.starts_with("submit:")).count(), 2, "nothing more was sent");
+    h.type_text("\x03").await;
+    assert!(!has(&h.screen(), "keep both"));
+    h.emit(json!({"type":"state","state":"running"}));
+    h.emit(json!({"type":"text","text":"Done:\n1. Sidechained Reese\n2. Lowered the sub 2 dB"}));
+    h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":900}));
+    h.emit(json!({"type":"state","state":"idle"}));
+    assert!(!has(&h.screen(), "Your answer"), "a list that isn't a question offers nothing");
+    h.close().await;
+});
 case!(a_provider_wait_shows_why_and_counts_down_until_the_model_answers, async {
     let h = Harness::new(120, 36);
     h.start().await;

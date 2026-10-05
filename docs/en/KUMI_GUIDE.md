@@ -148,6 +148,9 @@ under way), Tab sends a message for after the answer, and `/btw` asks something
 on the side without interrupting. Esc stops the answer; the steps it finished
 stay. `/stop` stops Live (clips, the transport and recording) at any time.
 
+When Kumi asks you to pick (which track, which version), its options appear
+above the input box: press its number and Enter, or just type your own.
+
 To show Kumi something, drag files into the window or press **Ctrl-V** for a
 picture on the clipboard, such as a screenshot of a synth: "make this". Each
 shows above the input box and goes with your next message; × or Backspace in an
