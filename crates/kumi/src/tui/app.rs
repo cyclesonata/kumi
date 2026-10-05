@@ -210,8 +210,9 @@ struct State {
     strip: Strip,
     tree_cursor: Option<usize>,
     pinned: Option<Pin>,
-    /// Files the producer added, which go with the next message.
+    /// Files the producer added, which go with the next message, and whether the clipboard is being read.
     attachments: Vec<Attachment>,
+    pasting: bool,
     refreshing: Option<&'static str>,
     tree_refresh: Option<JoinHandle<()>>,
     wake_timer: Option<JoinHandle<()>>,
@@ -283,6 +284,7 @@ impl State {
             tree_cursor: None,
             pinned: None,
             attachments: vec![],
+            pasting: false,
             refreshing: None,
             tree_refresh: None,
             wake_timer: None,

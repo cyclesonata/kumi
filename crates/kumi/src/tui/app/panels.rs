@@ -65,23 +65,24 @@ pub(super) fn recipe_line(recipe: &RecipeSummary, pinned: Option<&PinnedNode>) -
 /// `/recipe <name> blank=value …` read back: the recipe's name and a value for each blank it names.
 pub(super) fn recipe_command(line: &str) -> Result<(String, JsonObject), String> {
     let how = || "Run a recipe with: /recipe <name> blank=value … (a value with spaces goes in quotes)".to_string();
-    let mut words = Vec::new();
-    let mut word: Option<String> = None;
+    // Each word, and whether any of it was in quotes.
+    let mut words: Vec<(String, bool)> = Vec::new();
+    let mut word: Option<(String, bool)> = None;
     let mut quoted = false;
     let mut chars = line.strip_prefix("/recipe").unwrap_or(line).chars();
     while let Some(c) = chars.next() {
         match c {
             '\\' if quoted => {
                 if let Some(next) = chars.next() {
-                    word.get_or_insert_with(String::new).push(next);
+                    word.get_or_insert_with(Default::default).0.push(next);
                 }
             }
             '"' => {
                 quoted = !quoted;
-                word.get_or_insert_with(String::new);
+                word.get_or_insert_with(Default::default).1 = true;
             }
             c if c.is_whitespace() && !quoted => words.extend(word.take()),
-            c => word.get_or_insert_with(String::new).push(c),
+            c => word.get_or_insert_with(Default::default).0.push(c),
         }
     }
     if quoted {
@@ -89,11 +90,16 @@ pub(super) fn recipe_command(line: &str) -> Result<(String, JsonObject), String>
     }
     words.extend(word);
     let mut words = words.into_iter();
-    let name = words.next().ok_or_else(how)?;
+    let name = words.next().ok_or_else(how)?.0;
     let mut with = JsonObject::new();
-    for word in words {
+    for (word, quoted) in words {
         let (blank, value) = word.split_once('=').ok_or_else(how)?;
-        with.insert(blank.into(), Value::String(value.into()));
+        // bpm=124 is a number and on=true a switch, as the model would pass them; "124" in quotes stays words.
+        let value = match serde_json::from_str::<Value>(value) {
+            Ok(value @ (Value::Number(_) | Value::Bool(_))) if !quoted => value,
+            _ => Value::String(value.into()),
+        };
+        with.insert(blank.into(), value);
     }
     Ok((name, with))
 }
@@ -110,7 +116,12 @@ pub(super) fn recipe_blanks_problem(recipe: &RecipeSummary, with: &JsonObject) -
     let empty: Vec<_> = recipe
         .params
         .iter()
-        .filter(|p| with.get(&p.name).and_then(Value::as_str).is_none_or(|v| string::trim(v).is_empty()))
+        // A number or a switch fills its blank; words fill it unless they're blank.
+        .filter(|p| match with.get(&p.name) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(words)) => string::trim(words).is_empty(),
+            Some(_) => false,
+        })
         .map(|p| if p.about.is_empty() { p.name.clone() } else { format!("{} ({})", p.name, p.about) })
         .collect();
     (!empty.is_empty()).then(|| format!("“{}” needs {}.", recipe.name, empty.join(", ")))

@@ -270,9 +270,11 @@ fn span(ms: u64) -> String {
     format!("{n} {unit}{}", if n == 1 { "" } else { "s" })
 }
 
-/// The kinds of picture every provider takes, and the most a picture may weigh.
+/// The kinds of picture every provider takes; the most one may weigh (5 MB once in base64, which is
+/// what providers count), and all of a message's together.
 const PICTURES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
-const MAX_PICTURE: u64 = 5 * 1024 * 1024;
+const MAX_PICTURE: u64 = 3 * 1024 * 1024 + 768 * 1024;
+const MAX_PICTURES: u64 = 20 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 10;
 
 fn size_words(bytes: u64) -> String {
@@ -312,8 +314,15 @@ async fn attached(input: &str, attachments: &[Attachment]) -> Result<(String, Ve
             }
             if metadata.len() > MAX_PICTURE {
                 return Err(refused(format!(
-                    "{name} is {}; the model takes pictures up to 5 MB. Crop or shrink it, then add it again.",
+                    "{name} is {}; the model takes pictures up to 3.75 MB. Crop or shrink it, then add it again.",
                     size_words(metadata.len())
+                )));
+            }
+            let together = pictures.iter().map(|p: &Picture| p.data.len() as u64).sum::<u64>() + metadata.len();
+            if together > MAX_PICTURES {
+                return Err(refused(format!(
+                    "These pictures come to {}; one message takes up to 20 MB of them. Send fewer, or smaller ones.",
+                    size_words(together)
                 )));
             }
             let data = tokio::fs::read(&attachment.path).await.map_err(|_| refused(format!("Kumi couldn't read {name}; add it again.")))?;

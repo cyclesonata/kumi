@@ -142,6 +142,7 @@ pub async fn clipboard_picture(folder: &Path) -> Result<Option<PathBuf>, String>
     #[cfg(unix)]
     builder.mode(0o700);
     builder.create(folder).await.map_err(|e| e.to_string())?;
+    prune(folder).await;
     let file = folder.join(format!("clipboard-{}.png", chrono::Local::now().format("%Y%m%d-%H%M%S-%3f")));
     let Some(bytes) = clipboard_png(&file).await? else { return Ok(None) };
     if let Some(bytes) = bytes {
@@ -158,16 +159,45 @@ pub async fn clipboard_picture(folder: &Path) -> Result<Option<PathBuf>, String>
 }
 
 const PNG: &[u8] = b"\x89PNG";
+/// Clipboard pictures older than this are cleared away when another is pasted.
+const KEEP_DAYS: u64 = 7;
+
+/// A clipboard program's output, given up after 10 s; it's stopped if it's still running then.
+async fn bounded(program: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).kill_on_drop(true).stdin(std::process::Stdio::null());
+    match tokio::time::timeout(std::time::Duration::from_secs(10), command.output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!("{program} didn't start ({error})")),
+        Err(_) => Err(format!("{program} took more than 10 s")),
+    }
+}
+
+/// This process's environment, a name or value that isn't Unicode read as near as it can be.
+pub fn lossy_env() -> kumi_runtime::system::Env {
+    std::env::vars_os().map(|(name, value)| (name.to_string_lossy().into_owned(), value.to_string_lossy().into_owned())).collect()
+}
+
+/// Clears clipboard pictures pasted more than KEEP_DAYS ago: they can be private.
+async fn prune(folder: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(folder).await else { return };
+    let keep = std::time::Duration::from_secs(KEEP_DAYS * 24 * 60 * 60);
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        let pasted = name.to_str().is_some_and(|name| name.starts_with("clipboard-") && name.ends_with(".png"));
+        let old =
+            entry.metadata().await.ok().and_then(|m| m.modified().ok()).and_then(|at| at.elapsed().ok()).is_some_and(|age| age > keep);
+        if pasted && old {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
 
 /// The clipboard's picture: Some(Some(bytes)) to write to `file`, Some(None) when the system wrote
 /// it there itself, None when there's no picture.
 #[cfg(target_os = "macos")]
 async fn clipboard_png(_file: &Path) -> Result<Option<Option<Vec<u8>>>, String> {
-    let output = tokio::process::Command::new("osascript")
-        .args(["-e", "the clipboard as «class PNGf»"])
-        .output()
-        .await
-        .map_err(|e| format!("osascript didn't start ({e})"))?;
+    let output = bounded("osascript", &["-e", "the clipboard as «class PNGf»"]).await?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -184,11 +214,10 @@ async fn clipboard_png(file: &Path) -> Result<Option<Option<Vec<u8>>>, String> {
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $p = [System.Windows.Forms.Clipboard]::GetImage(); if ($p) {{ $p.Save('{target}', [System.Drawing.Imaging.ImageFormat]::Png); 'saved' }}"
     );
-    let output = tokio::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-STA", "-Command", &script])
-        .output()
-        .await
-        .map_err(|e| format!("PowerShell didn't start ({e})"))?;
+    // Windows' own PowerShell, wherever PATH points.
+    let env = lossy_env();
+    let powershell = kumi_runtime::system::system_program(kumi_runtime::system::SystemProgram::Powershell, &env, "win32");
+    let output = bounded(&powershell, &["-NoProfile", "-NonInteractive", "-STA", "-Command", &script]).await?;
     Ok(String::from_utf8_lossy(&output.stdout).contains("saved").then_some(None))
 }
 
@@ -197,7 +226,7 @@ async fn clipboard_png(_file: &Path) -> Result<Option<Option<Vec<u8>>>, String> 
     for (program, args) in
         [("wl-paste", &["--type", "image/png"][..]), ("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"][..])]
     {
-        if let Ok(output) = tokio::process::Command::new(program).args(args).output().await {
+        if let Ok(output) = bounded(program, args).await {
             if output.status.success() && output.stdout.starts_with(PNG) {
                 return Ok(Some(Some(output.stdout)));
             }

@@ -11,11 +11,15 @@ use crate::integrations::ableton::project::since;
 use async_trait::async_trait;
 use kumi_common::{
     abort::Signal,
-    js::{json::stringify, string::head},
+    js::{
+        json::stringify,
+        string::{head, utf16_len},
+    },
     time::{iso_string, now_ms},
 };
+use regex::Regex;
 use serde_json::{json, Value};
-use std::rc::Rc;
+use std::{rc::Rc, sync::LazyLock};
 
 pub const SEARCH_CONVERSATIONS_TOOL: &str = "search_conversations";
 const DESCRIPTION: &str = concat!(
@@ -112,8 +116,8 @@ fn cjk(c: char) -> bool {
     matches!(c as u32, 0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff)
 }
 
-/// The words to look for, in lowercase and without filler. Text in a script written without
-/// spaces (Japanese, Chinese, Korean) is looked for in pairs of characters.
+/// The words to look for, in lowercase and without filler. Text in a script written without spaces
+/// (Japanese, Chinese, Korean) is looked for in pairs of characters, split from any other script beside it.
 pub fn query_words(query: &str) -> Vec<String> {
     let mut words: Vec<String> = vec![];
     let mut add = |word: String| {
@@ -124,16 +128,27 @@ pub fn query_words(query: &str) -> Vec<String> {
     for token in query.to_lowercase().split(|c: char| !(c.is_alphanumeric() || c == '\'' || c == '’')) {
         let token = token.trim_matches(['\'', '’']);
         let token = token.strip_suffix("'s").or_else(|| token.strip_suffix("’s")).unwrap_or(token);
+        // Runs of one script each: "reverbを強く" is "reverb" and "を強く".
         let chars: Vec<char> = token.chars().collect();
-        if chars.iter().any(|c| cjk(*c)) {
-            if chars.len() == 1 {
-                add(token.to_owned());
+        let mut start = 0;
+        while start < chars.len() {
+            let spaceless = cjk(chars[start]);
+            let end = chars[start..].iter().position(|c| cjk(*c) != spaceless).map_or(chars.len(), |n| start + n);
+            let run = &chars[start..end];
+            if spaceless {
+                if run.len() == 1 {
+                    add(run.iter().collect());
+                }
+                for pair in run.windows(2) {
+                    add(pair.iter().collect());
+                }
+            } else {
+                let word: String = run.iter().collect();
+                if run.len() >= 2 && !FILLER.contains(&word.as_str()) {
+                    add(word);
+                }
             }
-            for pair in chars.windows(2) {
-                add(pair.iter().collect());
-            }
-        } else if chars.len() >= 2 && !FILLER.contains(&token) {
-            add(token.to_owned());
+            start = end;
         }
     }
     words.truncate(MAX_WORDS);
@@ -143,6 +158,33 @@ pub fn query_words(query: &str) -> Vec<String> {
 /// How many of the words a find must hold: half, rounded up.
 pub fn needed(words: &[String]) -> usize {
     words.len().div_ceil(2).max(1)
+}
+
+/// A long run of letters and digits, as keys and tokens are; a path or a long word has no digits.
+static TOKEN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[A-Za-z0-9_\-]{32,}").unwrap());
+
+/// Text for the block, as plain words: angle brackets can't close it, control characters and line
+/// breaks become spaces, anything that looks like a key or token is hidden, and it's cut to `most`.
+fn plain(text: &str, most: usize) -> String {
+    let text: String = text
+        .chars()
+        .map(|c| match c {
+            '<' => '‹',
+            '>' => '›',
+            c if c <= '\u{1f}' || ('\u{7f}'..='\u{9f}').contains(&c) || c == '\u{feff}' => ' ',
+            c => c,
+        })
+        .collect();
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let text = TOKEN.replace_all(&text, |found: &regex::Captures| {
+        let run = &found[0];
+        if run.chars().any(|c| c.is_ascii_digit()) && run.chars().any(|c| c.is_ascii_alphabetic()) {
+            "[hidden]".to_string()
+        } else {
+            run.to_string()
+        }
+    });
+    head(&text, most)
 }
 
 fn matched(words: &[String], text: &str) -> usize {
@@ -164,7 +206,7 @@ struct Recall(RecallOptions);
 
 fn where_of(hit: &FoundExchange, here: Option<&str>) -> String {
     let set = match &hit.set {
-        Some(name) => format!("“{}”", head(name, 80)),
+        Some(name) => format!("“{}”", plain(name, 80)),
         None if hit.place == "unsaved" => "a Set not saved yet".into(),
         None => "a saved Set".into(),
     };
@@ -190,7 +232,7 @@ impl KernelTool for Recall {
         }});
         schema.as_object().unwrap().clone()
     }
-    async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
+    async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let words = query_words(input.get("query").and_then(Value::as_str).unwrap_or(""));
         if words.is_empty() {
             return Ok(ToolResult::error("Give words to look for: a sound, a device, a track, or what it was for."));
@@ -200,9 +242,12 @@ impl KernelTool for Recall {
         let current = (self.0.current)();
         let mut found = vec![];
         if let Some(store) = &self.0.conversations {
-            found = store.search(&words, needed, limit + 1).await?;
-            found.retain(|hit| current.as_ref().is_none_or(|(place, id)| hit.place != *place || hit.conversation != *id));
-            found.truncate(limit);
+            let skip = current.as_ref().map(|(place, id)| (place.as_str(), id.as_str()));
+            // Esc stops a search through many conversations.
+            found = tokio::select! {
+                found = store.search(&words, needed, limit, skip) => found?,
+                _ = signal.cancelled() => return Err(RuntimeError::Aborted),
+            };
         }
         let mut techniques = vec![];
         if let Some(store) = &self.0.techniques {
@@ -254,26 +299,31 @@ impl KernelTool for Recall {
                 let date = iso_string(hit.saved_at).chars().take(10).collect::<String>();
                 lines.push(format!("- In {}, {} ({date}):", where_of(hit, here), since(hit.saved_at as f64, now)));
                 if !hit.said.is_empty() {
-                    lines.push(format!("  The producer: {}", head(&hit.said, 300)));
+                    lines.push(format!("  The producer: {}", plain(&hit.said, 300)));
                 }
                 if !hit.answer.is_empty() || !hit.tools.is_empty() {
-                    let tools = if hit.tools.is_empty() { String::new() } else { format!(" [used {}]", hit.tools.join(", ")) };
-                    lines.push(format!("  Kumi: {}{tools}", head(&hit.answer, 400)));
+                    let tools = if hit.tools.is_empty() { String::new() } else { format!(" [used {}]", plain(&hit.tools.join(", "), 200)) };
+                    lines.push(format!("  Kumi: {}{tools}", plain(&hit.answer, 400)));
                 }
             }
         }
         if !techniques.is_empty() {
             lines.push("Techniques (read one with technique, action read):".into());
-            lines.extend(techniques.iter().take(3).map(|(_, t)| format!("- [{}] {}: fits {}", t.id, t.body.name, head(&t.body.fits, 200))));
+            lines.extend(
+                techniques
+                    .iter()
+                    .take(3)
+                    .map(|(_, t)| format!("- [{}] {}: fits {}", plain(&t.id, 40), plain(&t.body.name, 80), plain(&t.body.fits, 200))),
+            );
         }
         if !recipes.is_empty() {
             lines.push("Recipes (run one with run_recipe):".into());
-            lines.extend(recipes.iter().take(3).map(|(_, r)| format!("- {}: {}", r.name, head(&r.about, 200))));
+            lines.extend(recipes.iter().take(3).map(|(_, r)| format!("- {}: {}", plain(&r.name, 80), plain(&r.about, 200))));
         }
         lines.push("</earlier_conversations_untrusted>".into());
         let text = lines.join("\n");
-        Ok(ToolResult::text(if text.len() > MAX_TEXT {
-            format!("{}\n</earlier_conversations_untrusted>", head(&text, MAX_TEXT))
+        Ok(ToolResult::text(if utf16_len(&text) > MAX_TEXT {
+            format!("{}\n</earlier_conversations_untrusted>", head(&text, MAX_TEXT - 40))
         } else {
             text
         }))

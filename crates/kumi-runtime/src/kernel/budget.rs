@@ -439,15 +439,28 @@ pub fn fit<'a>(history: &'a [Message], turn: &'a [Message], budget: &ContextBudg
 
 const CUT: &str = " … [Kumi cut the rest of this result: the request had no more room. Ask for less of it (a narrower read, a page, a filter) to see more.]";
 
-/// The results at `at`, each cut to an even share of `room` bytes (halving the share until they fit,
-/// down to an opening); None when there are none.
+/// The start of `text`, at most `bytes` long, ending between characters.
+pub fn opening(text: &str, bytes: usize) -> &str {
+    if text.len() <= bytes {
+        return text;
+    }
+    let mut end = bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// The results at `at`, each cut to an even share of `room` bytes (halving the share until they fit),
+/// never below an opening of `HEAD` bytes; None when there are none.
 fn cut_latest(turn: &[Message], at: usize, room: usize) -> Option<Vec<Message>> {
     let Message::Tool { content, provider_options } = &turn[at] else { return None };
     let count = content.iter().filter(|part| matches!(part, ToolPart::ToolResult(_))).count();
     if count == 0 {
         return None;
     }
-    let mut share = room / count;
+    let floor = HEAD + CUT.len();
+    let mut share = (room / count).max(floor);
     loop {
         let cut: Vec<ToolPart> = content
             .iter()
@@ -462,7 +475,7 @@ fn cut_latest(turn: &[Message], at: usize, room: usize) -> Option<Vec<Message>> 
                 if value.len() <= share && !pictures {
                     return part.clone();
                 }
-                let kept = if value.len() <= share { value } else { format!("{}{CUT}", head(&value, share.saturating_sub(CUT.len()))) };
+                let kept = if value.len() <= share { value } else { format!("{}{CUT}", opening(&value, share - CUT.len())) };
                 let mut result = result.clone();
                 result.output = match &result.output {
                     ToolResultOutput::ErrorText { provider_options, .. } => {
@@ -477,11 +490,11 @@ fn cut_latest(turn: &[Message], at: usize, room: usize) -> Option<Vec<Message>> 
             })
             .collect();
         let message = Message::Tool { content: cut, provider_options: provider_options.clone() };
-        if bytes_of(&message) <= room || share <= HEAD {
+        if bytes_of(&message) <= room || share == floor {
             let mut turn = turn.to_vec();
             turn[at] = message;
             return Some(turn);
         }
-        share /= 2;
+        share = (share / 2).max(floor);
     }
 }

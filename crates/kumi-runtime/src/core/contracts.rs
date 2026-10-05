@@ -329,9 +329,16 @@ pub trait ConversationStore {
     /// A conversation moves with its Set (an unsaved Set's, when the Set is first saved).
     async fn move_conversation(&self, id: &str, from: &str, to: &str) -> Result<(), RuntimeError>;
     /// Exchanges in every place's kept conversations that hold at least `needed` of `words`
-    /// (lowercase), most words first, then newest; at most `limit`.
-    async fn search(&self, words: &[String], needed: usize, limit: usize) -> Result<Vec<FoundExchange>, RuntimeError> {
-        let _ = (words, needed, limit);
+    /// (lowercase), most words first, then newest; at most `limit`. `skip` (place, id) is left out:
+    /// the conversation going on now.
+    async fn search(
+        &self,
+        words: &[String],
+        needed: usize,
+        limit: usize,
+        skip: Option<(&str, &str)>,
+    ) -> Result<Vec<FoundExchange>, RuntimeError> {
+        let _ = (words, needed, limit, skip);
         Ok(vec![])
     }
 }

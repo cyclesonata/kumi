@@ -637,13 +637,16 @@ local_test!(added_files_go_with_the_words_and_pictures_to_the_model, {
     let cases = [
         (attach(&missing, "image/png"), "gone.png isn't there any more; add it again."),
         (attach(&file("scan.tiff", 10), "image/tiff"), "The model sees PNG, JPEG, GIF and WebP pictures; save scan.tiff as one of those"),
-        (attach(&file("huge.png", 5 * 1024 * 1024 + 1), "image/png"), "huge.png is 5.0 MB; the model takes pictures up to 5 MB."),
+        (attach(&file("huge.png", 4 * 1024 * 1024), "image/png"), "huge.png is 4.0 MB; the model takes pictures up to 3.75 MB."),
         (attach(dir.path(), "application/octet-stream"), "is a folder; add the files in it instead."),
     ];
     for (attachment, refusal) in cases {
         let error = h.session.submit_with("make this", None, vec![attachment]).await.unwrap_err();
         assert!(error.message().contains(refusal), "{}", error.message());
     }
+    let big = |name: &str| attach(&file(name, 3 * 1024 * 1024), "image/png");
+    let error = h.session.submit_with("make this", None, (0..7).map(|i| big(&format!("shot{i}.png"))).collect()).await.unwrap_err();
+    assert!(error.message().contains("one message takes up to 20 MB of them"), "{}", error.message());
     let many = vec![attach(&reference, "audio/wav"); 11];
     assert!(h.session.submit_with("make this", None, many).await.unwrap_err().message().contains("at most 10 files"));
     assert_eq!(h.record.calls.borrow().len(), 2);

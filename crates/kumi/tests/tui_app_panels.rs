@@ -348,6 +348,11 @@ case!(recipes_run_and_fill_blanks, async {
     assert!(!h.calls().iter().any(|c| c.starts_with("submit")));
     h.type_text("/recipe \"resample twice\" track=\"My \\\"Bass\\\"\"\r").await;
     assert_eq!(resampled(h.calls())[1], r#"run-recipe:Resample twice {"track":"My \"Bass\""}"#);
+    // Unquoted, a number goes as a number, as the model would pass it; in quotes, as words.
+    h.type_text("/recipe \"resample twice\" track=124\r").await;
+    assert_eq!(resampled(h.calls())[2], r#"run-recipe:Resample twice {"track":124}"#);
+    h.type_text("/recipe \"resample twice\" track=\"124\"\r").await;
+    assert_eq!(resampled(h.calls())[3], r#"run-recipe:Resample twice {"track":"124"}"#);
     for (line, says) in [
         ("/recipe", "Run a recipe with: /recipe <name> blank=value"),
         ("/recipe \"Resample twice track=1", "Run a recipe with: /recipe <name> blank=value"),
@@ -359,7 +364,7 @@ case!(recipes_run_and_fill_blanks, async {
         h.has(says);
         h.type_text("\x15").await;
     }
-    assert_eq!(resampled(h.calls()).len(), 2);
+    assert_eq!(resampled(h.calls()).len(), 4);
     // What's pinned fills the blank named for it.
     h.emit(json!({"type":"pointed","pin":{"trackRef":"3:track:1","ref":"3:track:1","node":"track","name":"Bass","trail":[],"siblings":[],"live":true}}));
     h.type_text("/recipes\r").await;

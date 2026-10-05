@@ -391,7 +391,13 @@ impl ConversationStore for FileConversationStore {
         }
         self.trim(to).await
     }
-    async fn search(&self, words: &[String], needed: usize, limit: usize) -> Result<Vec<FoundExchange>, RuntimeError> {
+    async fn search(
+        &self,
+        words: &[String],
+        needed: usize,
+        limit: usize,
+        skip: Option<(&str, &str)>,
+    ) -> Result<Vec<FoundExchange>, RuntimeError> {
         if words.is_empty() || limit == 0 {
             return Ok(vec![]);
         }
@@ -410,8 +416,13 @@ impl ConversationStore for FileConversationStore {
         files.truncate(MAX_SEARCHED);
         let mut found = vec![];
         for (place, name, path, _) in files {
-            let Some(conversation) = Self::read(&path).await else { continue };
             let id = name[..name.len() - 5].to_owned();
+            if skip == Some((place.as_str(), id.as_str())) {
+                continue;
+            }
+            // Reading and scoring hundreds of files: the app keeps drawing between them.
+            tokio::task::yield_now().await;
+            let Some(conversation) = Self::read(&path).await else { continue };
             let mut exchange = |said: String, answer: String, tools: Vec<String>| {
                 let text = format!("{said}\n{answer}\n{}", tools.join(" ")).to_lowercase();
                 let matched = words.iter().filter(|word| text.contains(word.as_str())).count();

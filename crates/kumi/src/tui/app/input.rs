@@ -460,6 +460,11 @@ impl TuiApp {
                 self.notice(&problem, NoticeTone::Warn);
                 return Ok(());
             }
+            // The line stays in the box while Kumi works, to run once it's done.
+            if self.busy() {
+                self.notice("Kumi is still working: press enter again once it's done, or esc to stop it.", NoticeTone::Info);
+                return Ok(());
+            }
             self.clear_editor();
             self.run_recipe_now(recipe, with).await;
             return Ok(());
@@ -682,10 +687,17 @@ impl TuiApp {
     }
     /// ctrl+v: a picture on the clipboard, such as a screenshot, goes with the next message.
     fn paste_picture(&self) {
+        // One read at a time: PowerShell takes a couple of seconds to start.
+        if std::mem::replace(&mut self.0.state.borrow_mut().pasting, true) {
+            return;
+        }
+        self.notice("Reading the clipboard…", NoticeTone::Info);
         self.task(|app| async move {
-            let env: kumi_runtime::system::Env = std::env::vars().collect();
+            let env = attach::lossy_env();
             let folder = std::path::PathBuf::from(crate::config::kumi_dir(&env)).join("attachments");
-            match attach::clipboard_picture(&folder).await {
+            let read = attach::clipboard_picture(&folder).await;
+            app.0.state.borrow_mut().pasting = false;
+            match read {
                 Ok(Some(path)) => app.add_attachments(attach::attachment(&path).into_iter().collect()),
                 Ok(None) => app.notice("There's no picture on the clipboard. Drag a file in, or paste its path.", NoticeTone::Info),
                 Err(why) => app.notice(&format!("Kumi couldn't read the clipboard: {why}"), NoticeTone::Warn),

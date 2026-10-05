@@ -340,6 +340,21 @@ async fn pictures_the_producer_added_go_beside_their_words_in_the_request() {
 }
 
 #[tokio::test]
+async fn a_picture_goes_with_its_own_request_only_and_is_named_after() {
+    local(async {
+        let h = harness(|_, _| answer("A warm pad."), Options::default());
+        let picture = Picture { name: "synth.png".into(), media_type: "image/png".into(), data: vec![137, 80, 78, 71] };
+        h.kernel.run_with("make this", vec![picture], signal(), ignore()).await.unwrap();
+        h.kernel.run("now brighter", signal(), ignore()).await.unwrap();
+        let later = js(&h.request(1).prompt);
+        assert!(!later.contains("\"type\":\"file\""), "{later}");
+        assert!(later.contains("The producer showed synth.png with this message"), "{later}");
+        h.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn runs_tool_calls_between_model_steps_and_feeds_results_back() {
     local(async {
         let seen = Rc::new(RefCell::new(Vec::new()));

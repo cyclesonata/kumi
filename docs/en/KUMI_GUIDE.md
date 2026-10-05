@@ -145,10 +145,11 @@ stay. `/stop` stops Live (clips, the transport and recording) at any time.
 To show Kumi something, drag files into the window or press **Ctrl-V** for a
 picture on the clipboard, such as a screenshot of a synth: "make this". Each
 shows above the input box and goes with your next message; × or Backspace in an
-empty box takes one back. The model sees PNG, JPEG, GIF and WebP pictures up to
-5 MB. Other files, such as reference audio, a preset or a Live Set, go by their
-path for Kumi to use. A saved conversation keeps each file's name and path but
-not the picture itself. Clipboard pictures are kept in `~/.kumi/attachments`.
+empty box takes one back. The model sees PNG, JPEG, GIF and WebP pictures, up to
+3.75 MB each and 20 MB in one message. Other files, such as reference audio, a preset or a Live Set, go by their
+path for Kumi to use. A picture goes with its own message only: after it, the
+conversation, saved or not, keeps each file's name and path but not the picture.
+Clipboard pictures are kept in `~/.kumi/attachments` for a week.
 
 ## Talking to Kumi
 

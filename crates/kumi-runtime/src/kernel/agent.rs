@@ -20,7 +20,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
-use super::budget::{fit, put_away_images, transcript_of, ContextBudget, DEFAULT_BUDGET};
+use super::budget::{fit, opening, put_away_images, transcript_of, ContextBudget, DEFAULT_BUDGET};
 use super::failure::{describe_failure, retry_delay_ms, MAX_RETRIES};
 use crate::ai::error::LanguageModelError;
 use crate::ai::types::{
@@ -1183,14 +1183,13 @@ pub fn without_reasoning(messages: &[Message]) -> Vec<Message> {
 
 /// A tool's words, cut to their opening past MAX_TOOL_RESULT, with how much went and how to see more.
 fn capped(text: String) -> String {
-    let length = utf16_len(&text);
-    if length <= MAX_TOOL_RESULT {
+    if text.len() <= MAX_TOOL_RESULT {
         return text;
     }
     format!(
         "{}\n[Kumi cut the rest of this result: it was {} KB, and one result carries {} KB. Ask for less of it (a narrower read, a page, a filter) to see more.]",
-        head(&text, MAX_TOOL_RESULT - 256),
-        length / 1024,
+        opening(&text, MAX_TOOL_RESULT - 256),
+        text.len() / 1024,
         MAX_TOOL_RESULT / 1024
     )
 }
@@ -1229,10 +1228,29 @@ fn tool_output(outcome: Outcome) -> ToolResultOutput {
 /// that turn, and kept, they'd cost every later request (and a saved conversation) their size. The
 /// reasoning written after the first goes too, since it was written seeing them. A plain copy when there were none.
 pub fn without_images(messages: &[Message]) -> Vec<Message> {
-    let cleared = put_away_images(messages, 0);
-    let std::borrow::Cow::Owned(cleared) = cleared else { return messages.to_vec() };
-    let first = cleared.iter().zip(messages).position(|(after, before)| after != before).unwrap_or(cleared.len());
+    let cleared: Vec<Message> = put_away_images(messages, 0).iter().map(pictures_named).collect();
+    let Some(first) = cleared.iter().zip(messages).position(|(after, before)| after != before) else { return messages.to_vec() };
     [cleared[..first].to_vec(), without_reasoning(&cleared[first..])].concat()
+}
+
+/// A message without the pictures the producer added to it, each named in its place: they went with
+/// that request, and kept, every later one would carry them again.
+fn pictures_named(message: &Message) -> Message {
+    let Message::User { content, provider_options } = message else { return message.clone() };
+    if !content.iter().any(|part| matches!(part, UserPart::File(_))) {
+        return message.clone();
+    }
+    let content = content
+        .iter()
+        .map(|part| match part {
+            UserPart::File(file) => UserPart::Text(TextPart::new(format!(
+                "[The producer showed {} with this message; it went with that request only.]",
+                file.filename.as_deref().unwrap_or("a picture")
+            ))),
+            other => other.clone(),
+        })
+        .collect();
+    Message::User { content, provider_options: provider_options.clone() }
 }
 
 /// Stop waiting on abort without dropping the admitted execution: sent mutations still record
