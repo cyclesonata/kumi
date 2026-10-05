@@ -189,6 +189,8 @@ pub const STOPPED_NOTE: &str =
 /// The result of a call a stopped batch never ran, and of the one it was running.
 pub const STOPPED_BEFORE_RUNNING: &str = "Stopped before running; nothing was done.";
 pub const STOPPED_WHILE_RUNNING: &str = "Stopped while running; it may have changed Live, so check before running it again.";
+/// The result of a read away from Live that was stopped while it ran.
+pub const STOPPED_READING: &str = "Stopped while running; nothing came back.";
 
 /// The turn under way: guidance waiting for its next step, what it has said and done so far, and when it settles.
 struct Running {
@@ -837,94 +839,62 @@ impl Turn {
 
     /// Runs a step's calls in order. `reply` is set when all succeeded and some finished the request, or
     /// every call was quiet (an empty reply: done, nothing to add); then no model reply follows. A call
-    /// that started while it was written finishes with its whole input.
+    /// that started while it was written finishes with its whole input. Consecutive calls that only read
+    /// away from Live run together (`TOGETHER`), their results kept in the reply's order.
     ///
     /// Stopped partway, a batch keeps the calls that finished, and each of the rest gets a result saying
     /// it was stopped (every call needs one), so the next request doesn't redo what's done. A batch
     /// stopped before any call finished goes, as before.
     async fn execute(&self, calls: &[(ToolCall, Option<JsonObject>)]) -> Result<(Vec<ToolPart>, Option<String>), StepError> {
         let mut results = Vec::new();
+        let mut finished = 0;
         let mut replies: Vec<String> = Vec::new();
         let mut failed = false;
         let mut quiet = 0;
-        for (call, input) in calls {
+        while results.len() < calls.len() {
             if self.abort.is_cancelled() {
-                return self.stopped(results, calls, false);
+                return self.stopped(results, finished, calls);
             }
-            let streamed = self.early.borrow().get(&call.tool_call_id).cloned();
-            let begun = streamed.as_ref().and_then(|entry| entry.begun.get());
-            let started = begun.unwrap_or_else(perf_now);
-            if begun.is_none() {
-                (self.deliver)(KernelEvent::ToolStart { id: call.tool_call_id.clone(), name: call.tool_name.clone() });
-            }
-            // A streamed call that hadn't begun (its first step waiting for the next, to batch them) begins in
-            // finish: it's started now, so beginning there doesn't say so a second time.
-            if let Some(entry) = &streamed {
-                if entry.begun.get().is_none() {
-                    entry.begun.set(Some(started));
-                }
-            }
-            let tool = self.inner.tools.get(&call.tool_name).cloned();
-            let outcome = match tool {
-                None => Outcome {
-                    text: format!("Unknown tool {}; use only the supplied tools.", quote(&head(&call.tool_name, 64))),
-                    is_error: true,
-                    images: Vec::new(),
-                },
-                Some(_) if input.is_none() && streamed.is_none() => {
-                    Outcome { text: "Tool arguments must be a JSON object.".to_string(), is_error: true, images: Vec::new() }
-                }
-                Some(tool) => {
-                    let input = input.clone();
-                    let signal = self.abort.signal();
-                    let work = async move {
-                        match streamed {
-                            Some(entry) => entry.call.finish(input).await,
-                            None => tool.execute(input.unwrap_or_default(), signal).await,
-                        }
-                    };
-                    match until_aborted(work, &self.abort).await {
-                        Ok(result) => {
-                            let outcome = Outcome { text: capped(result.text), is_error: result.is_error, images: result.images };
-                            if !outcome.is_error {
-                                if let Some(reply) = result.reply {
-                                    let words = trim(&reply);
-                                    if words.is_empty() {
-                                        quiet += 1;
-                                    } else {
-                                        replies.push(head(words, MAX_REPLY));
-                                    }
-                                }
-                            }
-                            outcome
-                        }
-                        Err(error) => {
-                            if self.abort.is_cancelled() {
-                                return self.stopped(results, calls, true);
-                            }
-                            Outcome { text: head(&error.to_string(), MAX_TOOL_ERROR), is_error: true, images: Vec::new() }
-                        }
-                    }
-                }
+            let rest = &calls[results.len()..];
+            // At most four at once: a reply can ask for many pages, and search services limit bursts.
+            let together = rest.iter().take_while(|(call, _)| TOGETHER.contains(&call.tool_name.as_str())).take(4).count();
+            let group = &rest[..together.max(1)];
+            let ran = if group.len() > 1 {
+                let began = perf_now();
+                let ran = join_all(group.iter().map(|(call, input)| self.call(call, input, false))).await;
+                crate::core::timing::tools(group.len() as u32, round(perf_now() - began).max(0.0) as u64);
+                ran
+            } else {
+                vec![self.call(&group[0].0, &group[0].1, true).await]
             };
-            failed |= outcome.is_error;
-            let elapsed_ms = round(perf_now() - started).max(0.0) as u64;
-            crate::core::timing::tool(elapsed_ms);
-            (self.deliver)(KernelEvent::ToolEnd {
-                id: call.tool_call_id.clone(),
-                name: call.tool_name.clone(),
-                is_error: outcome.is_error,
-                elapsed_ms,
-            });
-            results.push(ToolPart::ToolResult(ToolResultPart {
-                tool_call_id: call.tool_call_id.clone(),
-                tool_name: call.tool_name.clone(),
-                output: tool_output(outcome),
-                provider_options: None,
-            }));
+            for ((call, _), ran) in group.iter().zip(ran) {
+                let outcome = match ran {
+                    Ran::Stopped => {
+                        // A read away from Live can't have changed it.
+                        let text = if TOGETHER.contains(&call.tool_name.as_str()) { STOPPED_READING } else { STOPPED_WHILE_RUNNING };
+                        Outcome { text: text.into(), is_error: true, images: Vec::new() }
+                    }
+                    Ran::Done { outcome, reply } => {
+                        finished += 1;
+                        match reply.filter(|_| !outcome.is_error) {
+                            Some(words) if words.is_empty() => quiet += 1,
+                            Some(words) => replies.push(words),
+                            None => {}
+                        }
+                        outcome
+                    }
+                };
+                failed |= outcome.is_error;
+                results.push(ToolPart::ToolResult(ToolResultPart {
+                    tool_call_id: call.tool_call_id.clone(),
+                    tool_name: call.tool_name.clone(),
+                    output: tool_output(outcome),
+                    provider_options: None,
+                }));
+            }
         }
         if self.abort.is_cancelled() {
-            return self.stopped(results, calls, false);
+            return self.stopped(results, finished, calls);
         }
         let reply = if !failed && !replies.is_empty() {
             Some(replies.join("\n\n"))
@@ -936,28 +906,98 @@ impl Turn {
         Ok((results, reply))
     }
 
-    /// A batch's results once it's stopped: the finished calls', then a stopped result for each of the
-    /// rest, the first marked as running when it was cut off. None finished: the batch goes.
+    /// One call, from its start to its result. `alone`: not one of calls running together, whose time
+    /// is the group's, not the sum of theirs.
+    async fn call(&self, call: &ToolCall, input: &Option<JsonObject>, alone: bool) -> Ran {
+        let streamed = self.early.borrow().get(&call.tool_call_id).cloned();
+        let begun = streamed.as_ref().and_then(|entry| entry.begun.get());
+        let started = begun.unwrap_or_else(perf_now);
+        if begun.is_none() {
+            (self.deliver)(KernelEvent::ToolStart { id: call.tool_call_id.clone(), name: call.tool_name.clone() });
+        }
+        // A streamed call that hadn't begun (its first step waiting for the next, to batch them) begins in
+        // finish: it's started now, so beginning there doesn't say so a second time.
+        if let Some(entry) = &streamed {
+            if entry.begun.get().is_none() {
+                entry.begun.set(Some(started));
+            }
+        }
+        let tool = self.inner.tools.get(&call.tool_name).cloned();
+        let mut reply = None;
+        let outcome = match tool {
+            None => Outcome {
+                text: format!("Unknown tool {}; use only the supplied tools.", quote(&head(&call.tool_name, 64))),
+                is_error: true,
+                images: Vec::new(),
+            },
+            Some(_) if input.is_none() && streamed.is_none() => {
+                Outcome { text: "Tool arguments must be a JSON object.".to_string(), is_error: true, images: Vec::new() }
+            }
+            Some(tool) => {
+                let input = input.clone();
+                let signal = self.abort.signal();
+                let work = async move {
+                    match streamed {
+                        Some(entry) => entry.call.finish(input).await,
+                        None => tool.execute(input.unwrap_or_default(), signal).await,
+                    }
+                };
+                match until_aborted(work, &self.abort).await {
+                    Ok(result) => {
+                        reply = result.reply.map(|words| head(trim(&words), MAX_REPLY));
+                        Outcome { text: capped(result.text), is_error: result.is_error, images: result.images }
+                    }
+                    Err(_) if self.abort.is_cancelled() => return Ran::Stopped,
+                    Err(error) => Outcome { text: head(&error.to_string(), MAX_TOOL_ERROR), is_error: true, images: Vec::new() },
+                }
+            }
+        };
+        let elapsed_ms = round(perf_now() - started).max(0.0) as u64;
+        if alone {
+            crate::core::timing::tool(elapsed_ms);
+        }
+        (self.deliver)(KernelEvent::ToolEnd {
+            id: call.tool_call_id.clone(),
+            name: call.tool_name.clone(),
+            is_error: outcome.is_error,
+            elapsed_ms,
+        });
+        Ran::Done { outcome, reply }
+    }
+
+    /// A batch's results once it's stopped: the finished calls' and those cut off while running, then a
+    /// stopped result for each of the rest. None finished: the batch goes.
     fn stopped(
         &self,
         mut results: Vec<ToolPart>,
+        finished: usize,
         calls: &[(ToolCall, Option<JsonObject>)],
-        running: bool,
     ) -> Result<(Vec<ToolPart>, Option<String>), StepError> {
-        if results.is_empty() {
+        if finished == 0 {
             return Err(StepError::Aborted);
         }
-        for (index, (call, _)) in calls[results.len()..].iter().enumerate() {
-            let text = if running && index == 0 { STOPPED_WHILE_RUNNING } else { STOPPED_BEFORE_RUNNING };
+        for (call, _) in &calls[results.len()..] {
             results.push(ToolPart::ToolResult(ToolResultPart {
                 tool_call_id: call.tool_call_id.clone(),
                 tool_name: call.tool_name.clone(),
-                output: tool_output(Outcome { text: text.into(), is_error: true, images: Vec::new() }),
+                output: tool_output(Outcome { text: STOPPED_BEFORE_RUNNING.into(), is_error: true, images: Vec::new() }),
                 provider_options: None,
             }));
         }
         Ok((results, None))
     }
+}
+
+/// Tools that only read, away from Live: the web, the library and its samples, Live's manual, earlier
+/// conversations. Consecutive calls to them in one reply run together.
+const TOGETHER: &[&str] = &["search_web", "read_web", "find_sounds", "find_presets", "my_sets", "live_manual", "search_conversations"];
+
+/// What one call came to.
+enum Ran {
+    /// It finished, with its reply to the producer when it has one ("" when it's quiet).
+    Done { outcome: Outcome, reply: Option<String> },
+    /// Stop came while it ran.
+    Stopped,
 }
 
 /// `delay(ms, { signal })`: a wait that ends early, as an abort, when the signal fires.

@@ -6228,13 +6228,15 @@ class _BridgeSocketFixture:
         channel = AuthenticatedRemoteScript(self.SECRET, lambda *_: None, hello["bridgeEpoch"], hello["connectionChallenge"])
         return client, channel
 
-    def read_lines(self, client, count, ticks=2000):
-        """Tick the bridge until count response lines arrived; return them parsed."""
+    def read_lines(self, client, count, seconds=10.0):
+        """Tick the bridge until count response lines arrived; return them parsed. Bounded by time, not
+        ticks: on a busy machine the loopback lags behind ticks that wait for nothing."""
         import select
         buffer = self.buffers[client]; lines = []
-        for _ in range(ticks):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
             self.bridge.update_display()
-            while select.select([client], [], [], 0)[0]:
+            while select.select([client], [], [], 0.001)[0]:
                 chunk = client.recv(1 << 20)
                 if not chunk: break
                 buffer.extend(chunk)

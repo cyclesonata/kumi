@@ -141,6 +141,14 @@ pub fn tool(elapsed_ms: u64) {
     });
 }
 
+/// Calls that ran together: how many, and the time they took between them.
+pub fn tools(count: u32, elapsed_ms: u64) {
+    with(|timing| {
+        timing.tools += count;
+        timing.tool_ms += elapsed_ms;
+    });
+}
+
 pub fn live_request() {
     with(|timing| timing.live_requests += 1);
 }
