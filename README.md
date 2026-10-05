@@ -101,7 +101,7 @@ The TypeScript source remains the parity reference. Node.js 22 or 24 is needed o
 | --- | --- |
 | `crates/kumi` | The native terminal app and `kumi` command |
 | `crates/kumi-runtime` | Model providers, memory, audio analysis, video, the web, and the Live integration |
-| `crates/ableton-mcp-server` | The native bridge, also usable by other MCP clients ([bridge guide](apps/mcp-server/README.md)) |
+| `crates/ableton-mcp-server` | The native bridge, also usable by other MCP clients ([bridge guide](crates/ableton-mcp-server/README.md)) |
 | `remote-script` | The bridge's Remote Script, which runs inside Live |
 | `apps/live-extension` | Kumi's Live extension (Live 12.4 and later) |
 | `protocol` | The list of operations the bridge and the Remote Script share |

@@ -100,7 +100,7 @@ TypeScript 保留为兼容性验证的参考实现。它的 `npm ci`、`npm run 
 | --- | --- |
 | `crates/kumi` | 终端应用和 `kumi` 命令 |
 | `crates/kumi-runtime` | Kumi 的代理核心：模型提供方、记忆、音频分析、视频、网络，以及与 Live 的集成 |
-| `crates/ableton-mcp-server` | 桥接：由 Kumi 启动的本地 MCP 服务器，也可单独与其他 MCP 客户端配合使用（[桥接指南（英文）](apps/mcp-server/README.md)） |
+| `crates/ableton-mcp-server` | 桥接：由 Kumi 启动的本地 MCP 服务器，也可单独与其他 MCP 客户端配合使用（[桥接指南（英文）](crates/ableton-mcp-server/README.md)） |
 | `remote-script` | 桥接的 Remote Script，运行在 Live 内部 |
 | `apps/live-extension` | Kumi 的 Live 扩展（Live 12.4 及更高版本） |
 | `protocol` | 桥接与 Remote Script 共用的操作列表 |

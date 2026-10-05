@@ -38,8 +38,6 @@ __pycache__/
 
 # Local review bookkeeping
 docs/evidence/willington-review.json
-# Kumi's Mac helper, built for releases (scripts/build-hands.mjs)
-packages/runtime/hands/
 
 /target/
 

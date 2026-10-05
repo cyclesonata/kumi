@@ -1,7 +1,7 @@
 # Ableton MCP Beyond
 
 The Ableton Live bridge behind Kumi, also usable on its own. It is a local MCP
-server, `@ableton-mcp/mcp-server`, plus a Remote Script that runs inside
+server, `ableton-mcp-server`, plus a Remote Script that runs inside
 Live 12. Through it, any MCP client can:
 
 - read the open Set;
@@ -44,9 +44,8 @@ For a configured connection, follow [delivery](https://github.com/user1303836/ku
 ./target/release/ableton-mcp-server diagnostics --config /absolute/path/bridge-config.json
 ```
 
-Native packages include the server, its sibling analysis worker, Remote Script and Live extension.
-They need no separate Node runtime. The retained TypeScript implementation and its npm commands
-are the parity reference and legacy package tooling; those use Node.js 22 or 24.
+Native packages include the server, its sibling analysis worker, the Remote Script and the Live
+extension. They need no Node runtime.
 
 ## What's in the package
 
@@ -87,8 +86,8 @@ Every guide is also in Japanese and Simplified Chinese:
 [简体中文](https://github.com/user1303836/kumi/blob/main/docs/zh-CN/USER_GUIDE.md).
 
 A release tarball carries the same guides under `release-docs/`, matching its
-version; prefer those when they differ from `main`. The package has its own
-lockfile, build and tests, and doesn't need Kumi installed.
+version; prefer those when they differ from `main`. The bridge builds and tests
+with Cargo on its own, and doesn't need Kumi installed.
 
 MIT licensed. Release tarballs are unsigned. Ableton Live is a trademark of
 Ableton AG; this project is not affiliated with or endorsed by Ableton.
