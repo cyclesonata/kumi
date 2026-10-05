@@ -1,4 +1,4 @@
-//! Port of `apps/kumi/src/update.ts`, rebuilding and launching native binaries.
+//! `kumi update` for a checkout: pulls, rebuilds and launches native binaries.
 use crate::{
     bridge_setup::{default_run, executable_name, is_live_running, repository_dir, AsyncBool, Ran, Run},
     config::find_bridge_config,

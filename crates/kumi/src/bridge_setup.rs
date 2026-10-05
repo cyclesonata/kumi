@@ -1,4 +1,4 @@
-//! Port of `apps/kumi/src/bridge-setup.ts` using native bridge executables.
+//! `kumi bridge`: installs and updates the native bridge.
 use crate::{input::TerminalInput, tui::tty::TtyOutput};
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::{abort::Signal, js::string::trim};

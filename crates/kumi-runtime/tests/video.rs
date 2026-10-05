@@ -1,4 +1,4 @@
-//! Port of `packages/runtime/test/video.test.ts`, with complete-result TypeScript caption/moment oracles.
+//! Video watching, with complete-result caption and moment oracles.
 use kumi_common::{abort::Signal, js::json::stringify};
 use kumi_runtime::video::{
     captions::{said_around, TranscriptOptions},

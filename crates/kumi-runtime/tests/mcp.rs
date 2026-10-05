@@ -1,5 +1,3 @@
-//! Port of `packages/runtime/test/mcp.test.ts`.
-
 use async_trait::async_trait;
 use kumi_common::abort::{self, Controller, Signal};
 use kumi_runtime::{

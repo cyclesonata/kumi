@@ -1,4 +1,4 @@
-//! Port of `packages/runtime/test/web.test.ts` and complete-result source oracles.
+//! Web reading, with complete-result oracles.
 use kumi_runtime::web::html::{html_to_text, read_html};
 use serde_json::Value;
 #[test]

@@ -1,4 +1,3 @@
-//! Native counterparts of `apps/mcp-server/test/remote-adapter.test.ts`.
 use ableton_mcp_server::{
     bridge::remote_adapter::*,
     live::*,

@@ -1,4 +1,3 @@
-//! Port of `packages/runtime/src/audio/dsp.ts`.
 //! The signal processing Kumi's listening is built from: FFT, windows, filters, conversions.
 
 use serde::{Deserialize, Serialize};

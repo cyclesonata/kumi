@@ -1,5 +1,3 @@
-//! Port of `apps/mcp-server/src/host.ts`.
-//!
 //! Host helpers are shared by the exact request and transaction families.
 
 #![allow(dead_code)]

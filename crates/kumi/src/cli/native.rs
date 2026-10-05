@@ -1,4 +1,4 @@
-//! Command dispatch and native process I/O from `apps/kumi/src/cli.ts`.
+//! Command dispatch and native process I/O.
 mod session;
 mod shutdown;
 use crate::{

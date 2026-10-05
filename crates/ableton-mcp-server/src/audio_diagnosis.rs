@@ -1,5 +1,3 @@
-//! Port of `apps/mcp-server/src/audio-diagnosis.ts`.
-
 use kumi_common::js::{json, number};
 use kumi_common::time::{iso_string, now_ms};
 use serde::{Deserialize, Serialize};

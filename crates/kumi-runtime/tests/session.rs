@@ -1,4 +1,4 @@
-//! Session behavior ported from packages/runtime/test/session.test.ts.
+//! Session behavior.
 use async_trait::async_trait;
 use futures::{future::LocalBoxFuture, FutureExt};
 use kumi_common::abort::Signal;

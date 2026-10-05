@@ -1,4 +1,4 @@
-//! Port of `apps/kumi/test/update.test.ts`, rebuilding with Cargo.
+//! `kumi update` for a checkout, rebuilding with Cargo.
 use futures::FutureExt;
 use kumi::{
     bridge_setup::{executable_name, Ran, Run},
