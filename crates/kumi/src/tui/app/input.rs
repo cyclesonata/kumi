@@ -13,6 +13,18 @@ impl TuiApp {
         if self.0.state.borrow().closing {
             return;
         }
+        if self.setup_active() {
+            // A sign-in under way takes its own keys; its esc goes back to the setup's choices.
+            let signing =
+                self.0.state.borrow().panel.as_ref().is_some_and(|p| matches!(&*p.borrow(), Panel::Key { .. } | Panel::ChatGpt { .. }));
+            match event {
+                InputEvent::Key { .. } | InputEvent::Text { .. } | InputEvent::Paste { .. } if signing => self.panel_input(event),
+                InputEvent::Key { name, mods, .. } => self.setup_key(&name, mods),
+                _ => {}
+            }
+            self.0.scheduler.request();
+            return;
+        }
         let panel = self.0.state.borrow().panel.clone();
         let busy_panel = panel.as_ref().is_some_and(|p| match &*p.borrow() {
             Panel::Pick { .. } => false,

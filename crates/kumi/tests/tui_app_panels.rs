@@ -166,35 +166,6 @@ case!(local_models_choices_default_network_retry_and_closed_startup, async {
     assert!(!has(&h.screen(), "Sign in to"));
     h.close().await;
 });
-case!(first_run_offers_to_connect_live_and_closes_to_connect, async {
-    let requested = Rc::new(Cell::new(0));
-    let connect = |requested: &Rc<Cell<i32>>| {
-        let r = requested.clone();
-        kumi::tui::app::ConnectLive {
-            why: "The Ableton bridge isn't in Live yet, so Kumi can't see your Set.".into(),
-            request: Rc::new(move || r.set(r.get() + 1)),
-        }
-    };
-    let h = Harness::with(160, 36, Rc::new(Control::default()), |o| o.connect_live = Some(connect(&requested)));
-    h.start().await;
-    for s in ["Connect Kumi to Live", "Connect now", "The Ableton bridge isn't in Live yet", "Later"] {
-        h.has(s)
-    }
-    // Later: chat without Live, and nothing to connect.
-    h.type_text("\x1b[B\r").await;
-    assert!(!has(&h.screen(), "Connect Kumi to Live"));
-    h.close().await;
-    assert_eq!(requested.get(), 0);
-    // Connect now: the app closes for Kumi to connect, and opens again after.
-    let h = Harness::with(160, 36, Rc::new(Control::default()), |o| o.connect_live = Some(connect(&requested)));
-    let done = h.app.run();
-    delay(5).await;
-    h.has("Connect Kumi to Live");
-    h.type_text("\r").await;
-    assert_eq!(done.await, 0);
-    assert_eq!(requested.get(), 1);
-    h.close().await;
-});
 case!(update_offers_checks_and_closes_after_confirmation, async {
     let requested = Rc::new(Cell::new(0));
     let unreachable = Rc::new(Cell::new(false));

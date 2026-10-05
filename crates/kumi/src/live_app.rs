@@ -100,6 +100,31 @@ pub async fn start(run: &Run, platform: &str, env: &Env, app: Option<&str>) -> b
     }
 }
 
+/// "12.4" from a version such as "12.4.15b5" or "12.4b15": its first two numbers.
+pub fn major_minor(version: &str) -> Option<String> {
+    let mut parts = version.trim().split(|c: char| !c.is_ascii_digit());
+    let major = parts.next().filter(|p| !p.is_empty())?;
+    let minor = parts.next().filter(|p| !p.is_empty());
+    Some(minor.map(|minor| format!("{major}.{minor}")).unwrap_or_else(|| major.into()))
+}
+
+/// Live's version ("12.4"), read from its app: `app`, or else the Live that's open.
+pub async fn version(run: &Run, platform: &str, env: &Env, app: Option<&str>) -> Option<String> {
+    let app = match app {
+        Some(app) => app.to_string(),
+        None => open_live(run, platform, env).await?.app,
+    };
+    let read = match platform {
+        "darwin" => run("defaults".into(), args(&["read", &format!("{app}/Contents/Info"), "CFBundleShortVersionString"]), None).await,
+        "win32" => {
+            let script = format!("(Get-Item -LiteralPath {}).VersionInfo.ProductVersion", quoted(&app));
+            run(powershell(env, platform), args(&["-NoProfile", "-NonInteractive", "-Command", &script]), None).await
+        }
+        _ => return None,
+    };
+    (read.code == 0).then(|| major_minor(&read.stdout)).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -165,5 +190,30 @@ mod tests {
         let stop = Signal::new();
         stop.cancel();
         assert!(!closed(&run, "darwin", &env, &stop).await);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lives_version_is_read_from_its_app() {
+        for (raw, want) in [("12.4.15b5", Some("12.4")), ("12.4b15", Some("12.4")), ("12", Some("12")), ("", None), ("beta", None)] {
+            assert_eq!(major_minor(raw).as_deref(), want, "{raw}");
+        }
+        let calls = Rc::new(RefCell::new(Vec::<String>::new()));
+        let run: Run = {
+            let calls = calls.clone();
+            Rc::new(move |command, args, _| {
+                calls.borrow_mut().push(format!("{command} {}", args.join(" ")));
+                let stdout = match command.as_str() {
+                    "ps" => "/Applications/Ableton Live 12 Beta.app/Contents/MacOS/Live\n",
+                    "defaults" => "12.4b15\n",
+                    _ => "",
+                };
+                let ran = Ran { code: 0, stdout: stdout.into(), stderr: String::new() };
+                async move { ran }.boxed_local()
+            })
+        };
+        let env = Env::new();
+        assert_eq!(version(&run, "darwin", &env, None).await.as_deref(), Some("12.4"));
+        assert_eq!(calls.borrow()[1], "defaults read /Applications/Ableton Live 12 Beta.app/Contents/Info CFBundleShortVersionString");
+        assert_eq!(version(&run, "linux", &env, Some("/x")).await, None);
     }
 }
