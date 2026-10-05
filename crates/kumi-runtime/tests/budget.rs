@@ -5,6 +5,7 @@ use kumi_runtime::ai::types::{
     AssistantPart, DataContent, FileData, Message, ReasoningPart, TextPart, ToolCallPart, ToolPart, ToolResultContentItem,
     ToolResultOutput, ToolResultPart, UserPart,
 };
+use kumi_runtime::kernel::agent::CARRY_ON_NOTE;
 use kumi_runtime::kernel::budget::{drop_earliest, fit, transcript_of, ContextBudget, ASKED, OBSERVATION_MARKER, SHORTENED};
 use serde::Serialize;
 use serde_json::json;
@@ -363,4 +364,40 @@ fn images_count_at_what_they_cost_a_model_not_their_size_past_the_most_a_request
         output_of(trimmed.get(1)).as_deref(),
         Some("frames i0\n[An image was shown here; it's no longer attached (the tool shows it again when asked).]")
     );
+}
+
+#[test]
+fn a_carried_on_answer_leaves_kumis_note_out_of_the_list_and_the_transcript() {
+    let budget = budget(4096.0, 16.0 * 1024.0);
+    // An answer that broke off and was carried on: the words shown, Kumi's note, then the rest.
+    let carried = |shown: usize, rest: usize| {
+        vec![
+            user(&observed("Make the bass warmer")),
+            said(&format!("The Reese needs {}", "w".repeat(shown))),
+            user(CARRY_ON_NOTE),
+            said(&format!(" a darker filter. {}", "w".repeat(rest))),
+            user(&observed("now the drums")),
+            said(&"w".repeat(3000)),
+        ]
+    };
+    let turn = vec![user(&observed("and the hats"))];
+    let shown = |history: &[Message]| transcript_of(serde_json::to_value(history).unwrap().as_array().unwrap());
+
+    // The cut passes the note: the list keeps only the producer's words.
+    let history = carried(3000, 14_000);
+    let fitted = fit(&history, &turn, &budget);
+    let kept = [fitted.history.into_owned(), fitted.turn.into_owned()].concat();
+    let first = text_of(kept.first()).unwrap();
+    assert!(first.starts_with(&format!("{SHORTENED}{ASKED}- Make the bass warmer\n\nnow the drums")), "{first}");
+    assert!(!serde_json::to_string(&kept).unwrap().contains("connection dropped"), "{first}");
+
+    // The kept part starts at the note: the transcript still leaves it out, and the answer's rest stays.
+    let history = carried(14_000, 3000);
+    let fitted = fit(&history, &turn, &budget);
+    let kept = [fitted.history.into_owned(), fitted.turn.into_owned()].concat();
+    let first = text_of(kept.first()).unwrap();
+    assert!(first.starts_with(&format!("{SHORTENED}{ASKED}- Make the bass warmer\n\n")) && first.ends_with(CARRY_ON_NOTE), "{first}");
+    let lines = shown(&kept);
+    assert!(!lines.iter().any(|line| line.text.contains("connection dropped")), "{lines:?}");
+    assert!(lines[0].text.starts_with("a darker filter."), "{lines:?}");
 }
