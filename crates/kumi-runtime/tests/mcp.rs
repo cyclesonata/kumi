@@ -38,13 +38,13 @@ fn node() -> PathBuf {
     std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join(if cfg!(windows) { "node.exe" } else { "node" }))
         .find(|path| path.is_file())
-        .expect("MCP SDK interoperability tests need Node and npm ci")
+        .expect("MCP SDK interoperability tests need Node and: npm ci --prefix crates/kumi-runtime/tests/support")
 }
 fn options(mode: &str, timeout: u64) -> Options {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     Options {
         entry: Some(node()),
-        args: vec![root.join("packages/runtime/test/fixtures/mcp-server.mjs").to_string_lossy().into(), mode.into()],
+        args: vec![PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/support/mcp-server.mjs").to_string_lossy().into(), mode.into()],
         signal: signal(),
         timeout_ms: Some(timeout),
         connect_timeout_ms: Some(timeout.max(10_000)),

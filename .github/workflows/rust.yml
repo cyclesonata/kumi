@@ -39,8 +39,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - name: Install the reference MCP SDK for interoperability tests
-        run: npm ci --ignore-scripts
+          cache-dependency-path: crates/kumi-runtime/tests/support/package-lock.json
+      - name: Install the official MCP and model SDKs the interoperability tests run beside Kumi's
+        run: npm ci --prefix crates/kumi-runtime/tests/support --ignore-scripts
       - run: cargo fmt --all --check
       - name: Windows input regressions
         if: runner.os == 'Windows'

@@ -279,15 +279,9 @@ jobs:
         with:
           name: kumi-release
           path: release
-      - name: Build the authoritative JavaScript reference for updater interoperability
+      - name: Fetch the last JavaScript release (Kumi 1.7.5), whose updater existing installations run
         shell: bash
-        run: |
-          npm ci --ignore-scripts
-          npm run build
-          npm ci --prefix apps/mcp-server --ignore-scripts
-          npm run build --prefix apps/mcp-server
-          # Retain the last JavaScript release identity; all updater implementation remains the source build.
-          python3 -c 'from pathlib import Path; import re; p=Path("packages/runtime/dist/src/version.js"); p.write_text(re.sub(r"KUMI_VERSION = [^;]+", "KUMI_VERSION = \"1.7.5\"", p.read_text()))'
+        run: echo "KUMI_LEGACY_APP=$(python3 scripts/fetch-legacy-release.py "$RUNNER_TEMP/kumi-1.7.5")" >> "$GITHUB_ENV"
       - name: Verify old updater, native probes, data preservation and rollback
         env:
           KUMI_NATIVE_RELEASES: ${{ github.workspace }}/release

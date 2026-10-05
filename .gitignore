@@ -32,6 +32,7 @@ __pycache__/
 /packages/runtime/node_modules/
 /packages/runtime/dist/
 /apps/live-extension/node_modules/
+/crates/kumi-runtime/tests/support/node_modules/
 # scripts/build-release.mjs output
 /release/
 
