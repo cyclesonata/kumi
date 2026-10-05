@@ -690,9 +690,16 @@ local_test!(saved_conversation_restart_new_and_explicit_resume, {
     assert!(two.words(1).is_none());
     assert!(two.notice("The last one is kept"));
     two.session.submit("a new idea", None).await.unwrap();
-    saved(store.as_ref(), "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1).await;
-    delay(10).await;
-    let listed = two.session.conversations().await.unwrap();
+    // The kept conversation already has a turn, so waiting for one says nothing about the new one:
+    // wait until both are listed (up to 2 s; a busy Windows runner writes slowly).
+    let mut listed = vec![];
+    for _ in 0..1000 {
+        listed = two.session.conversations().await.unwrap();
+        if listed.len() == 2 {
+            break;
+        }
+        delay(2).await;
+    }
     assert_eq!(listed.len(), 2);
     let original = listed.iter().find(|r| r.first == "remember 42").unwrap();
     assert!(two.session.resume_conversation(&original.id).await.unwrap());
