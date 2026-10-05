@@ -59,39 +59,55 @@ pub(super) async fn probe_live(config: String, factory: AbletonFactory) -> docto
     let _ = integration.close().await;
     result.unwrap_or(doctor::LiveProbe { started: true, connected: Some(false), ..Default::default() })
 }
-/// Live starts answering once it's open with AbletonMcpBridge chosen as a Control Surface: then the
-/// session reconnects by itself. Watching stops after an hour, or when the session has gone.
-async fn connect_when_live_answers(
-    config: String,
+/// How the watch for Live paces itself: a look at Live's port every `look_ms`, and while it answers
+/// but the session isn't connected, a reconnect at once and then every `retry_ms`, at most `tries`
+/// times until it stops answering (then the count starts again). It ends after `looks`.
+struct Pace {
+    look_ms: u64,
+    retry_ms: u64,
+    tries: u32,
+    looks: u32,
+}
+const PACE: Pace = Pace { look_ms: 2_000, retry_ms: 20_000, tries: 10, looks: 1_800 };
+
+/// Live answers once it's open with AbletonMcpBridge chosen as a Control Surface: then the session
+/// reconnects by itself. Live can accept connections before it's ready (a dialog open, a Set still
+/// loading), so a failed reconnect is tried again while it answers. Watching ends once connected,
+/// after an hour, or when the session has gone.
+async fn connect_when_live_answers<F, A>(
+    answers: F,
     controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
     emit: Rc<dyn Fn(SessionEvent)>,
     watching: Rc<Cell<bool>>,
-) {
-    let mut answered = bridge_setup::remote_script_answers(&config).await;
-    for _ in 0..1800 {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let answers = bridge_setup::remote_script_answers(&config).await;
-        if answers && !answered {
-            // A turn under way finishes first.
-            for _ in 0..150 {
-                let Some(session) = controller.borrow().as_ref().and_then(Weak::upgrade) else { break };
-                if !session.has_reconnect() {
+    pace: Pace,
+) where
+    F: Fn() -> A,
+    A: std::future::Future<Output = bool>,
+{
+    let mut tries = 0;
+    let mut next: Option<std::time::Instant> = Some(std::time::Instant::now());
+    for _ in 0..pace.looks {
+        let Some(session) = controller.borrow().as_ref().and_then(Weak::upgrade) else { break };
+        if session.status().connection == ConnectionState::Connected {
+            break;
+        }
+        if answers().await {
+            if tries < pace.tries && next.is_some_and(|at| std::time::Instant::now() >= at) {
+                tries += 1;
+                // A turn under way makes this fail; it's tried again later.
+                if session.has_reconnect() && session.reconnect().await.is_ok() && session.status().connection == ConnectionState::Connected
+                {
+                    emit(SessionEvent::Notice { message: "Live answered, so Kumi is connected to it now.".into() });
                     break;
                 }
-                if session.reconnect().await.is_ok() {
-                    if session.status().connection == ConnectionState::Connected {
-                        emit(SessionEvent::Notice { message: "Live answered, so Kumi is connected to it now.".into() });
-                    }
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                next = Some(std::time::Instant::now() + std::time::Duration::from_millis(pace.retry_ms));
             }
-            break;
+        } else {
+            tries = 0;
+            next = Some(std::time::Instant::now());
         }
-        answered = answers;
-        if controller.borrow().as_ref().and_then(Weak::upgrade).is_none() {
-            break;
-        }
+        drop(session);
+        tokio::time::sleep(std::time::Duration::from_millis(pace.look_ms)).await;
     }
     watching.set(false);
 }
@@ -293,19 +309,23 @@ pub(super) async fn run_session(
                 Rc::new(move |message| {
                     let installed = doctor::read_bridge_server(&bridge_config).ok().and_then(|s| s.version);
                     let current = installed.is_some() && installed == bundled;
-                    emit(SessionEvent::Notice {
-                        message: if current {
-                            "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Kumi connects by itself once Live answers.".into()
-                        } else {
-                            message
-                        },
-                    });
-                    if current && !watching_live.replace(true) {
+                    if !current {
+                        emit(SessionEvent::Notice { message });
+                    } else if !watching_live.replace(true) {
+                        // Said once: the watch's own retries fall back here too, quietly.
+                        emit(SessionEvent::Notice {
+                            message: "Kumi's bridge couldn't reach Live, so this is chat without Live. Open Live and choose AbletonMcpBridge as a Control Surface (Settings → Link, Tempo & MIDI); if Live is showing a dialog, answer it. Kumi connects by itself once Live answers.".into(),
+                        });
+                        let config = bridge_config.clone();
                         tokio::task::spawn_local(connect_when_live_answers(
-                            bridge_config.clone(),
+                            move || {
+                                let config = config.clone();
+                                async move { bridge_setup::remote_script_answers(&config).await }
+                            },
                             controller.clone(),
                             emit.clone(),
                             watching_live.clone(),
+                            PACE,
                         ));
                     }
                 }),
@@ -514,5 +534,93 @@ pub(super) async fn run_session(
         super::connect_and_reopen(&io).await
     } else {
         Ok(code)
+    }
+}
+
+#[cfg(test)]
+mod watch_tests {
+    use super::*;
+    use kumi_runtime::core::contracts::{ChangeRecord, PinnedNode, SessionStatus, TurnState};
+
+    struct Fake {
+        reconnects: Cell<u32>,
+        connect_on: u32,
+        connected: Cell<bool>,
+    }
+    #[async_trait(?Send)]
+    impl SessionController for Fake {
+        async fn start(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn submit(&self, _: &str, _: Option<PinnedNode>) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn refresh(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn new_conversation(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn cancel(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn close(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn status(&self) -> SessionStatus {
+            SessionStatus {
+                state: TurnState::Idle,
+                connection: if self.connected.get() { ConnectionState::Connected } else { ConnectionState::Disconnected },
+                turns: 0,
+                max_turns: None,
+                observation: None,
+            }
+        }
+        async fn undo(&self, _: Option<&str>) -> Result<Option<ChangeRecord>, RuntimeError> {
+            Ok(None)
+        }
+        fn has_reconnect(&self) -> bool {
+            true
+        }
+        async fn reconnect(&self) -> Result<(), RuntimeError> {
+            self.reconnects.set(self.reconnects.get() + 1);
+            if self.reconnects.get() >= self.connect_on {
+                self.connected.set(true);
+            }
+            Ok(())
+        }
+    }
+    async fn watch(connect_on: u32, answers: bool) -> (u32, Vec<String>, bool) {
+        let fake = Rc::new(Fake { reconnects: Cell::new(0), connect_on, connected: Cell::new(false) });
+        let session: Rc<dyn SessionController> = fake.clone();
+        let controller = Rc::new(RefCell::new(Some(Rc::downgrade(&session))));
+        let notices = Rc::new(RefCell::new(Vec::new()));
+        let emit: Rc<dyn Fn(SessionEvent)> = {
+            let notices = notices.clone();
+            Rc::new(move |event| {
+                if let SessionEvent::Notice { message } = event {
+                    notices.borrow_mut().push(message)
+                }
+            })
+        };
+        let watching = Rc::new(Cell::new(true));
+        let pace = Pace { look_ms: 1, retry_ms: 0, tries: 10, looks: 200 };
+        connect_when_live_answers(move || async move { answers }, controller, emit, watching.clone(), pace).await;
+        let notices = notices.borrow().clone();
+        (fake.reconnects.get(), notices, watching.get())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_live_already_answering_is_reconnected_and_tried_again_until_connected() {
+        let (reconnects, notices, watching) = watch(3, true).await;
+        assert_eq!(reconnects, 3, "at once, then again while Live answers and the session isn't connected");
+        assert_eq!(notices, ["Live answered, so Kumi is connected to it now."]);
+        assert!(!watching);
+        // A Live that answers but never connects gets a bounded number of tries.
+        let (reconnects, notices, _) = watch(u32::MAX, true).await;
+        assert_eq!(reconnects, 10);
+        assert!(notices.is_empty());
+        // A Live that never answers isn't asked at all.
+        assert_eq!(watch(1, false).await.0, 0);
     }
 }

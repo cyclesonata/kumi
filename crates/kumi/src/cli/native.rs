@@ -405,12 +405,18 @@ async fn connect_then_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
         );
         if bridge_setup::ask_yes_no(Some(io.input.clone()), io.out.clone(), "Restart Live now?").await {
             live_app::ask_to_quit(&run, platform, &io.env).await;
-            io.out.write("Waiting for Live to close (answer it if it asks about saving). Ctrl-C stops waiting.\n");
+            io.out.write("Waiting for Live to close (answer it if it asks about saving). Enter stops waiting.\n");
         } else {
-            io.out.write("Quit Live when you're ready; Kumi waits for it. Ctrl-C stops waiting.\n");
+            io.out.write("Quit Live when you're ready; Kumi waits for it. Enter stops waiting.\n");
         }
-        let (stop, _interrupt) = interrupt_signal(io);
-        if !live_app::closed(&run, platform, &io.env, &stop).await {
+        // Enter, not Ctrl-C: on Windows a Ctrl-C also reaches kumi.cmd, which then asks "Terminate batch
+        // job?" when Kumi ends. Ctrl-C still works.
+        let (interrupted, _interrupt) = interrupt_signal(io);
+        let entered = enter_pressed(io);
+        let stop = abort::any([interrupted, entered]);
+        let closed = live_app::closed(&run, platform, &io.env, &stop).await;
+        io.input.pause();
+        if !closed {
             io.out.write("\nLive is still open, so nothing was changed. Opening Kumi again…\n");
             return reopen(io).await;
         }
@@ -428,6 +434,21 @@ async fn connect_then_reopen(io: &CliIo) -> Result<i32, RuntimeError> {
     }
     io.out.write("Opening Kumi again…\n");
     reopen(io).await
+}
+/// A signal that fires when Enter is pressed (or the input ends), read in the terminal's line mode.
+fn enter_pressed(io: &CliIo) -> Signal {
+    let signal = Signal::new();
+    let fire: Rc<dyn Fn()> = {
+        let signal = signal.clone();
+        Rc::new(move || signal.cancel())
+    };
+    io.input.on_end(fire.clone());
+    io.input.resume(Rc::new(move |chunk: &[u8]| {
+        if chunk.iter().any(|b| matches!(b, b'\n' | b'\r')) {
+            fire();
+        }
+    }));
+    signal
 }
 /// Open Kumi again, with the same arguments and conversation.
 async fn reopen(io: &CliIo) -> Result<i32, RuntimeError> {
