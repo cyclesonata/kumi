@@ -8,33 +8,37 @@ Kumi 及其桥接如何送到用户手中，这能证明什么、不能证明什
 
 | 内容 | 位置 | 获取方式 |
 | --- | --- | --- |
-| Kumi | `user1303836/kumi` 的 GitHub Releases：`kumi.tar.gz`、`kumi-release.json` 和 `SHA256SUMS`，由 Installer 工作流附加到每个 `vX.Y.Z` 标签上 | `install.sh` 或 `install.ps1`，之后用 `kumi update` |
-| 桥接（`@ableton-mcp/mcp-server`） | 包含在每个 Kumi 发行包中：既有 `npm pack` 生成的 tarball，也有已安装好的该 tarball | `kumi bridge`，它通过桥接的生命周期进行安装（[安装桥接](DELIVERY.md)） |
-| 单独的桥接 | 没有自己的发布版本。用 `npm pack` 自行构建，或获取 CI 运行保留 90 天的 `exact-local-candidate` 产物 | 生命周期 CLI（[安装桥接](DELIVERY.md#独立桥接)） |
+| Kumi | `user1303836/kumi` 的 GitHub Releases：原生 `kumi-<target>.tar.gz`、兼容包 `kumi.tar.gz`、`kumi-release.json` 和 `SHA256SUMS`，由 Installer 工作流附加到每个 `vX.Y.Z` 标签上 | `install.sh` 或 `install.ps1`，之后用 `kumi update` |
+| 桥接（`@ableton-mcp/mcp-server`） | 包含在每个 Kumi 发行包中：既有原生桥接 tarball，也有已解包的桥接包 | `kumi bridge`，它通过桥接的生命周期进行安装（[安装桥接](DELIVERY.md)） |
+| 单独的桥接 | 没有自己的发布版本。用 `python3 scripts/build-native-release.py --bridge-only` 构建（[构建选项](../en/DEVELOPER_GUIDE.md#releasing)） | 生命周期 CLI（[安装桥接](DELIVERY.md#独立桥接)） |
 
 安装脚本从 `main` 分支读取；它们安装的发行包来自最新的已发布版本（或 `KUMI_VERSION` 指定的版本）。在维护者发布之前，发布版本只是草稿，只有已发布的版本才是“latest”。不会向 npm 发布任何内容：每个包都是 `private: true`，所以 `npm publish` 会拒绝。
 
 ## 只证明完整性，不证明身份
 
-没有任何东西经过签名或公证，也没有原生安装程序（`.pkg`、`.msi`）。安装程序对照 `kumi-release.json` 中的 sha256 检查发行包，对照 nodejs.org 的 `SHASUMS256.txt` 检查 Node；`kumi update` 以同样的方式检查发行包，`kumi bridge` 则对照构建发行包时记录的哈希检查桥接的 tarball。与下载内容来自同一处的校验和只能证明字节完整送达，不能证明是谁制作的。
+应用和桥接没有发布者签名或公证，也没有 `.pkg`、`.msi` 安装程序。macOS 的 Hands 辅助程序使用临时签名（ad-hoc），这不证明发布者身份。安装程序和 `kumi update` 对照 `kumi-release.json` 中的 sha256 检查发行包。全新原生安装不会下载 Node。`kumi bridge` 对照构建发行包时记录的哈希检查桥接 tarball。与下载内容来自同一处的校验和只能证明字节完整送达，不能证明是谁制作的。
 
 本软件采用 [MIT 许可证](../../LICENSE.md)。该许可证不授予任何 Ableton 商标权利，Kumi 与 Ableton 没有关联，也未获其认可。
 
 ## 桥接的包可以包含什么
 
-- 编译后的运行时 JavaScript 和类型声明（没有 source map，没有测试）；
+- 原生可执行文件 `ableton-mcp-server` 和 `ableton-mcp-analysis-worker`（Windows 使用 `.exe`）；
 - Remote Script 及其 README、操作注册表，以及它们的哈希清单；
 - Kumi 的 Live 扩展：它的清单、`package.json`、构建好的 `extension.js` 以及该文件的 sha256；
 - 桥接的指南（`README.md` 和 `release-docs/`）；
 - `release-manifest.json`、`package.json` 和 `LICENSE.md`。
 
-除此之外别无他物：没有脚本、测试夹具、`node_modules`、凭据、配置、本地状态、日志、捕获的媒体或证据。`npm run package:verify` 会拒绝其明确列表之外的任何路径，`release-manifest.json` 则是确切载荷内容的唯一依据。CI 会打包桥接两次，第二次在全新的克隆中用全新的 `npm ci` 进行，并要求两次的字节完全相同。
+除此之外别无他物：没有构建脚本、测试夹具、`node_modules`、凭据、配置、本地状态、日志、捕获的媒体或证据。原生构建器和生命周期会严格核对 `release-manifest.json` 中的文件清单和哈希。
+
+保留的旧 npm 包使用编译后的 JavaScript 和类型声明，而非原生二进制文件。其 `npm run package:verify` 核对明确的文件清单；CI 会将这个旧包打包两次，第二次使用全新克隆和 `npm ci`，并要求字节完全相同。
 
 ## 发布清单
 
-`release-manifest.json`（schema 为 `ableton-mcp-release/v2`）记录：包名和版本，源码提交以及工作树是否有未提交的修改，Node 版本范围和主版本，构建它所用的 Node、npm 和 TypeScript 版本以及运行器镜像，`package-lock.json` 和 CI 工作流的 SHA-256，构建方法，协议版本和注册表哈希，每个载荷文件的角色和 SHA-256，以及分发字段。
+`release-manifest.json`（schema 为 `ableton-mcp-native-release/v1`）记录包名和版本、源码提交及工作树是否有未提交的修改、Rust 目标平台、rustc 和 Cargo 版本、运行器镜像、`Cargo.lock` 和 CI 工作流的 SHA-256、构建方法、协议注册表哈希，以及每个载荷文件的角色和 SHA-256。
 
-分发字段为 `channel: "local-npm-tarball"`、`published: false`、`signed: false` 和 `notarized: false`，`package:verify` 和生命周期都要求正好是这些值。这里的“本地”和“未发布”描述的是 tarball 本身：它用 `npm pack` 构建，按哈希从本地路径安装，从未发布到任何注册表。不过，它确实会随 GitHub Releases 上的 Kumi 发行包送到用户手中。生命周期仍接受较旧的 `ableton-mcp-private-release/v1` 清单，以便现有的安装可以升级或回滚。
+分发字段为 `channel: "local-native-tarball"`，`published`、`signed`、`notarized` 和 `integrityIsIdentityProof` 均为 `false`。生命周期要求这些值。tarball 根据哈希从本地路径安装，随 GitHub Releases 上的 Kumi 发行包送到用户手中，不发布到包注册表。
+
+为支持现有安装的升级和回滚，生命周期也接受旧 schema `ableton-mcp-release/v2` 和 `ableton-mcp-private-release/v1`。这些清单的 Node/npm/TypeScript 构建记录及 `local-npm-tarball` 渠道描述的是保留的旧产物。
 
 ## 合并门禁
 

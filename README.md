@@ -6,7 +6,7 @@
   <a href="https://github.com/user1303836/kumi/actions/workflows/kumi.yml"><img alt="CI" src="https://github.com/user1303836/kumi/actions/workflows/kumi.yml/badge.svg?branch=main"></a>
   <a href="https://github.com/user1303836/kumi/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/user1303836/kumi?label=release"></a>
   <img alt="Ableton Live 12" src="https://img.shields.io/badge/Ableton%20Live-12-111111">
-  <img alt="Node 22 | 24" src="https://img.shields.io/badge/node-22%20%7C%2024-339933">
+  <img alt="Native Rust runtime" src="https://img.shields.io/badge/runtime-native%20Rust-555555">
   <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
 </p>
 
@@ -37,7 +37,7 @@
 
 ## Get started
 
-You need Ableton Live 12 on macOS 13 or later, or on Windows 10 or 11. Live 12.4 or later adds the right-click menu, MIDI written straight into the Arrangement and offline renders. Making Max for Live devices needs Max for Live (Live Suite, or Standard with the add-on). Kumi brings its own Node.
+You need Ableton Live 12 on macOS 13 or later, or on Windows 10 or 11. Live 12.4 or later adds the right-click menu, MIDI written straight into the Arrangement and offline renders. Making Max for Live devices needs Max for Live (Live Suite, or Standard with the add-on). Kumi runs as a native application.
 
 **macOS:** open Terminal and paste:
 
@@ -67,29 +67,41 @@ Something off? `kumi doctor` checks everything and says what to run. `kumi repor
 
 Kumi tells you when there's a newer version as it starts. `/update` inside Kumi, or `kumi update` in a terminal, gets it and brings the bridge along; `kumi update --check` only asks, and `kumi update --rollback` goes back. To stop the check, put `"updateCheck": false` in `~/.kumi/settings.json`.
 
+Updating from Kumi 1.7.5 or earlier? Close Live, run `kumi update`, then open Kumi as usual.
+Your settings, sign-ins, conversations and library stay in place. The native app switches the
+existing bridge on first startup. [Migration and rollback details](docs/en/KUMI_GUIDE.md#updating-reporting-and-uninstalling).
+
 [Guide](docs/en/KUMI_GUIDE.md) · [Commands, keys and screens](docs/en/KUMI_TUI.md) · [How Kumi changes your Set](docs/en/KUMI_CHANGES.md) · [Changelog](CHANGELOG.md)
 
 ## Status
 
-- Kumi 1.7.5 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
+- Kumi 1.7.6 is currently supported for Ableton Live 12.4.15b4 (beta) and above on macOS and Windows. You may run into issues on lower versions. If you do, **please file an issue!**
+- 1.7.6 is the first native release, tested with Live on macOS. On Windows, installing and updating are tested; using it with Live there is still new. Please send a `kumi report` when something breaks.
 - Support for Reaper and Renoise are planned
 
 ## Development
 
-From a copy of this repository, with Node.js 22 or 24:
+Build this checkout with Rust and Cargo:
 
 ```sh
-npm run setup     # install and build
-npm run kumi      # run it (npm run kumi -- bridge, -- doctor, and so on)
-npm run typecheck
-npm test          # no Live or sign-in needed
+cargo build --release --locked --workspace --bins
+cargo run --release -p kumi --        # add bridge, doctor, or other arguments after --
+sh scripts/test-isolated.sh          # no Live or sign-in needed
 ```
+
+Existing `npm run setup` and `npm run kumi -- ...` commands remain available. With Cargo installed,
+these build and run this checkout. Without Cargo, they install and launch the matching published
+native release, keeping the same settings, sign-ins, conversations and library in `~/.kumi`.
+After that handoff, `kumi` runs the native application directly.
+
+The TypeScript source remains the parity reference. Node.js 22 or 24 is needed only for its
+`npm ci`, `npm run build`, `npm run typecheck`, and `npm test` commands.
 
 | Folder | What's in it |
 | --- | --- |
-| `apps/kumi` | The terminal app and the `kumi` command |
-| `packages/runtime` | Kumi's agent core: model providers, memory, audio analysis, video, the web, and the Live integration |
-| `apps/mcp-server` | The bridge: a local MCP server Kumi starts, which also works on its own with other MCP clients ([bridge guide](apps/mcp-server/README.md)) |
+| `crates/kumi` | The native terminal app and `kumi` command |
+| `crates/kumi-runtime` | Model providers, memory, audio analysis, video, the web, and the Live integration |
+| `crates/ableton-mcp-server` | The native bridge, also usable by other MCP clients ([bridge guide](apps/mcp-server/README.md)) |
 | `remote-script` | The bridge's Remote Script, which runs inside Live |
 | `apps/live-extension` | Kumi's Live extension (Live 12.4 and later) |
 | `protocol` | The list of operations the bridge and the Remote Script share |

@@ -4,6 +4,38 @@
 
 本仓库的各部分如何组合在一起、如何开发每个部分，以及如何发布。[测试](TESTING.md)列出了所有测试命令以及 CI 运行的内容。
 
+## 原生版开发
+
+当前应用和桥接位于根目录的 Cargo 工作区：`crates/kumi` 提供 CLI 和界面，
+`crates/kumi-runtime` 提供代理与 Live 集成，`crates/kumi-common` 提供公共功能，
+`crates/ableton-mcp-server` 提供桥接。需要 Rust、Cargo 和 Python 3.11 或更高版本。
+
+```sh
+cargo build --release --locked --workspace --bins
+cargo run --release -p kumi --
+sh scripts/test-isolated.sh   # PowerShell: ./scripts/test-isolated.ps1
+cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark
+```
+
+测试使用临时主目录。基准程序调用同目录中的分析工作进程，输出 JSON 测量结果，
+超出预算时返回失败。请使用优化后的 release 构建，并避免与大型构建同时运行。
+内存列统计 Rust 分配量。
+
+在没有未提交修改的检出中，本地准备 Mac 发布包的示例：
+
+```sh
+python3 scripts/build-hands.py
+MACOSX_DEPLOYMENT_TARGET=13.0 python3 scripts/build-native-release.py --target aarch64-apple-darwin --out release/native/aarch64-apple-darwin
+python3 -m unittest discover -s scripts/tests -p test_native_release.py
+```
+
+辅助程序保留原来的 `packages/runtime/hands/` 路径。发布包必须同时包含服务器和
+分析工作进程。各平台包的聚合、旧版本更新验证和版本号同步见
+[英文版当前发布流程](../en/DEVELOPER_GUIDE.md#releasing)。普通安装无需 Node；
+保留的 TypeScript 参考测试需要 Node.js 22 或 24。
+
+以下内容介绍保留的 **TypeScript 参考实现及旧版发布流程**。
+
 ## 布局
 
 | 文件夹 | 内容 |
@@ -41,9 +73,12 @@ bridge (apps/mcp-server)
 需要 Node.js 22 或 24、Python 3 和 git：
 
 ```sh
-npm run setup                 # 安装并构建 Kumi 和桥接
-npm run kumi                  # 运行这份检出；其余命令用 npm run kumi -- <command>
-npm run kumi -- bridge --allow-dirty   # 把这份检出中的桥接装进 Live（Live 需关闭）
+npm ci
+npm run build
+npm ci --prefix apps/mcp-server
+npm run build --prefix apps/mcp-server
+npm test
+npm test --prefix apps/mcp-server
 ```
 
 检出与已安装的 Kumi 共用 `~/.kumi`（设置、登录信息、对话、桥接的状态）。`--allow-dirty` 允许 `kumi bridge` 从带有未提交修改的检出中安装桥接。在 Windows 上，如果没有开启开发者模式、也没有使用提升权限的 shell，创建符号链接的测试会跳过或失败；CI 的运行器可以创建符号链接。
@@ -101,7 +136,7 @@ npm run kumi -- bridge --allow-dirty   # 把这份检出中的桥接装进 Live�
 3. 给合并提交打上标签 `vX.Y.Z` 并推送该标签。Installer 工作流会构建包，在 macOS、Linux 和 Windows 上测试安装，并把 `kumi.tar.gz`、`kumi-release.json` 和 `SHA256SUMS` 附加到名为 “Kumi X.Y.Z” 的草稿发布中。
 4. 撰写发布说明并发布该版本。只有在此之后，安装程序、`kumi update` 和更新检查才能看到它。
 
-`kumi-release.json` 记录了构建该包所用的确切 Node 24 版本，安装程序会从 nodejs.org 下载这个 Node，与 Kumi 放在一起。如果某个版本换到了新的 Node 主版本，`kumi update` 会请用户重新运行安装程序。
+当前 `kumi-release.json` 保留了旧 Node 24 版更新器所需的格式，`kumi update` 通过一个小型兼容引导程序，只下载并解包本平台的原生版。全新安装不下载 Node；现有 Node 会保留，供回滚和可选的 YouTube 挑战处理使用。在 Windows 上，原生版首次启动时会替换旧启动器；仍在运行旧启动器的 cmd 会从新启动器的填充行处继续并退出。更早的 Node 主版本可能需要使用相同 `KUMI_HOME` 重新运行安装程序。见[当前发布流程](../en/DEVELOPER_GUIDE.md#releasing)。
 
 **桥接**没有单独的发布：它随每个 Kumi 版本一起发布，`main` 上的每次 CI 运行都会把一个打包好的候选版本保留 90 天。[分发](DISTRIBUTION_POLICY.md)介绍了一个发布版本包含什么，以及如何检查。
 

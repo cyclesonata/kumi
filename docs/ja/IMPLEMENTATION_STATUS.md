@@ -6,17 +6,20 @@
 
 ## バージョン
 
-[変更履歴](../../CHANGELOG.md)の各リリースには、同梱されるブリッジのバージョンが記載されています。すべてのブリッジのバージョンは[ブリッジのバージョン](KUMI_CHANGES.md#ブリッジのバージョン)に一覧があります。バージョン番号そのものは、`package.json` ファイル（Kumi、ブリッジ）と `apps/live-extension/manifest.json`（拡張機能）にあります。
+[変更履歴](../../CHANGELOG.md)の各リリースには、同梱されるブリッジのバージョンが記載されています。すべてのブリッジのバージョンは[ブリッジのバージョン](KUMI_CHANGES.md#ブリッジのバージョン)に一覧があります。バージョン番号そのものは、`Cargo.toml` と `package.json` ファイル（Kumi、ブリッジ）と `apps/live-extension/manifest.json`（拡張機能）にあります。
 
 | 部分 | バージョン |
 | --- | --- |
 | Live プロトコル | `ableton-live/v1`。レジストリのハッシュは[機能マニフェスト](../evidence/capability-manifest.json)にあります |
 | MCP プロトコルの世代 | `2025-11-25` と `2026-07-28` |
-| Node | インストールした場合は Kumi 専用の Node 24。チェックアウトとスタンドアロンのブリッジでは Node 22/24 |
+| ランタイム | アプリと単体のブリッジはネイティブ Rust。新規インストールに Node は不要 |
+| TypeScript 参照版と旧インストール | Node 22/24。残された Node はロールバックと任意の YouTube チャレンジ処理にも使用（[詳細](SUPPORT_MATRIX.md)） |
 
 ## どこで何をテストしたか
 
-- **すべてのプルリクエスト：** macOS、Linux、Windows 上での Node 22 と 24 によるビルドとテスト、そして三つすべてでのインストーラー。[CI](TESTING.md#ci) を参照してください。
+以下の本物の Live の記録は、過去の TypeScript リリースのものです。ネイティブ版の CI と移行テストは、新たな実機での受け入れテストの代わりにはなりません。
+
+- **すべてのプルリクエスト：** ネイティブ Rust のビルドとテスト、6 ターゲットのバンドル、インストールと移行テスト、および Node 22 と 24 の TypeScript 参照テスト。[CI](TESTING.md#ci) を参照してください。
 - **macOS 上の本物の Live**（Apple silicon、Live 12.4.15 beta）：Kumi が行うあらゆる種類の変更と、そのそれぞれを Kumi で取り消すこと（ブリッジ 1.0.62 と 1.0.63 で 65 件中 65 件、19 トラックと 200 トラックの Set で）、再生、バウンス、聴き取り、監視、Kumi の拡張機能によるオフラインレンダリングと右クリックメニュー、そして Willington による編集。
 - **Windows 上の本物の Live**（Windows 10、Live 12.4.15 beta、Kumi 1.6.0 とブリッジ 1.0.71）：移動した User Library へのブリッジのインストール、Remote Script の読み込み、Kumi の接続。これについての記録ファイルはまだありません。
 

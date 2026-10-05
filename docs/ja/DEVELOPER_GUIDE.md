@@ -4,6 +4,39 @@
 
 リポジトリの各部分がどうつながっているか、それぞれの部分でどう作業するか、どうリリースするかを説明します。テストのコマンドと CI が実行する内容はすべて[テスト](TESTING.md)にあります。
 
+## ネイティブ版の開発
+
+現在のアプリとブリッジはルートの Cargo ワークスペースにあります。
+`crates/kumi` が CLI と画面、`crates/kumi-runtime` がエージェントと Live 連携、
+`crates/kumi-common` が共通処理、`crates/ableton-mcp-server` がブリッジです。
+Rust、Cargo、Python 3.11 以降を用意して実行します。
+
+```sh
+cargo build --release --locked --workspace --bins
+cargo run --release -p kumi --
+sh scripts/test-isolated.sh   # PowerShell: ./scripts/test-isolated.ps1
+cargo run --locked --release -p ableton-mcp-server --bin ableton-mcp-benchmark
+```
+
+テストは一時的なホームを使います。ベンチマークは隣接する解析ワーカーを使い、
+JSON の測定結果を出力し、基準を超えると失敗します。重いビルドと並行せず、
+最適化したリリースビルドで実行してください。メモリー欄は Rust の割り当て量です。
+
+Mac のリリースをローカルに準備する例（コミット済みの変更がない状態で）:
+
+```sh
+python3 scripts/build-hands.py
+MACOSX_DEPLOYMENT_TARGET=13.0 python3 scripts/build-native-release.py --target aarch64-apple-darwin --out release/native/aarch64-apple-darwin
+python3 -m unittest discover -s scripts/tests -p test_native_release.py
+```
+
+ヘルパーは従来の `packages/runtime/hands/` に配置します。配布物にはサーバーと
+解析ワーカーの両方が必要です。各対象向けの集約、旧版からの更新検証、バージョンの
+更新箇所は[英語版の現行リリース手順](../en/DEVELOPER_GUIDE.md#releasing)を参照してください。
+通常のインストールには Node は不要です。参照用の TypeScript テストには Node.js 22 または 24 を使います。
+
+以下は保持している **TypeScript 参照版の構成と旧リリース手順**です。
+
 ## 構成
 
 | フォルダー | 内容 |
@@ -41,9 +74,12 @@ bridge (apps/mcp-server)
 Node.js 22 または 24、Python 3、git を用意して：
 
 ```sh
-npm run setup                 # Kumi とブリッジをインストールしてビルド
-npm run kumi                  # チェックアウトを実行。ほかのコマンドは npm run kumi -- <command>
-npm run kumi -- bridge --allow-dirty   # このチェックアウトのブリッジを Live に入れる（Live は閉じておく）
+npm ci
+npm run build
+npm ci --prefix apps/mcp-server
+npm run build --prefix apps/mcp-server
+npm test
+npm test --prefix apps/mcp-server
 ```
 
 チェックアウトは、インストール済みの Kumi と `~/.kumi`（設定、サインイン、会話、ブリッジの状態）を共有します。`--allow-dirty` を付けると、コミットしていない変更のあるチェックアウトから `kumi bridge` がブリッジをインストールできます。Windows で開発者モードも管理者権限のシェルもない場合、シンボリックリンクを作るテストはスキップされるか失敗します。CI のランナーではシンボリックリンクを作れます。
@@ -101,7 +137,7 @@ npm run kumi -- bridge --allow-dirty   # このチェックアウトのブリッ
 3. マージコミットに `vX.Y.Z` のタグを付けてプッシュします。Installer ワークフローがバンドルをビルドし、macOS、Linux、Windows でのインストールをテストし、`kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS` を下書きのリリース "Kumi X.Y.Z" に添付します。
 4. リリースノートを書いてリリースを公開します。そうして初めて、インストーラー、`kumi update`、更新確認がそのリリースを認識します。
 
-`kumi-release.json` には、バンドルのビルドに使った Node 24 の正確なリリースが記録され、インストーラーはその Node を nodejs.org から Kumi と並べてダウンロードします。新しい Node のメジャーバージョンでリリースすると、`kumi update` はユーザーにインストーラーの再実行を求めます。
+現行の `kumi-release.json` は旧 Node 24 版の更新形式を保持し、`kumi update` の小さな互換起動処理が、そのプラットフォーム用のネイティブ版だけをダウンロードして展開します。新規インストールは Node を取得しません。既存の Node はロールバックと任意の YouTube チャレンジ処理用に残ります。Windows では、ネイティブ版の初回起動で古いランチャーを置き換えます。実行中の cmd は新しいランチャーの詰め物の行から再開して終了します。古い Node メジャーでは同じ `KUMI_HOME` でインストーラーの再実行が必要な場合があります。[現行リリース手順](../en/DEVELOPER_GUIDE.md#releasing)を参照してください。
 
 **ブリッジ**には独自のリリースはありません。ブリッジは各 Kumi リリースに同梱され、`main` での CI の実行ごとに、パック済みの候補が 90 日間保存されます。リリースに何が含まれ、どう確認されるかは[配布](DISTRIBUTION_POLICY.md)にあります。
 

@@ -1,0 +1,129 @@
+[
+  {
+    "html": "<div><p>Plain ASCII with single spaces.</p><p>Another paragraph.</p></div>",
+    "base": "https://example.com/guide/",
+    "text": "Plain ASCII with single spaces.\n\nAnother paragraph.",
+    "read": {
+      "text": "Plain ASCII with single spaces.\n\nAnother paragraph.",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<DIV><P>Uppercase</P><p2>numbered name</p2><custom-tag>custom</custom-tag><pÉ>Unicode name</pÉ></DIV>",
+    "base": "https://example.com/guide/",
+    "text": "Uppercase\n\nnumbered namecustomUnicode name",
+    "read": {
+      "text": "Uppercase\n\nnumbered namecustomUnicode name",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p title=\"a > b\">Quoted attribute</p><p hidden>hidden</p><p aria-hidden=\"false\">shown</p><p/>after",
+    "base": "https://example.com/guide/",
+    "text": "Quoted attribute\n\nshown\n\nafter",
+    "read": {
+      "text": "Quoted attribute\n\nshown\n\nafter",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p>one  two\tthree\nfour\rfive\u000b six\fseven</p><p>α β γ δ</p>",
+    "base": "https://example.com/guide/",
+    "text": "one two three four five six seven\n\nα β γ δ",
+    "read": {
+      "text": "one two three four five six seven\n\nα β γ δ",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p>one﻿twothree</p>",
+    "base": "https://example.com/guide/",
+    "text": "one twothree",
+    "read": {
+      "text": "one twothree",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p>&amp; &unknown; &#65; &#x1f600;</p><textarea>&lt;literal&gt;</textarea>",
+    "base": "https://example.com/guide/",
+    "text": "& &unknown; A 😀\n\n<literal>",
+    "read": {
+      "text": "& &unknown; A 😀\n\n<literal>",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<h1><div>heading starts</div></h1><ul><li><div>list starts</div></li></ul><blockquote><p>quote starts</p></blockquote>",
+    "base": "https://example.com/guide/",
+    "text": "# heading starts\n\n- list starts\n\n> quote starts",
+    "read": {
+      "text": "# heading starts\n\n- list starts\n\n> quote starts",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p>é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀</p><ul><li><br>after marker</li><li>next</li></ul>",
+    "base": "https://example.com/guide/",
+    "text": "é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀\n\n- after marker\n- next",
+    "read": {
+      "text": "é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀é😀\n\n- after marker\n- next",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<pre><code class=\"language-rust\">\n  let x = 1;\n\n</code></pre><p>tail</p>",
+    "base": "https://example.com/guide/",
+    "text": "```rust\n  let x = 1;\n\n```\n\ntail",
+    "read": {
+      "text": "```rust\n  let x = 1;\n\n```\n\ntail",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<script>\"<p>hidden\"</script><style>hidden</style><textarea>shown</textarea><title>Title</title><noscript>hidden</noscript>",
+    "base": "https://example.com/guide/",
+    "text": "shown",
+    "read": {
+      "title": "Title",
+      "text": "shown",
+      "scripted": true
+    }
+  },
+  {
+    "html": "<nav>hidden<nav>nested</nav></nav><aside>hidden</aside><main><p>visible</p></main>",
+    "base": "https://example.com/guide/",
+    "text": "visible",
+    "read": {
+      "text": "visible",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p>a<br>b<hr>c<img alt=\"an image\" src=\"/image.png\"></p><p>x<sup>2</sup> + H<sub>2</sub>O</p>",
+    "base": "https://example.com/guide/",
+    "text": "a\nb\n\n---\n\nc ![an image](https://example.com/image.png)\n\nx^2 + H_2O",
+    "read": {
+      "text": "a\nb\n\n---\n\nc ![an image](https://example.com/image.png)\n\nx^2 + H_2O",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<p><a href=\"/a\">first</a> and <a href=\"/a\">second</a>, <a href=\"/b\">last</p>",
+    "base": "https://example.com/guide/",
+    "text": "[first](https://example.com/a) and second, [last](https://example.com/b)",
+    "read": {
+      "text": "[first](https://example.com/a) and second, [last](https://example.com/b)",
+      "scripted": false
+    }
+  },
+  {
+    "html": "<div>before<!-- hidden --><![CDATA[hidden]]><?other?><!other><3 malformed</div>",
+    "base": "https://example.com/guide/",
+    "text": "before<3 malformed",
+    "read": {
+      "text": "before<3 malformed",
+      "scripted": false
+    }
+  }
+]

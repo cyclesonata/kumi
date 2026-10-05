@@ -8,33 +8,37 @@ Kumi とそのブリッジがどのように人の手に届くか、それによ
 
 | 対象 | 場所 | 入手方法 |
 | --- | --- | --- |
-| Kumi | `user1303836/kumi` の GitHub Releases：`kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
-| ブリッジ（`@ableton-mcp/mcp-server`） | 各 Kumi バンドルの中に、`npm pack` の tarball と、その tarball をインストール済みの状態の両方で入っています | `kumi bridge`。ブリッジのライフサイクルを通じてインストールします（[ブリッジのインストール](DELIVERY.md)） |
-| ブリッジ単体 | 独自のリリースはありません。`npm pack` でビルドするか、CI の実行が 90 日間保持する `exact-local-candidate` アーティファクトを取得します | ライフサイクル CLI（[ブリッジのインストール](DELIVERY.md#スタンドアロンのブリッジ)） |
+| Kumi | `user1303836/kumi` の GitHub Releases：ネイティブの `kumi-<target>.tar.gz`、互換用の `kumi.tar.gz`、`kumi-release.json`、`SHA256SUMS`。Installer ワークフローが各 `vX.Y.Z` タグに添付します | `install.sh` または `install.ps1`、その後は `kumi update` |
+| ブリッジ（`@ableton-mcp/mcp-server`） | 各 Kumi バンドルの中に、ネイティブのブリッジ tarball と展開済みのパッケージが入っています | `kumi bridge`。ブリッジのライフサイクルを通じてインストールします（[ブリッジのインストール](DELIVERY.md)） |
+| ブリッジ単体 | 独自のリリースはありません。`python3 scripts/build-native-release.py --bridge-only` でビルドします（[ビルドオプション](../en/DEVELOPER_GUIDE.md#releasing)） | ライフサイクル CLI（[ブリッジのインストール](DELIVERY.md#スタンドアロンのブリッジ)） |
 
 インストーラーのスクリプトは `main` ブランチから読み込まれ、それがインストールするバンドルは最新の公開リリース（または `KUMI_VERSION` で指定したリリース）から取得されます。リリースはメンテナーが公開するまでは下書きで、公開されたリリースだけが「latest」になります。npm には何も公開しません。すべてのパッケージが `private: true` なので、`npm publish` は拒否されます。
 
 ## 完全性は確かめるが、作成者は証明しない
 
-署名も公証もしておらず、ネイティブのインストーラー（`.pkg`、`.msi`）もありません。インストーラーは、バンドルを `kumi-release.json` 内の sha256 と、Node を nodejs.org の `SHASUMS256.txt` と照合します。`kumi update` も同じ方法でバンドルを確認し、`kumi bridge` はブリッジの tarball を、バンドルのビルド時に記録されたハッシュと照合します。ダウンロードと同じ場所から来たチェックサムは、バイト列が無傷で届いたことは証明しますが、誰が作ったかは証明しません。
+アプリとブリッジには発行者の署名や公証がなく、`.pkg` や `.msi` のインストーラーもありません。macOS の Hands ヘルパーにはアドホック署名がありますが、発行者の身元は証明しません。インストーラーと `kumi update` はバンドルを `kumi-release.json` 内の sha256 と照合します。新規のネイティブインストールは Node を取得しません。`kumi bridge` はブリッジの tarball を、バンドルのビルド時に記録されたハッシュと照合します。ダウンロードと同じ場所から来たチェックサムは、バイト列が無傷で届いたことは証明しますが、誰が作ったかは証明しません。
 
 ソフトウェアは [MIT ライセンス](../../LICENSE.md)です。このライセンスは Ableton の商標に関する権利を一切与えるものではなく、Kumi は Ableton と提携しておらず、Ableton の承認を受けたものでもありません。
 
 ## ブリッジのパッケージに含めてよいもの
 
-- コンパイル済みのランタイムの JavaScript と型宣言（ソースマップやテストは含みません）
+- ネイティブ実行ファイル `ableton-mcp-server` と `ableton-mcp-analysis-worker`（Windows では `.exe`）
 - Remote Script、その README、操作レジストリ、それらのハッシュマニフェスト
 - Kumi の Live 拡張機能：そのマニフェスト、`package.json`、ビルドされた `extension.js` と、その sha256
 - ブリッジのガイド（`README.md` と `release-docs/`）
 - `release-manifest.json`、`package.json`、`LICENSE.md`
 
-それ以外は含みません。スクリプト、テストのフィクスチャ、`node_modules`、認証情報、設定、ローカルの状態、ログ、キャプチャしたメディア、エビデンスは入りません。`npm run package:verify` は、自身の明示的なリストにないパスをすべて拒否し、正確なペイロードについては `release-manifest.json` が信頼できる情報源です。CI はブリッジを二回パックし（二回目は新しいクローンから、新しく `npm ci` を実行して）、バイト列が同一であることを求めます。
+それ以外は含みません。ビルドスクリプト、テストのフィクスチャ、`node_modules`、認証情報、設定、ローカルの状態、ログ、キャプチャしたメディア、エビデンスは入りません。ネイティブのビルダーとライフサイクルは `release-manifest.json` の正確なファイル一覧とハッシュを検証します。
+
+保持している旧 npm パッケージには、ネイティブ実行ファイルの代わりにコンパイル済み JavaScript と型宣言が入ります。その `npm run package:verify` は明示的なファイル一覧を確認します。CI はこの旧パッケージを二回パックし（二回目は新しいクローンと `npm ci` から）、バイト列の一致を求めます。
 
 ## リリースマニフェスト
 
-`release-manifest.json`（スキーマ `ableton-mcp-release/v2`）は次のものを記録します：パッケージ名とバージョン、ソースのコミットとツリーがダーティだったかどうか、Node の範囲とメジャーバージョン、ビルドに使った Node、npm、TypeScript のバージョンとランナーイメージ、`package-lock.json` と CI ワークフローの SHA-256、ビルドレシピ、プロトコルのバージョンとレジストリハッシュ、各ペイロードファイルの役割と SHA-256、そして配布フィールドです。
+`release-manifest.json`（スキーマ `ableton-mcp-native-release/v1`）には、パッケージ名とバージョン、ソースのコミットと未コミット変更の有無、Rust ターゲット、rustc と Cargo のバージョン、ランナーイメージ、`Cargo.lock` と CI ワークフローの SHA-256、ビルドレシピ、プロトコルのレジストリハッシュ、各ペイロードファイルの役割と SHA-256 を記録します。
 
-配布フィールドは `channel: "local-npm-tarball"`、`published: false`、`signed: false`、`notarized: false` で、`package:verify` とライフサイクルはまさにこれらの値を要求します。ここでの「local」と「unpublished」は tarball そのものについての説明です。tarball は `npm pack` でビルドされ、ローカルのパスからハッシュを確認してインストールされ、レジストリには決して公開されません。ただし、GitHub Releases 上の Kumi バンドルに入って人の手に届きます。既存のインストールをアップグレードしたりロールバックしたりできるよう、ライフサイクルは古い `ableton-mcp-private-release/v1` マニフェストも引き続き受け付けます。
+配布フィールドは `channel: "local-native-tarball"` で、`published`、`signed`、`notarized`、`integrityIsIdentityProof` はすべて `false` です。ライフサイクルはこれらの値を要求します。tarball はローカルのパスからハッシュを確認してインストールされ、GitHub Releases 上の Kumi バンドルに入って届きます。パッケージレジストリには公開しません。
+
+既存のインストールのアップグレードとロールバックのため、ライフサイクルは旧スキーマ `ableton-mcp-release/v2` と `ableton-mcp-private-release/v1` も受け付けます。これらの Node/npm/TypeScript のビルド記録と `local-npm-tarball` チャンネルは、保持している旧アーティファクトについてのものです。
 
 ## マージゲート
 

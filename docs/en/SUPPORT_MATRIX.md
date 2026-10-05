@@ -10,14 +10,15 @@ lists the evidence behind each "tested".
 
 | System | Versions | Processors | Status |
 | --- | --- | --- | --- |
-| macOS | 13 (Ventura) or later | Apple silicon, Intel | Tested with Live on Apple silicon |
-| Windows | 10 or 11 | x64, ARM64 | Installing and connecting to Live tested; see [Windows](#windows) |
-| Linux | glibc distributions (not Alpine or other musl) | x64, ARM64 | Kumi installs and runs, without Live: there is no Live for Linux |
+| macOS | 13 (Ventura) or later | Apple silicon, Intel | Native build/install CI; earlier TypeScript releases tested with Live on Apple silicon |
+| Windows | 10 or 11 | x64, ARM64 | Native build/install CI; earlier TypeScript releases tested with Live on Windows 10; see [Windows](#windows) |
+| Linux | glibc distributions (not Alpine or other musl) | x64, ARM64 | Native build/install CI; no Live for Linux |
 
-The installer brings Kumi's own Node, the exact Node 24 release that Kumi was
-built and tested with, so you don't install Node yourself. If a later Kumi moves
-to another Node major, `kumi update` says to run the installer again, which
-brings it.
+- Kumi and the standalone bridge run as native Rust programs. Fresh installs do not download or require Node.
+- Existing Kumi 1.7.4 and 1.7.5 installations using Node 24 move to native through `kumi update`, keeping the same settings, sign-in and data. The retained Node supports rollback and optional YouTube challenges. On Windows, the first native start replaces the old launcher, so later starts don't go through Node. Older Node majors may need the installer rerun with the same `KUMI_HOME`; see [updating](KUMI_GUIDE.md).
+- YouTube challenges use retained Node or Node on PATH; Kumi does not fetch Node for them. Live runs its extension in Live's own JavaScript host.
+
+Real-Live results below describe the earlier TypeScript releases. Native CI and migration checks are separate from acceptance on actual Live hardware.
 
 ## Ableton Live
 
@@ -55,7 +56,7 @@ Not yet confirmed on Windows:
   Bash). Run the installer line again, or run
   `$env:Path = "$env:SystemRoot\System32;$env:Path"` before `kumi update`.
 
-## Node.js for source checkouts and the standalone bridge
+## Node.js for the TypeScript reference and legacy bridge
 
 | Node.js | Status |
 | --- | --- |
@@ -63,7 +64,8 @@ Not yet confirmed on Windows:
 | 25.x | Not supported: it reached end of life on June 1, 2026 |
 | 26.x and later, 21.x and earlier, prereleases | Not supported until tested |
 
-The engine range in every package is `>=22 <23 || >=24 <25`. A checkout's
+This table applies to the retained TypeScript reference and legacy Node installations.
+Their npm engine range is `>=22 <23 || >=24 <25`; the legacy TypeScript
 `kumi` refuses other majors (except `kumi doctor`, which says what's wrong).
 The bridge's server and `ableton-mcp-setup` refuse them too;
 `ableton-mcp-diagnostics` reports them; `ableton-mcp-lifecycle` and
@@ -91,5 +93,6 @@ makers decide.
 ## What CI covers
 
 CI runs on GitHub's hosted macOS 15, Ubuntu 24.04 and Windows Server 2025
-runners, with Node 22 and 24; none of them has Live. [Testing](TESTING.md#ci)
+runners: native Rust checks, six target bundles and installer migration tests,
+plus the TypeScript reference on Node 22 and 24. None has Live. [Testing](TESTING.md#ci)
 lists every job.

@@ -6,17 +6,20 @@
 
 ## 版本
 
-[更新日志](../../CHANGELOG.md)中的每个版本都写明了随附的桥接；[桥接版本](KUMI_CHANGES.md#桥接版本)列出了全部桥接版本。版本号本身记在 `package.json` 文件（Kumi、桥接）和 `apps/live-extension/manifest.json`（扩展）中。
+[更新日志](../../CHANGELOG.md)中的每个版本都写明了随附的桥接；[桥接版本](KUMI_CHANGES.md#桥接版本)列出了全部桥接版本。版本号本身记在 `Cargo.toml` 和 `package.json` 文件（Kumi、桥接）和 `apps/live-extension/manifest.json`（扩展）中。
 
 | 组成部分 | 版本 |
 | --- | --- |
 | Live 协议 | `ableton-live/v1`；注册表的哈希见[能力清单](../evidence/capability-manifest.json) |
 | MCP 协议的两代 | `2025-11-25` 和 `2026-07-28` |
-| Node | 通过安装程序安装时使用 Kumi 自带的 Node 24；源码副本和独立桥接使用 Node 22/24 |
+| 运行时 | 应用和独立桥接都是原生 Rust；全新安装无需 Node |
+| TypeScript 参考实现和旧安装 | Node 22/24；保留的 Node 也用于回滚和可选的 YouTube 挑战处理（[详情](SUPPORT_MATRIX.md)） |
 
 ## 在哪里测试过什么
 
-- **每个拉取请求：** 在 macOS、Linux 和 Windows 上用 Node 22 和 24 构建和测试，并在这三个系统上测试安装程序；见 [CI](TESTING.md#ci)。
+以下真实 Live 记录来自较早的 TypeScript 发布版本。原生版的 CI 和迁移测试不能替代新的真实 Live 验收。
+
+- **每个拉取请求：** 原生 Rust 构建和测试、六个目标平台的发行包、安装和迁移测试，以及 Node 22 和 24 上的 TypeScript 参考测试；见 [CI](TESTING.md#ci)。
 - **macOS 上的真实 Live**（Apple 芯片，Live 12.4.15 beta）：Kumi 做出的每一类修改，且每一项都通过 Kumi 撤销（在桥接 1.0.62 和 1.0.63 上 65 项全部通过，分别在 19 条和 200 条轨道的工程中），播放、并轨（bounce）、聆听和观看，通过 Kumi 扩展进行的离线渲染和右键菜单，以及 Willington 编辑。
 - **Windows 上的真实 Live**（Windows 10，Live 12.4.15 beta，Kumi 1.6.0 配合桥接 1.0.71）：把桥接安装到移动过的 User Library、Remote Script 加载，以及 Kumi 连接。这部分目前还没有记录文件。
 
