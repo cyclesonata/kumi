@@ -11,6 +11,7 @@ use kumi_common::js::json::stringify;
 use kumi_common::js::string::{head, trim, utf16_len};
 use serde_json::Value;
 
+use super::agent::CARRY_ON_NOTE;
 use crate::ai::types::{
     AssistantPart, DataContent, FileData, Message, Role, TextPart, ToolPart, ToolResultContentItem, ToolResultOutput, UserPart,
 };
@@ -51,51 +52,63 @@ const ASKS: usize = 3 * 1024;
 
 /// A conversation's words, for showing it: what the producer said and Kumi's answers. The host
 /// appends each turn's Live observation to the producer's words, and the budget may note that
-/// earlier exchanges are gone (listing what the producer said in them); none of that is theirs. Saved conversations are data from disk, so any shape is taken.
+/// earlier exchanges are gone (listing what the producer said in them); none of that is theirs. Nor is
+/// the note asking the model to carry on an answer that broke off: that answer reads as one. Saved conversations are data from disk, so any shape is taken.
 pub fn transcript_of(messages: &[Value]) -> Vec<TranscriptLine> {
-    messages
-        .iter()
-        .filter_map(|raw| {
-            let role = match raw.get("role").and_then(Value::as_str) {
-                Some("user") => TranscriptRole::User,
-                Some("assistant") => TranscriptRole::Assistant,
-                _ => return None,
-            };
-            let content = raw.get("content");
-            let parts: &[Value] = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
-            let text = match content.and_then(Value::as_str) {
-                Some(text) => text.to_string(),
-                None => parts
-                    .iter()
-                    .map(|part| {
-                        if part.get("type").and_then(Value::as_str) == Some("text") {
-                            part.get("text").and_then(Value::as_str).unwrap_or("")
-                        } else {
-                            ""
-                        }
-                    })
-                    .collect(),
-            };
-            let words = match role {
-                TranscriptRole::User => {
-                    split_asks(&text.split(OBSERVATION_MARKER).next().unwrap_or("").replacen(SHORTENED, "", 1)).1.to_string()
-                }
-                TranscriptRole::Assistant => text,
-            };
-            // An answer's steps come back too: the tools it called, in order.
-            let tools: Vec<String> = match role {
-                TranscriptRole::Assistant => parts
-                    .iter()
-                    .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool-call"))
-                    .filter_map(|part| part.get("toolName").and_then(Value::as_str).map(str::to_string))
-                    .collect(),
-                TranscriptRole::User => Vec::new(),
-            };
-            if trim(&words).is_empty() && tools.is_empty() {
-                return None;
+    let mut said: Vec<(TranscriptRole, String, Vec<String>)> = Vec::new();
+    let mut carried_on = false;
+    for raw in messages {
+        let role = match raw.get("role").and_then(Value::as_str) {
+            Some("user") => TranscriptRole::User,
+            Some("assistant") => TranscriptRole::Assistant,
+            _ => continue,
+        };
+        let content = raw.get("content");
+        let parts: &[Value] = content.and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[]);
+        let text = match content.and_then(Value::as_str) {
+            Some(text) => text.to_string(),
+            None => parts
+                .iter()
+                .map(|part| {
+                    if part.get("type").and_then(Value::as_str) == Some("text") {
+                        part.get("text").and_then(Value::as_str).unwrap_or("")
+                    } else {
+                        ""
+                    }
+                })
+                .collect(),
+        };
+        let words = match role {
+            TranscriptRole::User => {
+                split_asks(&text.split(OBSERVATION_MARKER).next().unwrap_or("").replacen(SHORTENED, "", 1)).1.to_string()
             }
-            Some(TranscriptLine { role, text: trim(&words).to_string(), tools: (!tools.is_empty()).then_some(tools) })
-        })
+            TranscriptRole::Assistant => text,
+        };
+        if role == TranscriptRole::User && trim(&words).ends_with(CARRY_ON_NOTE) {
+            carried_on = true;
+            continue;
+        }
+        // An answer's steps come back too: the tools it called, in order.
+        let tools: Vec<String> = match role {
+            TranscriptRole::Assistant => parts
+                .iter()
+                .filter(|part| part.get("type").and_then(Value::as_str) == Some("tool-call"))
+                .filter_map(|part| part.get("toolName").and_then(Value::as_str).map(str::to_string))
+                .collect(),
+            TranscriptRole::User => Vec::new(),
+        };
+        let carried = std::mem::take(&mut carried_on);
+        match said.last_mut() {
+            Some((TranscriptRole::Assistant, before, called)) if carried && role == TranscriptRole::Assistant => {
+                before.push_str(&words);
+                called.extend(tools);
+            }
+            _ => said.push((role, words, tools)),
+        }
+    }
+    said.into_iter()
+        .filter(|(_, words, tools)| !trim(words).is_empty() || !tools.is_empty())
+        .map(|(role, words, tools)| TranscriptLine { role, text: trim(&words).to_string(), tools: (!tools.is_empty()).then_some(tools) })
         .collect()
 }
 
