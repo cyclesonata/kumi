@@ -88,14 +88,18 @@ in the app:
 1. **Sign in**, if Kumi isn't signed in yet.
 2. **Connect to Live**: Kumi puts the bridge in place and opens Live. If Live is
    open, choose **Restart Live now** (Kumi asks Live to quit, and Live asks you
-   to save your work first) or **I'll restart it** (Kumi waits while you quit
-   Live).
+   to save your work first) or **I'll quit it** (Kumi waits while you quit
+   Live). If Live is still open a while after Kumi asked (you chose Cancel when
+   it asked about saving), Kumi says so and offers to ask again. Once Kumi has
+   Live closed, Live opens again however the step ends.
 3. **Control Surface**: the first time, open **Settings → Link, Tempo & MIDI** in
    Live and choose **AbletonMcpBridge** as a Control Surface. Kumi notices by
    itself, and Live remembers the choice.
 
-Esc on a step leaves it for later: Kumi chats without Live for now, and offers
-the step again next time.
+Esc on a step leaves it for later: Kumi chats without Live for now. Sign in and
+Connect to Live are offered again next time; past Connect to Live, Kumi connects
+by itself whenever Live answers. Quitting Kumi while the bridge goes in waits
+until it's in place.
 `kumi bridge` does the same from a shell, with Live closed: it asks you to
 confirm (`--yes` confirms beforehand), refuses while Live is running, and never
 quits or starts Live. Both install or update the bridge through the bridge's own

@@ -112,7 +112,8 @@
           $release.kumi -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9_.]+)?$' -or
           $release.bundle -notmatch '^[A-Za-z0-9_.-]+\.tar\.gz$' -or
           $release.sha256 -cnotmatch '^[0-9a-f]{64}$') { Fail "the release description didn't match this computer." }
-      # The header: the wordmark, and the version at the right of a 60-column line.
+      # The header: the wordmark, and the version at the right of the 60 columns after the 2-column
+      # margin, as in Kumi's own setup.
       Write-Host '  kumi' -NoNewline -ForegroundColor White
       Write-Host (' ' * [Math]::Max(1, 56 - $release.kumi.Length)) -NoNewline
       Write-Host $release.kumi -ForegroundColor DarkGray

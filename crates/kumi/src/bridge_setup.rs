@@ -207,6 +207,10 @@ impl BridgeSetupIo {
             prepared: None,
         }
     }
+    /// For `install_quietly`, which keeps what's said to itself.
+    pub fn quiet(env: Env) -> Self {
+        Self::new(Rc::new(Captured::default()), env)
+    }
 }
 fn error(e: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(e.to_string())
@@ -473,6 +477,67 @@ impl Drop for Unfinished {
         }
     }
 }
+/// What `setup_bridge` says, kept for the in-app setup to show what went wrong.
+#[derive(Default)]
+struct Captured(std::cell::RefCell<String>);
+impl TtyOutput for Captured {
+    fn is_tty(&self) -> bool {
+        false
+    }
+    fn columns(&self) -> Option<i32> {
+        None
+    }
+    fn rows(&self) -> Option<i32> {
+        None
+    }
+    fn write(&self, data: &str) {
+        self.0.borrow_mut().push_str(data);
+    }
+}
+
+/// The bridge put in place from Kumi's own setup, with Live closed: nothing printed, no question asked
+/// and no wait for Live, which the setup opens itself. The bridge's version, or what went wrong in a
+/// sentence; Live found open (it opened again) is the setup's to fix, so it says so.
+pub async fn install_quietly(mut io: BridgeSetupIo) -> Result<String, String> {
+    let said = Rc::new(Captured::default());
+    io.out = said.clone();
+    io.input = None;
+    io.yes = true;
+    io.wait_ms = Some(0);
+    // Each look for Live is noted: a refusal right after one that found it open is Live's.
+    let open = Rc::new(std::cell::Cell::new(false));
+    let look = io.live_running.clone();
+    let run = io.run.clone().unwrap_or_else(default_run);
+    io.live_running = Some({
+        let open = open.clone();
+        Rc::new(move || {
+            let (look, run, open) = (look.clone(), run.clone(), open.clone());
+            async move {
+                let running = match look {
+                    Some(look) => look().await,
+                    None => is_live_running(run).await,
+                };
+                open.set(running);
+                running
+            }
+            .boxed_local()
+        })
+    });
+    let version = match &io.bridge_dir {
+        Some(dir) => bridge_version(dir),
+        None => bundled_bridge_version(),
+    };
+    match setup_bridge(io).await {
+        Ok(0) => Ok(version.unwrap_or_default()),
+        Ok(_) if open.get() => Err("Live is open again: quit it, then Try again.".into()),
+        Ok(_) => {
+            let said = said.0.borrow();
+            Err(said.lines().map(trim).rfind(|line| !line.is_empty()).unwrap_or("The bridge didn't go in place.").to_string())
+        }
+        Err(error) => Err(error.message()),
+    }
+}
+
 pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
     let say = |line: &str| io.out.write(&format!("{line}\n"));
     let run = io.run.clone().unwrap_or_else(default_run);
@@ -648,6 +713,11 @@ pub async fn setup_bridge(io: BridgeSetupIo) -> Result<i32, RuntimeError> {
         if reason.to_ascii_lowercase().contains("dirty") {
             say("This checkout has uncommitted changes; to install it anyway (developers only), add --allow-dirty.");
         }
+        return Ok(1);
+    }
+    // Live may have opened since the first look (quit, then opened again): the switch runs with it closed.
+    if live_open(&io, run.clone()).await {
+        say(&format!("Live is open again, so nothing was changed. Save your work, quit Live, then run this again: {} bridge", *KUMI));
         return Ok(1);
     }
     let mut apply_args = artifact_args;

@@ -46,10 +46,10 @@ Kumi 是一个在终端里运行的制作人代理，为你在 Ableton Live 中�
 Kumi 通过它的桥接访问 Live：桥接由在 Live 内运行的 Remote Script 和由 Kumi 启动的本地 MCP 服务器组成。第一次打开 Kumi 时，以及每当它自带的桥接比 Live 中的新时，Kumi 的设置都会在应用内只完成尚未完成的步骤：
 
 1. **Sign in**：如果 Kumi 还没有登录，先登录。
-2. **Connect to Live**：Kumi 把桥接放到位并打开 Live。如果 Live 正开着，选择 **Restart Live now**（Kumi 请 Live 退出，Live 会先提示你保存工作）或 **I'll restart it**（Kumi 等你自己退出 Live）。
+2. **Connect to Live**：Kumi 把桥接放到位并打开 Live。如果 Live 正开着，选择 **Restart Live now**（Kumi 请 Live 退出，Live 会先提示你保存工作）或 **I'll quit it**（Kumi 等你自己退出 Live）。如果 Kumi 请求后过了一会儿 Live 仍然开着（例如它询问是否保存时你选了 Cancel），Kumi 会说明情况，并提出再请求一次。Kumi 关闭 Live 之后，无论这一步如何结束，Live 都会重新打开。
 3. **Control Surface**：第一次时，在 Live 中打开 **Settings → Link, Tempo & MIDI**，把 **AbletonMcpBridge** 选为 Control Surface。Kumi 会自己察觉，Live 也会记住这个选择。
 
-在某一步按 Esc，会把这一步留到以后：Kumi 暂时在不连接 Live 的情况下聊天，下次会再次提出这一步。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
+在某一步按 Esc，会把这一步留到以后：Kumi 暂时在不连接 Live 的情况下聊天。Sign in 和 Connect to Live 下次会再次提出；Connect to Live 完成之后，只要 Live 应答，Kumi 就会自己连接。在放置桥接时退出 Kumi，它会等桥接放好后再退出。Live 关闭时，`kumi bridge` 在 shell 中做同样的事：它会请你确认（`--yes` 可预先确认），Live 正在运行时会拒绝执行，并且从不退出或启动 Live。两者都通过桥接自身的生命周期流程安装或更新桥接，带有检查、回执和回滚，并在更新之间保留它的设置和密钥。`kumi bridge` 最多等待十分钟让 Live 连接，连上时会告诉你。当 Live 中的桥接比 Kumi 自带的旧、且 Live 已关闭时，`kumi update` 会替你运行它；需要你自己运行时，`kumi doctor` 会告诉你。
 
 Kumi 会在你的 User Library 中找到 Live 的 Remote Scripts 文件夹，包括你移到别处的 User Library（为此它会读取 Live 自己的设置）。`KUMI_REMOTE_SCRIPTS_DIR` 可以覆盖这个位置。
 

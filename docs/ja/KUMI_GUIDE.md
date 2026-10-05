@@ -46,10 +46,10 @@ Kumi の中で `/login` を使うとサインインします（初回は Kumi �
 Kumi はブリッジを通じて Live とやりとりします。ブリッジは、Live の中で動く Remote Script と、Kumi が起動するローカルの MCP サーバーからなります。初めて Kumi を開いたとき、また Kumi のブリッジが Live の中のものより新しいときはいつでも、Kumi のセットアップがアプリの中で、まだ済んでいないステップだけを進めます。
 
 1. **Sign in**：Kumi がまだサインインしていなければ、サインインします。
-2. **Connect to Live**：Kumi がブリッジを配置し、Live を開きます。Live が開いていれば、**Restart Live now**（Kumi が Live に終了を頼み、Live が先に作業の保存を求めます）か **I'll restart it**（自分で Live を終了するまで Kumi が待ちます）を選びます。
+2. **Connect to Live**：Kumi がブリッジを配置し、Live を開きます。Live が開いていれば、**Restart Live now**（Kumi が Live に終了を頼み、Live が先に作業の保存を求めます）か **I'll quit it**（自分で Live を終了するまで Kumi が待ちます）を選びます。Kumi が頼んでからしばらくしても Live が開いたままなら（保存を尋ねられて Cancel を選んだときなど）、Kumi はそう伝え、もう一度頼むかどうか尋ねます。Kumi が Live を閉じたあとは、ステップがどう終わっても Live はまた開きます。
 3. **Control Surface**：初回は Live で **Settings → Link, Tempo & MIDI** を開き、**AbletonMcpBridge** を Control Surface として選びます。Kumi は自分で気づき、Live はこの選択を覚えておきます。
 
-ステップで Esc を押すと、そのステップは後回しになります。ひとまず Live なしでチャットし、次回また Kumi がそのステップを提案します。`kumi bridge` は、Live を閉じた状態で同じことをシェルから行います：確認を求め（`--yes` で事前に確認済みにできます）、Live の実行中は拒否し、Live を終了したり起動したりすることはありません。どちらも、ブリッジ自身のライフサイクルを通じて、チェック、レシート、ロールバック付きでブリッジをインストールまたは更新し、更新をまたいでブリッジの設定とシークレットを保持します。`kumi bridge` は Live が接続するまで最大 10 分待ち、接続したら知らせます。Live の中のブリッジが Kumi のものより古く、Live が閉じている場合は、`kumi update` が代わりに実行します。自分で実行すべきときは `kumi doctor` が知らせます。
+ステップで Esc を押すと、そのステップは後回しになります。ひとまず Live なしでチャットします。Sign in と Connect to Live は次回また提案されます。Connect to Live が済んでいれば、Live が応答したときに Kumi が自分で接続します。ブリッジの配置中に Kumi を終了すると、配置が終わってから終了します。`kumi bridge` は、Live を閉じた状態で同じことをシェルから行います：確認を求め（`--yes` で事前に確認済みにできます）、Live の実行中は拒否し、Live を終了したり起動したりすることはありません。どちらも、ブリッジ自身のライフサイクルを通じて、チェック、レシート、ロールバック付きでブリッジをインストールまたは更新し、更新をまたいでブリッジの設定とシークレットを保持します。`kumi bridge` は Live が接続するまで最大 10 分待ち、接続したら知らせます。Live の中のブリッジが Kumi のものより古く、Live が閉じている場合は、`kumi update` が代わりに実行します。自分で実行すべきときは `kumi doctor` が知らせます。
 
 Kumi は User Library の中から Live の Remote Scripts フォルダーを見つけます。User Library を別の場所に移していても見つけます（そのために Live 自身の設定を読みます）。`KUMI_REMOTE_SCRIPTS_DIR` で上書きできます。
 

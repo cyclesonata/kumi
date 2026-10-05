@@ -193,6 +193,73 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn on_windows_live_is_found_closed_opened_and_read_through_powershell() {
+        let calls = Rc::new(RefCell::new(Vec::<(String, Vec<String>)>::new()));
+        let run: Run = {
+            let calls = calls.clone();
+            Rc::new(move |command, args, _| {
+                let script = args.last().cloned().unwrap_or_default();
+                calls.borrow_mut().push((command, args));
+                let stdout = if script.contains("Select-Object -First 1 -ExpandProperty Path") {
+                    "C:\\ProgramData\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe\r\n"
+                } else if script.contains("Start-Process") {
+                    "started\r\n"
+                } else if script.contains("ProductVersion") {
+                    "12.4.15.0\r\n"
+                } else {
+                    ""
+                };
+                let ran = Ran { code: 0, stdout: stdout.into(), stderr: String::new() };
+                async move { ran }.boxed_local()
+            })
+        };
+        let env = Env::from([("SystemRoot".to_string(), "C:\\Windows".to_string())]);
+        let powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        let live = open_live(&run, "win32", &env).await.unwrap();
+        assert_eq!(live.app, "C:\\ProgramData\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe");
+        ask_to_quit(&run, "win32", &env).await;
+        // The same Live again, by its path; a path with a quote in it stays one string.
+        assert!(start(&run, "win32", &env, Some(&live.app)).await);
+        assert!(start(&run, "win32", &env, Some("C:\\Live's\\Ableton Live 12.exe")).await);
+        // Without one, the newest Live under ProgramData.
+        assert!(start(&run, "win32", &env, None).await);
+        assert_eq!(version(&run, "win32", &env, Some(&live.app)).await.as_deref(), Some("12.4"));
+        let calls = calls.borrow();
+        for (command, args) in calls.iter() {
+            assert_eq!(command, powershell);
+            assert_eq!(&args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
+        }
+        let scripts: Vec<&str> = calls.iter().map(|(_, args)| args[3].as_str()).collect();
+        assert_eq!(
+            scripts[0],
+            "Get-Process -Name 'Ableton Live*' -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Path"
+        );
+        assert_eq!(
+            scripts[1],
+            "Get-Process -Name 'Ableton Live*' -ErrorAction SilentlyContinue | ForEach-Object { [void]$_.CloseMainWindow() }"
+        );
+        assert_eq!(
+            scripts[2],
+            "$app = 'C:\\ProgramData\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe'; if ($app) { Start-Process -FilePath $app; 'started' }"
+        );
+        assert_eq!(scripts[3], "$app = 'C:\\Live''s\\Ableton Live 12.exe'; if ($app) { Start-Process -FilePath $app; 'started' }");
+        assert_eq!(
+            scripts[4],
+            "$app = (Get-ChildItem -Path (Join-Path $env:ProgramData 'Ableton\\Live*\\Program\\Ableton Live*.exe') -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName); if ($app) { Start-Process -FilePath $app; 'started' }"
+        );
+        assert_eq!(scripts[5], "(Get-Item -LiteralPath 'C:\\ProgramData\\Ableton\\Live 12 Suite\\Program\\Ableton Live 12 Suite.exe').VersionInfo.ProductVersion");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn on_windows_live_not_found_or_not_started_says_so() {
+        let run: Run = Rc::new(|_, _, _| async { Ran { code: 0, stdout: String::new(), stderr: String::new() } }.boxed_local());
+        let env = Env::new();
+        assert_eq!(open_live(&run, "win32", &env).await, None);
+        assert!(!start(&run, "win32", &env, None).await, "no Live under ProgramData: nothing started");
+        assert_eq!(version(&run, "win32", &env, Some("C:\\x.exe")).await, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn lives_version_is_read_from_its_app() {
         for (raw, want) in [("12.4.15b5", Some("12.4")), ("12.4b15", Some("12.4")), ("12", Some("12")), ("", None), ("beta", None)] {
             assert_eq!(major_minor(raw).as_deref(), want, "{raw}");

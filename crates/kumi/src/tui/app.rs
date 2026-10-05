@@ -523,6 +523,12 @@ impl TuiApp {
             if state.closing {
                 return self.done();
             }
+            // Kumi's bridge going into Live, or Live closed by Kumi: the quit waits until both are done with.
+            if state.setup.as_mut().is_some_and(|setup| setup.defer_quit(code, message.clone())) {
+                drop(state);
+                self.0.scheduler.request();
+                return self.done();
+            }
             state.closing = true;
             state.suppress = true;
             state.stream.discard();
@@ -644,8 +650,11 @@ impl Terminal for TuiApp {
         // A step missing (signing in, Live's bridge): the setup runs first, in place of the session.
         let setup = self.begin_setup();
         self.task(move |app| async move {
-            if setup || app.needs_sign_in().await {
-                app.run_setup().await;
+            if setup {
+                app.run_setup(false).await;
+            } else if app.needs_sign_in().await {
+                // It looked for a default model already.
+                app.run_setup(true).await;
             } else if let Err(error) = app.check_model().await {
                 app.panel_failed(&error);
             }

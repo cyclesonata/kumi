@@ -103,7 +103,8 @@ main() {
   printf '%s\n' "$kumi_version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9_.]+)?$' || fail "the release version didn't make sense."
   printf '%s\n' "$bundle" | grep -Eq '^[A-Za-z0-9_.-]+\.tar\.gz$' || fail "the release archive name didn't make sense."
   printf '%s\n' "$bundle_sha" | grep -Eq '^[0-9a-f]{64}$' || fail "the release checksum didn't make sense."
-  # The header: the wordmark, and the version at the right of a 60-column line.
+  # The header: the wordmark, and the version at the right of the 60 columns after the 2-column margin,
+  # as in Kumi's own setup.
   pad=$((56 - ${#kumi_version})); [ "$pad" -gt 0 ] || pad=1
   printf "  %s%${pad}s%s\n\n" "${bold}kumi${reset}" "" "${dim}${kumi_version}${reset}"
 

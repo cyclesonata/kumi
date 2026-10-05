@@ -13,6 +13,7 @@ use super::super::{
 use super::drawing::{sp, st};
 use super::*;
 use async_trait::async_trait;
+use kumi_common::abort;
 use kumi_runtime::{
     providers::{provider_info, SignIn},
     KUMI_VERSION,
@@ -36,7 +37,16 @@ pub trait LiveSetup {
     async fn connect(&self);
     /// Live's version ("12.4"), when it can be read from its app.
     async fn version(&self, app: Option<String>) -> Option<String>;
+    /// How long Live gets to quit once asked, before Kumi says it's still open (its save dialog
+    /// cancelled, say) and offers to ask again.
+    fn quit_wait(&self) -> Duration {
+        Duration::from_secs(15)
+    }
 }
+
+/// How long Kumi keeps watching, after the producer put the Live step off, for Live to quit on the
+/// request Kumi already sent (its save dialog still up), so it can open Live again.
+const STILL_ASKED_MS: u64 = 120_000;
 
 impl Setup {
     /// The app is closing: nothing more is waited for.
@@ -47,6 +57,35 @@ impl Setup {
             ticker.abort();
         }
     }
+
+    /// Quitting while Kumi's bridge goes into Live, or while Kumi has Live closed (or closing): put off
+    /// until the installer is done and Live is open again, since stopping the installer partway can
+    /// leave Live's Remote Script half switched. True when the quit was put off.
+    pub(super) fn defer_quit(&mut self, code: i32, message: Option<String>) -> bool {
+        if !(self.installing || self.holding) {
+            return false;
+        }
+        if self.quit.is_none() {
+            self.quit = Some((code, message));
+            if self.installing {
+                self.problem = Some("Kumi quits once the bridge is in place.".into());
+            }
+        }
+        // Waits and questions end at once; the installer runs to its end.
+        self.esc.cancel();
+        if let Some(answer) = self.answer.take() {
+            let _ = answer.send(None);
+        }
+        true
+    }
+}
+
+/// What became of the Live step.
+enum LiveStep {
+    /// The bridge is in place and Live is opening: the app it opens from, when known.
+    Done(Option<String>),
+    /// Put off, with a sentence for the farewell when Live is involved.
+    Later(Option<String>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -86,6 +125,11 @@ pub(super) struct Setup {
     answer: Option<oneshot::Sender<Option<String>>>,
     /// Fired by esc while Kumi waits.
     esc: Signal,
+    /// The bridge's installer is running, and Kumi has Live closed (or is closing it): a quit then waits.
+    installing: bool,
+    holding: bool,
+    /// A quit put off until then: its code and farewell.
+    quit: Option<(i32, Option<String>)>,
 }
 
 /// The waveform's levels, low to high.
@@ -130,7 +174,7 @@ impl TuiApp {
     /// At start, when Kumi can reach Live: the setup shows at once when Live's bridge is missing or older
     /// than Kumi's (local reads only). Chatting without Live by choice, Kumi signs in as it always has.
     pub(super) fn begin_setup(&self) -> bool {
-        if !self.0.options.connect_live.as_ref().is_some_and(|l| l.why.is_some()) {
+        if self.0.options.connect_live.as_ref().is_none_or(|l| l.why.is_none()) {
             return false;
         }
         let unsigned = self.0.options.models.as_ref().is_some_and(|m| m.current().model.is_none());
@@ -178,26 +222,30 @@ impl TuiApp {
             ticker: None,
             answer: None,
             esc: Signal::new(),
+            installing: false,
+            holding: false,
+            quit: None,
         };
         self.0.state.borrow_mut().setup = Some(setup);
         self.0.scheduler.request();
     }
 
-    /// The missing steps, in order, then the session.
-    pub(super) async fn run_setup(&self) {
+    /// The missing steps, in order, then the session. `looked`: Kumi already looked for a default model.
+    pub(super) async fn run_setup(&self, looked: bool) {
         let unsigned = self.0.state.borrow().setup.as_ref().is_some_and(|s| s.step == Step::Sign);
-        if !unsigned || self.default_found().await {
+        if !unsigned || (!looked && self.default_found().await) {
             self.note_signed();
         } else if !self.setup_sign_in().await {
-            return self.end_setup(Some(Step::Sign)).await;
+            return self.end_setup(Some(Step::Sign), None).await;
         }
         let live = self.0.options.connect_live.as_ref().map(|l| (l.live.clone(), l.why.clone()));
         if let Some((live, Some(why))) = live {
-            let Some(app) = self.setup_live(live.clone(), why).await else {
-                return self.end_setup(Some(Step::Live)).await;
+            let app = match self.setup_live(live.clone(), why).await {
+                LiveStep::Done(app) => app,
+                LiveStep::Later(also) => return self.end_setup(Some(Step::Live), also).await,
             };
             if !self.setup_surface(live, app).await {
-                return self.end_setup(Some(Step::Surface)).await;
+                return self.end_setup(Some(Step::Surface), None).await;
             }
         } else if let Some((live, None)) = live {
             // The bridge was already in place: Live connects as it stands, and later runs need nothing more.
@@ -206,7 +254,7 @@ impl TuiApp {
                 self.setup_show(|s| s.live = Some(version.map(|v| format!("Live {v}")).unwrap_or_else(|| "Live".into())));
             }
         }
-        self.end_setup(None).await;
+        self.end_setup(None, None).await;
     }
 
     /// No model yet, but signed in somewhere: the provider's own first choice, as Kumi always chose.
@@ -273,8 +321,16 @@ impl TuiApp {
         self.0.scheduler.request();
     }
 
+    /// A quit was put off until Live and its bridge were done with.
+    fn quitting(&self) -> bool {
+        self.0.state.borrow().setup.as_ref().is_some_and(|s| s.quit.is_some())
+    }
+
     /// Show `choices` for the current step and wait for one: its value, or `None` for esc (later).
     async fn setup_choose(&self, status: &str, say: Vec<String>, choices: Vec<Choice>) -> Option<String> {
+        if self.quitting() {
+            return None;
+        }
         let (tx, rx) = oneshot::channel();
         let status = status.to_string();
         self.setup_show(move |s| {
@@ -289,9 +345,12 @@ impl TuiApp {
         rx.await.ok().flatten()
     }
 
-    /// A signal esc fires while Kumi waits.
+    /// A signal esc fires while Kumi waits (already fired when a quit is waiting).
     fn setup_wait(&self) -> Signal {
         let signal = Signal::new();
+        if self.quitting() {
+            signal.cancel();
+        }
         let copy = signal.clone();
         self.setup_show(move |s| s.esc = copy);
         signal
@@ -368,12 +427,15 @@ impl TuiApp {
     }
 
     /// The bridge into Live: Live quits first when it's open (it asks to save), then the bridge goes in
-    /// place and Live opens again. The app Live was opened from, once done; `None` for later.
-    async fn setup_live(&self, live: Rc<dyn LiveSetup>, why: String) -> Option<Option<String>> {
+    /// place and Live opens again. Once Kumi has asked Live to quit, or waits for the producer to quit
+    /// it, every way out of this step leaves Live open again.
+    async fn setup_live(&self, live: Rc<dyn LiveSetup>, why: String) -> LiveStep {
         self.setup_show(|s| {
             s.step = Step::Live;
             s.problem = None;
         });
+        // The Live Kumi has closed (or is closing).
+        let mut held: Option<String> = None;
         loop {
             let said = why.clone();
             self.setup_show(move |s| {
@@ -384,29 +446,25 @@ impl TuiApp {
             });
             let open = live.open_live().await;
             if self.closing() {
-                return None;
+                return LiveStep::Later(None);
             }
             if open.is_some() {
+                // Open (again): nothing is held until the producer says how it closes.
+                self.setup_show(|s| s.holding = false);
                 let say = vec!["Live loads the bridge when it starts.".to_string(), "Live will ask to save first.".to_string()];
-                let restart = vec![choice("Restart Live now", "", "restart"), choice("I'll restart it", "Kumi waits", "wait")];
-                let answer = self.setup_choose("Live is open · restart needed", say, restart).await?;
-                let stop = self.setup_wait();
-                let mine = answer == "restart";
-                self.setup_show(move |s| {
-                    s.status = if mine { "waiting for Live to close" } else { "waiting for you to quit Live" }.into();
-                    s.say = vec![if mine {
-                        "Answer Live if it asks about saving.".into()
-                    } else {
-                        "Quit Live when you're ready. Kumi then puts its bridge in place and opens Live again.".into()
-                    }];
-                    s.hint = "esc later".into();
-                    s.waiting = true;
-                });
-                if mine {
+                let restart =
+                    vec![choice("Restart Live now", "", "restart"), choice("I'll quit it", "Kumi waits, then opens Live again", "wait")];
+                let Some(answer) = self.setup_choose("Live is open · restart needed", say, restart).await else {
+                    return self.leave_live(&live, None, false).await;
+                };
+                held = open.clone();
+                let asked = answer == "restart";
+                self.setup_show(|s| s.holding = true);
+                if asked {
                     live.ask_to_quit().await;
                 }
-                if !live.closed(&stop).await {
-                    return None;
+                if !self.wait_closed(&live, asked).await {
+                    return self.leave_live(&live, held, asked).await;
                 }
             }
             let said = why.clone();
@@ -415,22 +473,31 @@ impl TuiApp {
                 s.say = vec![said];
                 s.hint.clear();
                 s.waiting = true;
+                s.installing = true;
             });
-            match live.install().await {
+            let installed = live.install().await;
+            self.setup_show(|s| s.installing = false);
+            if self.quitting() {
+                return self.leave_live(&live, held, false).await;
+            }
+            match installed {
                 Ok(version) => {
                     self.setup_show(|s| {
                         s.bridge = Some(format!("bridge {version}"));
                         s.status = "opening Live…".into();
                         s.say.clear();
                     });
-                    let opened = live.start(open.clone()).await;
+                    // The Live Kumi closed opens again; one that wasn't open opens as the newest installed.
+                    let app = open.or(held);
+                    let opened = live.start(app.clone()).await;
+                    self.setup_show(|s| s.holding = false);
                     let connecting = live.clone();
                     tokio::task::spawn_local(async move { connecting.connect().await });
                     if !opened {
                         self.setup_failed("Kumi couldn't open Live; open it yourself.");
                     }
                     self.setup_show(|s| s.waiting = false);
-                    return Some(open);
+                    return LiveStep::Done(app);
                 }
                 Err(problem) => {
                     let again = vec![choice("Try again", "", "again"), choice("Later", "chat without Live for now", "later")];
@@ -438,11 +505,83 @@ impl TuiApp {
                     let answer = self.setup_choose("didn't finish", vec![problem], again).await;
                     self.setup_show(|s| s.warn = false);
                     if answer.as_deref() != Some("again") {
-                        return None;
+                        return self.leave_live(&live, held, false).await;
                     }
                 }
             }
         }
+    }
+
+    /// Wait for Live to close: true once it has, false for later (esc, or a quit put off). When Kumi
+    /// asked it to quit and it's still open a while later (its save dialog cancelled, say), Kumi says
+    /// so and offers to ask again, still watching for it to close meanwhile.
+    async fn wait_closed(&self, live: &Rc<dyn LiveSetup>, asked: bool) -> bool {
+        let stop = self.setup_wait();
+        loop {
+            self.setup_show(move |s| {
+                s.status = if asked { "waiting for Live to close" } else { "waiting for you to quit Live" }.into();
+                s.say = vec![if asked {
+                    "Answer Live if it asks about saving.".into()
+                } else {
+                    "Quit Live when you're ready. Kumi then puts its bridge in place and opens Live again.".into()
+                }];
+                s.choices.clear();
+                s.hint = "esc later".into();
+                s.waiting = true;
+            });
+            if !asked {
+                return live.closed(&stop).await;
+            }
+            tokio::select! {
+                closed = live.closed(&stop) => return closed,
+                _ = tokio::time::sleep(live.quit_wait()) => {}
+            }
+            let say = vec!["Live hasn't quit. If it asked about saving and you chose Cancel, it stays open.".to_string()];
+            let again =
+                vec![choice("Ask again", "Live asks to save first", "again"), choice("Later", "chat without Live for now", "later")];
+            let answer = tokio::select! {
+                closed = live.closed(&stop) => {
+                    // It closed after all, or esc: the question no longer applies.
+                    self.setup_show(|s| {
+                        s.answer = None;
+                        s.choices.clear();
+                    });
+                    return closed;
+                }
+                answer = self.setup_choose("Live is still open", say, again) => answer,
+            };
+            if answer.as_deref() != Some("again") {
+                return false;
+            }
+            live.ask_to_quit().await;
+        }
+    }
+
+    /// Out of the Live step without the bridge in place. When Kumi had Live closed (or closing), Live
+    /// opens again: now, if it has closed, or, when a quit Kumi asked for is still being decided (Live's
+    /// save dialog up), once it closes in the next couple of minutes.
+    async fn leave_live(&self, live: &Rc<dyn LiveSetup>, held: Option<String>, asked: bool) -> LiveStep {
+        self.setup_show(|s| {
+            s.holding = false;
+            s.waiting = false;
+        });
+        let Some(app) = held else { return LiveStep::Later(None) };
+        if live.open_live().await.is_none() {
+            let opened = live.start(Some(app)).await;
+            return LiveStep::Later(Some(
+                if opened { "Live is opening again." } else { "Kumi couldn't open Live again; open it yourself." }.into(),
+            ));
+        }
+        if !asked {
+            return LiveStep::Later(None);
+        }
+        let watching = live.clone();
+        tokio::task::spawn_local(async move {
+            if watching.closed(&abort::timeout(STILL_ASKED_MS)).await {
+                watching.start(Some(app)).await;
+            }
+        });
+        LiveStep::Later(Some("If Live still asks about saving, Cancel keeps it open; if it quits, Kumi opens it again.".into()))
     }
 
     /// Live connects through the bridge once it has it as a Control Surface: Kumi watches for that.
@@ -472,12 +611,14 @@ impl TuiApp {
         true
     }
 
-    /// Setup ends: done ("You're set.", then the session), or put off at `later`.
-    async fn end_setup(&self, later: Option<Step>) {
+    /// Setup ends: done ("You're set.", then the session), or put off at `later` (with `also` to say), or
+    /// the quit put off while Live and its bridge were busy.
+    async fn end_setup(&self, later: Option<Step>, also: Option<String>) {
         if self.closing() {
             return;
         }
-        if later.is_none() {
+        let quit = self.0.state.borrow_mut().setup.as_mut().and_then(|s| s.quit.take());
+        if later.is_none() && quit.is_none() {
             let stop = self.setup_wait();
             self.setup_show(|s| {
                 s.step = Step::Set;
@@ -500,14 +641,27 @@ impl TuiApp {
         }
         self.0.renderer.borrow_mut().invalidate();
         self.0.scheduler.request();
+        if let Some((code, message)) = quit {
+            drop(self.finish(code, message));
+            return;
+        }
         match later {
             Some(Step::Sign) => self.notice(
                 "Sign in when you're ready with /login (ChatGPT with your plan, or others with an API key), or choose a model on this computer with /model.",
                 NoticeTone::Info,
             ),
-            Some(Step::Live) => {
-                self.notice("Kumi chats without Live for now, and offers to connect it next time.", NoticeTone::Info);
-            }
+            Some(Step::Live) => self.notice(
+                &format!(
+                    "Kumi chats without Live for now, and offers to connect it next time.{}",
+                    also.map(|also| format!(" {also}")).unwrap_or_default()
+                ),
+                NoticeTone::Info,
+            ),
+            // The bridge is current, so no setup shows next time: the session connects as soon as Live answers.
+            Some(Step::Surface) => self.notice(
+                "Kumi connects to Live by itself once Live answers: in Live, open Settings › Link, Tempo & MIDI and set a Control Surface to AbletonMcpBridge.",
+                NoticeTone::Info,
+            ),
             _ => {}
         }
         if later != Some(Step::Sign) {

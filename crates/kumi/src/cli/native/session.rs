@@ -33,38 +33,15 @@ impl Kernel for UnavailableKernel {
         self.checkpoint.clone().ok_or_else(|| RuntimeError::plain("No checkpoint"))
     }
 }
-/// What the bridge setup said, kept so first-run setup can say what went wrong.
-#[derive(Default)]
-struct Captured(RefCell<String>);
-impl TtyOutput for Captured {
-    fn is_tty(&self) -> bool {
-        false
-    }
-    fn columns(&self) -> Option<i32> {
-        None
-    }
-    fn rows(&self) -> Option<i32> {
-        None
-    }
-    fn write(&self, data: &str) {
-        self.0.borrow_mut().push_str(data);
-    }
-}
-impl Captured {
-    /// Its last line: what went wrong.
-    fn last_line(&self) -> String {
-        let said = self.0.borrow();
-        said.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or("The bridge didn't go in place.").to_string()
-    }
-}
-
 /// Live's side of first-run setup, for the app: Live the app, Kumi's bridge in it, and the session
 /// connecting through the bridge once it's in place.
 struct LiveSide {
     env: Env,
     run: bridge_setup::Run,
-    /// The bridge configuration the session's integration starts from.
+    /// The bridge configuration the session's integration starts from, and whether it was given
+    /// (`--bridge-config`), so the one put in place doesn't replace it.
     bridge: Rc<RefCell<Option<String>>>,
+    given: bool,
     controller: Rc<RefCell<Option<Weak<dyn SessionController>>>>,
 }
 #[async_trait(?Send)]
@@ -79,22 +56,19 @@ impl LiveSetup for LiveSide {
         live_app::closed(&self.run, kumi_runtime::system::platform(), &self.env, stop).await
     }
     async fn install(&self) -> Result<String, String> {
-        let said = Rc::new(Captured::default());
-        let mut options = BridgeSetupIo::new(said.clone(), self.env.clone());
-        options.yes = true;
-        // Kumi opens Live itself next, and the session connects once Live answers.
-        options.wait_ms = Some(0);
-        match bridge_setup::setup_bridge(options).await {
-            Ok(0) => Ok(bridge_setup::bundled_bridge_version().unwrap_or_default()),
-            Ok(_) => Err(said.last_line()),
-            Err(error) => Err(error.message()),
-        }
+        let mut options = BridgeSetupIo::quiet(self.env.clone());
+        options.run = Some(self.run.clone());
+        bridge_setup::install_quietly(options).await
     }
     async fn start(&self, app: Option<String>) -> bool {
         live_app::start(&self.run, kumi_runtime::system::platform(), &self.env, app.as_deref()).await
     }
     async fn connect(&self) {
-        *self.bridge.borrow_mut() = find_bridge_config(&self.env);
+        if !self.given {
+            if let Some(found) = find_bridge_config(&self.env) {
+                *self.bridge.borrow_mut() = Some(found);
+            }
+        }
         // The session may still be starting: a busy one is asked again shortly.
         for _ in 0..40 {
             let session = self.controller.borrow().as_ref().and_then(Weak::upgrade);
@@ -512,6 +486,7 @@ pub(super) async fn run_session(
                 env: io.env.clone(),
                 run: bridge_setup::default_run(),
                 bridge: live_config.clone(),
+                given: io.args.first().is_some_and(|arg| arg == "--bridge-config"),
                 controller: controller.clone(),
             }),
         });
@@ -690,6 +665,30 @@ mod watch_tests {
         connect_when_live_answers(move || async move { answers }, controller, emit, watching.clone(), pace).await;
         let notices = notices.borrow().clone();
         (fake.reconnects.get(), notices, watching.get())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_given_bridge_config_stays_once_setup_puts_the_bridge_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = dir.path().join("Remote Scripts/AbletonMcpBridge");
+        std::fs::create_dir_all(&reference).unwrap();
+        let found = dir.path().join("bridge-config.json");
+        std::fs::write(&found, "{}").unwrap();
+        std::fs::write(reference.join("bridge-reference.json"), serde_json::json!({ "config": found }).to_string()).unwrap();
+        let env = Env::from([("KUMI_REMOTE_SCRIPTS_DIR".to_string(), dir.path().join("Remote Scripts").display().to_string())]);
+        let side = |given| LiveSide {
+            env: env.clone(),
+            run: bridge_setup::default_run(),
+            bridge: Rc::new(RefCell::new(Some("/given/bridge-config.json".into()))),
+            given,
+            controller: Rc::new(RefCell::new(None)),
+        };
+        let given = side(true);
+        given.connect().await;
+        assert_eq!(given.bridge.borrow().as_deref(), Some("/given/bridge-config.json"), "--bridge-config stays");
+        let looked_up = side(false);
+        looked_up.connect().await;
+        assert_eq!(looked_up.bridge.borrow().as_deref(), found.to_str(), "the one put in place");
     }
 
     #[tokio::test(flavor = "current_thread")]

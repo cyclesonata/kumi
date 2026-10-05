@@ -25,6 +25,8 @@ pub struct FakeModels {
     pub local: RefCell<Vec<LocalStatus>>,
     pub notes: RefCell<HashMap<String, String>>,
     pub finish_chatgpt: RefCell<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// How many times a default model was looked for.
+    pub looked: std::cell::Cell<usize>,
 }
 impl Default for FakeModels {
     fn default() -> Self {
@@ -38,6 +40,7 @@ impl Default for FakeModels {
             local: RefCell::new(vec![]),
             notes: RefCell::new(HashMap::new()),
             finish_chatgpt: RefCell::new(None),
+            looked: std::cell::Cell::new(0),
         }
     }
 }
@@ -126,6 +129,7 @@ impl ModelController for FakeModels {
             .unwrap_or(id.into())
     }
     async fn choose_default(&self) -> Result<Option<DefaultModel>, RuntimeError> {
+        self.looked.set(self.looked.get() + 1);
         if self.model.borrow().is_some() {
             return Ok(None);
         }
