@@ -3,6 +3,17 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.9.3 — 2026-10-06
+
+Ships with bridge 1.0.85, as 1.9.2 did.
+
+- Kumi's undo now brings back clips a change deleted or cut (a deleted clip, a cleared stretch of the
+  Arrangement, clips a new or moved clip landed on), with notes, settings, groove and a Session clip's
+  automation, and says what Live won't let it bring back.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.9.2 — 2026-10-06
 
 Ships with bridge 1.0.85, as 1.9.1 did.
