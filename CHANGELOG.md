@@ -3,6 +3,17 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.9.5 — 2026-10-06
+
+Ships with bridge 1.0.86, as 1.9.4 did.
+
+- With Willington's bindings on, Kumi maps Live's LFO, Shaper, Envelope Follower and Expression
+  Control modulators to parameters as part of what it builds, a tutorial's rack included, instead of
+  working round them with automation.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.9.4 — 2026-10-06
 
 Ships with bridge 1.0.86, which Live loads when it restarts. After updating, Kumi offers to quit Live
