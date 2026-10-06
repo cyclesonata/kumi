@@ -3,6 +3,43 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.9.6 — 2026-10-06
+
+Ships with bridge 1.0.87, which Live loads when it restarts. After updating, Kumi offers to quit Live
+(it asks to save first) and opens it again with the new bridge; or run `kumi bridge` with Live closed.
+
+- On Windows, Live's own commands work: its menus (group, freeze, bounce, save…), its dialogs and
+  keys. Kumi can also save a Set as a new file and open one there; on a Mac it asks you to do those
+  two in Live. It can start a new Set on both.
+- The first start after an update shows what's new, and /changelog shows more.
+- When Live opens another Set, Kumi says so instead of "Live closed", and a request that asked for it
+  carries on in the new Set. When Live closes mid-request, Kumi says it may have crashed.
+- A note Kumi keeps partway through a task no longer ends its answer early.
+- Following a long tutorial no longer goes round the same frames: one answer sees a moment at most
+  three times, and at most 240 pictures of one video.
+- NOW shows one small turning glyph instead of a wave of dots.
+- When a Max for Live device from your User Library loads, Kumi reads its face and knows what a panel
+  hides there, so it doesn't describe a design you won't see.
+- kumi report shows how long each answer's look at the Set takes.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
+### Bridge 1.0.87
+
+- Adding tracks works when Live's default track templates or late routing change a new track right
+  after it's made, so listening works there too, and a failed add never removes a track you changed
+  since.
+- A knob value such as Drift's "Pulsating Pad" filter, or a loaded Bohlen-Pierce tuning, no longer
+  cuts Kumi off from a track, and Python answers keyed by emoji or fullwidth names come through.
+- An audio track's input can't be set to Main, which crashes Live 12.4.
+- Browser search no longer fails when Live lists one item twice, and with no category it looks in your
+  own places first.
+- Tuning edits use Live's own types (a loaded tuning's name, range and reference pitch). Live loads a
+  tuning only from its Browser, so Kumi asks you to double-click it there.
+- A big rack builds faster: each step reads the track in about two-thirds of the time, so chain 40 of
+  a 40-Operator stack takes 4.7 s instead of 6.3 s.
+
 ## 1.9.5 — 2026-10-06
 
 Ships with bridge 1.0.86, as 1.9.4 did.
