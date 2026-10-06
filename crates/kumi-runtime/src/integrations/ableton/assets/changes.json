@@ -354,7 +354,7 @@
       "preview": "live_routing_preview",
       "apply": "live_routing_apply",
       "family": "mixer",
-      "description": "Route a track and get it ready to record: its input (inputType and inputSubRouting, such as another track and \"Post FX\", or \"Resampling\" for the main output) and output (outputType, outputSubRouting), exactly as Live names them (live_discover kind routing-choice with the track as parent lists them), arm on or off, and monitoring in, auto or off. A new audio track fed by another track and armed is how audio gets bounced (resampling).",
+      "description": "Route a track and get it ready to record: its input (inputType and inputSubRouting, such as another track and \"Post FX\", or \"Resampling\" for the main output; never \"Main\", which crashes Live) and output (outputType, outputSubRouting), exactly as Live names them (live_discover kind routing-choice with the track as parent lists them), arm on or off, and monitoring in, auto or off. A new audio track fed by another track and armed is how audio gets bounced (resampling).",
       "methods": [
         "summarize"
       ]
@@ -819,7 +819,7 @@
       "preview": "live_tuning_preview",
       "apply": "live_tuning_apply",
       "family": "tempo",
-      "description": "Set the Set's scale (Live 12's Scale Mode, which Live's MIDI tools and devices follow): rootNote (0 C … 11 B) and scaleName as Live names it (Major, Minor, Dorian, …), or the tuning system.",
+      "description": "Set the Set's scale (Live 12's Scale Mode, which Live's MIDI tools and devices follow): rootNote (0 C … 11 B) and scaleName as Live names it (Major, Minor, Dorian, …); or the loaded tuning's name, lowestNote and highestNote ({indexInOctave, octave}: Live keeps 128 notes between them) and referencePitch ({frequency, indexInOctave, octave}). Live loads a tuning only from its Browser, never from Python, and its note tunings can't be set.",
       "methods": [
         "summarize"
       ]

@@ -276,6 +276,12 @@ python3 scripts/release.py --go     # the release
   of Kumi's crates or installers. In a pull request that changes both, write
   `Changelog (bridge):` for a line about the bridge. The dry run shows where
   each line goes.
+- **What's new:** Kumi builds `CHANGELOG.md` in and shows a release's list
+  items as **What's new** the first time it starts after an update (five at
+  most, newest release first; `/changelog` has the rest). Paragraphs, such as
+  the ships-with and tested-with lines, aren't shown, so each `Changelog:` line
+  is one item a producer reads there: say what they'll notice, the ones that
+  matter most first.
 - **The bridge** gets a new version when a pull request changes what Live
   loads: `crates/ableton-mcp-server`, `crates/kumi-common` (the host links it),
   `remote-script`, `protocol`, `apps/live-extension` or `vendor/willington`

@@ -2623,6 +2623,31 @@ class ControlSurfaceTests(unittest.TestCase):
         mapper._browser = lambda: BroadBrowser()
         with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaisesRegex(ValueError, "traversal bound"): mapper.invoke("browser.search", {"category": "instruments", "query": "never-matches", "limit": 10})
 
+    def test_browser_search_names_a_repeated_path_apart_instead_of_failing_and_finds_each_again(self):
+        # #183: Live lists one thing twice under one path when it comes from two files, and the whole search
+        # failed with "browser item identity collision", every query, once the walk reached one.
+        class Item:
+            def __init__(self, name, children=None, uri=None): self.name = name; self.children = children or []; self.is_loadable = not bool(children); self.is_device = not bool(children); self.uri = uri
+        class Browser:
+            def __init__(self):
+                self.drums = Item("drums", [Item("Drum Hits", [Item("Clap", [Item("Clap 808.aif", uri="query:Drums#FileId_1"), Item("Clap 808.aif", uri="query:Drums#FileId_2"), Item("Clap 909.aif", uri="query:Drums#FileId_3")])])])
+                self.user_library = Item("user_library", [Item("Presets", [Item("My Chain.adg", uri="query:UserLibrary#FileId_9")])])
+                self.packs = Item("packs", [Item(f"Pack sound {index}", uri=f"query:Packs#FileId_{100 + index}") for index in range(30)])
+        mapper = LiveObjectMapper(FakeSong()); browser = Browser(); mapper._browser = lambda: browser
+        found = mapper.invoke("browser.search", {"category": "drums", "query": "clap", "limit": 10})
+        validate_operation_payload("browser.search", "result", found)
+        self.assertEqual([item["id"] for item in found["items"]], ["drums/Drum Hits/Clap/Clap 808.aif", "drums/Drum Hits/Clap/Clap 808.aif#2", "drums/Drum Hits/Clap/Clap 909.aif"])
+        self.assertEqual(found["items"][1]["path"], "drums/Drum Hits/Clap/Clap 808.aif")
+        self.assertEqual(len({item["objectIdentity"] for item in found["items"]}), 3)
+        # Each is found again as the search named it, the second by its #2.
+        for item in found["items"]:
+            self.assertEqual(mapper.invoke("browser.inspect", {"itemId": item["id"]}), item)
+        with self.assertRaisesRegex(ValueError, "missing"): mapper.invoke("browser.inspect", {"itemId": "drums/Drum Hits/Clap/Clap 808.aif#3"})
+        # Without a category the producer's own places come first, before a big Pack can fill the bound.
+        everywhere = mapper.invoke("browser.search", {"query": "", "limit": 5})
+        self.assertEqual(everywhere["items"][0]["id"], "user_library/Presets/My Chain.adg")
+        self.assertEqual(everywhere["items"][0]["category"], "user_library")
+
     def test_browser_inspect_follows_the_returned_path_without_scanning_unrelated_subtrees(self):
         class Item:
             def __init__(self, name, children=None): self.name = name; self.children = children or []; self.is_loadable = not bool(children); self.is_device = not bool(children)
@@ -3329,6 +3354,100 @@ class RealtimePlaneTests(unittest.TestCase):
         for value, text in [(0.0000022411345526052173, "0.0000022411345526052173"), (5e-05, "0.00005"), (1e-06, "0.000001"), (1e-07, "1e-7"), (1.5e-07, "1.5e-7"), (0.1, "0.1"), (123.456, "123.456"), (1.5e21, "1.5e+21"), (-0.00001, "-0.00001"), (2.5e-300, "2.5e-300")]:
             self.assertEqual(_js_number(value), text)
         self.assertEqual(AuthenticatedRemoteScript._canonical({"value": 0.00005, "whole": 3.0}), '{"value":0.00005,"whole":3}')
+
+    def test_wire_text_matches_the_vectors_the_bridge_checks_too(self):
+        # The bridge's test reads the same file. Float32 ties (Drift's "Pulsating Pad" LP Freq,
+        # Bohlen-Pierce's first step) once failed its MAC check (#177); emoji beside fullwidth or
+        # Japanese keys sorted differently here (#201). The text is JavaScript's, made with Node.
+        vectors = json.loads((Path(__file__).resolve().parent.parent / "protocol" / "wire-canonical-vectors.json").read_text(encoding="utf-8"))
+        for case in vectors["numbers"]:
+            value = struct.unpack(">d", bytes.fromhex(case["bits"]))[0]
+            self.assertEqual(AuthenticatedRemoteScript._canonical(value), case["text"], case)
+            negated = case["text"][1:] if case["text"].startswith("-") else "-" + case["text"]
+            self.assertEqual(AuthenticatedRemoteScript._canonical(-value), negated, case)
+        for case in vectors["objects"]:
+            self.assertEqual(AuthenticatedRemoteScript._canonical(case["value"]), case["text"], case)
+        self.assertEqual(AuthenticatedRemoteScript._canonical({"💀 KICK": 1, "ＢＡＳＳ": 2}), '{"💀 KICK":1,"ＢＡＳＳ":2}')
+
+    def test_a_string_is_bounded_in_utf16_units_as_the_bridge_bounds_it(self):
+        # Emoji are two units each there: a string Python counted as fitting was refused there.
+        limit = remote_module.MAX_WIRE_STRING_LENGTH
+        AuthenticatedRemoteScript._canonical("a" * limit)
+        AuthenticatedRemoteScript._canonical("😀" * (limit // 2))
+        for text in ["a" * (limit + 1), "😀" * (limit // 2 + 1)]:
+            with self.assertRaisesRegex(ValueError, "wire string is too large"):
+                AuthenticatedRemoteScript._canonical(text)
+            with self.assertRaisesRegex(ValueError, "wire string is too large"):
+                AuthenticatedRemoteScript._canonical_general(text, 0)
+
+    def test_the_fast_wire_text_is_the_plain_rules_text(self):
+        # #174: an object's key layout is kept, and plain values are written in their container's loop. The
+        # text, or the refusal, is still what the plain rules make, for every shape a payload takes.
+        import enum, math
+        def plain(value, depth=0):
+            if depth > remote_module.MAX_WIRE_DEPTH: raise ValueError("wire payload is too deeply nested")
+            if value is None: return "null"
+            if isinstance(value, bool): return "true" if value else "false"
+            if isinstance(value, int): return str(int(value))
+            if isinstance(value, float):
+                if not math.isfinite(value): raise ValueError("non-finite wire number")
+                return str(int(value)) if value == 0 or (value.is_integer() and abs(value) < 1e21) else remote_module._js_number(value)
+            if isinstance(value, str):
+                if remote_module._too_long_for_wire(value): raise ValueError("wire string is too large")
+                return json.dumps(value, ensure_ascii=False)
+            if isinstance(value, list): return "[" + ",".join(plain(item, depth + 1) for item in value) + "]"
+            if isinstance(value, dict): return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + plain(value[key], depth + 1) for key in remote_module._wire_keys(value)) + "}"
+            raise TypeError("unsupported wire value")
+        def outcome(write, value):
+            try: return write(value)
+            except (TypeError, ValueError) as error: return (type(error).__name__, str(error))
+        def nested(depth, leaf):
+            for _ in range(depth): leaf = [leaf]
+            return leaf
+        class Quantization(enum.IntEnum): STEPPED = 4
+        class Name(str): pass
+        deepest = remote_module.MAX_WIRE_DEPTH
+        song = FakeSong(); song.tracks[0].devices[0].parameters[0].value_items = ["Off", "On"]
+        cases = [0.0, -0.0, 1.0, -3.0, 0.1, 1e21, -1e21, 1e20, 1e-7, 5e-324, 1.5e300, 2**53, True, False, None, "", "aé\"\\\n",
+                 {"b": 1, "a": [1, 2.5, {"z": None}]}, {"a": 1, "b": 2}, {"b": 2, "a": 1}, {1: "x"}, {True: "y"}, {"💀 KICK": 1, "ＢＡＳＳ": 2, "a": 3},
+                 [], {}, Quantization.STEPPED, {"raw": Quantization.STEPPED}, Name("named"), {Name("k"): 1}, (1, 2), [float("nan")], {"x": float("inf")},
+                 ["a" * (remote_module.MAX_WIRE_STRING_LENGTH + 1)], nested(deepest, []), nested(deepest, 1), nested(deepest + 1, []),
+                 {"k": nested(deepest - 1, "leaf")}, {"k": nested(deepest, "leaf")}, LiveObjectMapper(song).snapshot()]
+        for value in cases:
+            self.assertEqual(outcome(AuthenticatedRemoteScript._canonical, value), outcome(plain, value), repr(value)[:80])
+
+    def test_the_key_layouts_kept_for_wire_text_are_bounded(self):
+        # Kept: a row's few keys, up to a count. An object keyed by names (a Python answer's) is written, not kept.
+        remote_module._WIRE_LAYOUTS.clear()
+        named = {f"name {n}": n for n in range(remote_module._WIRE_LAYOUT_KEYS + 1)}
+        self.assertEqual(json.loads(AuthenticatedRemoteScript._canonical(named)), named)
+        self.assertEqual(len(remote_module._WIRE_LAYOUTS), 0)
+        for n in range(remote_module._WIRE_LAYOUTS_KEPT + 50):
+            self.assertEqual(AuthenticatedRemoteScript._canonical({f"k{n}": n, "a": 1}), f'{{"a":1,"k{n}":{n}}}')
+        self.assertEqual(len(remote_module._WIRE_LAYOUTS), remote_module._WIRE_LAYOUTS_KEPT)
+        self.assertEqual(AuthenticatedRemoteScript._canonical({"k1": 1, "a": 1}), '{"a":1,"k1":1}', "a kept layout")
+
+    def test_a_parameter_row_reads_each_of_lives_attributes_once(self):
+        # #174: a big rack's whole read is thousands of rows on Live's thread. A continuous parameter's
+        # value_items isn't asked for: Live raises for it ("Only quantized parameters have value items").
+        reads = []
+        class Counted(FakeParameter):
+            def __getattribute__(self, name):
+                if not name.startswith("__"): reads.append(name)
+                return object.__getattribute__(self, name)
+        class Continuous(Counted):
+            @property
+            def value_items(self): raise RuntimeError("Only quantized parameters have value items")
+        mapper = LiveObjectMapper(FakeSong())
+        for parameter, items in ((Continuous(), None), (Counted(), ["Off", "On"])):
+            parameter.default_value = 0.25; parameter.original_name = "Drive"; parameter.state = 0
+            if items is None: parameter.is_quantized = False; del parameter.quantization
+            else: parameter.value_items = items
+            reads.clear()
+            row = mapper._parameter_row(parameter, 0, f"{mapper.refs.epoch}:device:0:0")
+            self.assertEqual([name for name in set(reads) if reads.count(name) > 1], [], reads)
+            self.assertEqual(("value_items" in reads, row["valueItems"]), (items is not None, items))
+            self.assertEqual((row["defaultValue"], row["originalName"], row["state"], row["quantization"]), (0.25, "Drive", 0, 0.0 if items is None else 0.25))
 
     def test_racks_nested_three_deep_still_snapshot_and_sign(self):
         # A device in a rack in a rack's chain, and one more: once past the wire's depth, no snapshot could be sent.
@@ -4191,61 +4310,140 @@ class TakeLaneExpansionTests(unittest.TestCase):
         self.assertTrue(result["changed"]); self.assertTrue(lane.arrangement_clips[1].muted)
 
 
+class FakePitchClassAndOctave:
+    """Live's PitchClassAndOctave: made by keyword or position, read-only once made."""
+    def __init__(self, index_in_octave, octave): self._place = (int(index_in_octave), int(octave))
+    index_in_octave = property(lambda self: self._place[0])
+    octave = property(lambda self: self._place[1])
+    def __eq__(self, other): return isinstance(other, FakePitchClassAndOctave) and self._place == other._place
+
+
+class FakeReferencePitch:
+    """Live's ReferencePitch: a frequency in Hz on a step of an octave, read-only once made, made as Live 12.4
+    makes it: ReferencePitch(index_in_octave, octave, frequency)."""
+    def __init__(self, index_in_octave, octave, frequency): self._pitch = (float(frequency), int(index_in_octave), int(octave))
+    frequency = property(lambda self: self._pitch[0])
+    index_in_octave = property(lambda self: self._pitch[1])
+    octave = property(lambda self: self._pitch[2])
+    def __eq__(self, other): return isinstance(other, FakeReferencePitch) and self._pitch == other._pitch
+
+
+def live_with_tuning_types():
+    live = types.ModuleType("Live")
+    live.TuningSystem = types.SimpleNamespace(PitchClassAndOctave=FakePitchClassAndOctave, ReferencePitch=FakeReferencePitch)
+    return live
+
+
 class FakeTuningSystem:
-    def __init__(self):
-        self.name = "Equal"
-        self.lowest_note = {"note": 0, "deviation": 0.0}
-        self.highest_note = {"note": 127, "deviation": 0.0}
-        self.reference_pitch = {"note": 69, "frequency": 440.0}
-        self.pseudo_octave_in_cents = 1200.0
-        self.note_tunings = [{"note": index, "deviation": 0.0} for index in range(128)]
+    """Live 12.4's TuningSystem, refusing what Live refuses (#206): note_tunings are the cents of each step of the
+    pseudo-octave and take a tuple; lowest_note and highest_note take a PitchClassAndOctave, reference_pitch a
+    ReferencePitch, never a dict."""
+    def __init__(self, name="Equal", steps=12, pseudo_octave=1200.0):
+        self.name = name; self.pseudo_octave_in_cents = pseudo_octave
+        self._tunings = [pseudo_octave * index / steps for index in range(steps)]
+        self._lowest = FakePitchClassAndOctave(0, -2); self._highest = FakePitchClassAndOctave(7, 8); self._reference = FakeReferencePitch(frequency=440.0, index_in_octave=9, octave=3)
+    number_of_notes_in_pseudo_octave = property(lambda self: len(self._tunings))
+    @property
+    def note_tunings(self): return list(self._tunings)
+    @note_tunings.setter
+    def note_tunings(self, value):
+        if not isinstance(value, tuple): raise TypeError(f"Python argument types in None.None(TuningSystem, {type(value).__name__}) did not match C++ signature")
+        self._tunings = [float(cents) for cents in value]
+    def _place(kind):
+        def get(self): return getattr(self, kind)
+        def put(self, value):
+            if not isinstance(value, FakePitchClassAndOctave): raise TypeError(f"No registered converter was able to produce a C++ rvalue of type TPitchClassAndOctave from this Python object of type {type(value).__name__}")
+            setattr(self, kind, value)
+        return property(get, put)
+    lowest_note = _place("_lowest"); highest_note = _place("_highest")
+    @property
+    def reference_pitch(self): return self._reference
+    @reference_pitch.setter
+    def reference_pitch(self, value):
+        if not isinstance(value, FakeReferencePitch): raise TypeError(f"Python argument types in None.None(TuningSystem, {type(value).__name__}) did not match C++ signature")
+        self._reference = value
 
 
 class TuningScaleTests(unittest.TestCase):
-    def _mapper_with_tuning(self):
-        song = FakeSong()
-        song.tuning_system = FakeTuningSystem()
-        song.root_note = 0; song.scale_name = "Major"; song.scale_mode = True; song.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
-        return song, mapper if False else LiveObjectMapper(song)
+    def setUp(self):
+        self.live_patch = patch.dict(sys.modules, {"Live": live_with_tuning_types()}); self.live_patch.start()
+        self.addCleanup(self.live_patch.stop)
 
-    def test_tuning_read_exposes_system_and_scale(self):
+    def _mapper_with_tuning(self, tuning=None):
+        song = FakeSong()
+        song.tuning_system = tuning or FakeTuningSystem()
+        song.root_note = 0; song.scale_name = "Major"; song.scale_mode = True; song.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
+        return song, LiveObjectMapper(song)
+
+    def test_tuning_read_exposes_lives_tuning_and_the_scale(self):
         song, mapper = self._mapper_with_tuning()
         self.assertTrue(mapper._operation_supported("tuning.read")); self.assertTrue(mapper._operation_supported("tuning.set"))
         set_ref = mapper.snapshot()["set"]["ref"]
         result = mapper.invoke("tuning.read", {"setRef": set_ref})
-        self.assertEqual(result["tuningSystem"]["name"], "Equal"); self.assertEqual(result["tuningSystem"]["referencePitch"], {"note": 69, "frequency": 440.0})
-        self.assertEqual(result["tuningSystem"]["pseudoOctaveInCents"], 1200.0); self.assertEqual(len(result["tuningSystem"]["noteTunings"]), 128)
+        system = result["tuningSystem"]
+        self.assertEqual(system["name"], "Equal"); self.assertEqual(system["pseudoOctaveInCents"], 1200.0)
+        self.assertEqual((system["lowestNote"], system["highestNote"]), ({"indexInOctave": 0, "octave": -2}, {"indexInOctave": 7, "octave": 8}))
+        self.assertEqual(system["referencePitch"], {"frequency": 440.0, "indexInOctave": 9, "octave": 3}); self.assertEqual(result["referencePitch"], system["referencePitch"])
+        # One row a step, as cents from the pseudo-octave split evenly: 12-TET is all 0.
+        self.assertEqual(system["noteTunings"], [{"note": index, "deviation": 0.0} for index in range(12)]); self.assertEqual(result["notesInPseudoOctave"], 12)
         self.assertEqual(result["scale"], {"rootNote": 0, "scaleName": "Major", "scaleMode": True, "scaleIntervals": [0, 2, 4, 5, 7, 9, 11]})
         validate_operation_payload("tuning.read", "result", result)
 
-    def test_tuning_set_validates_and_rolls_back_exactly(self):
+    def test_a_tuning_live_loads_is_read_within_its_bounds_whatever_its_steps(self):
+        # #206: Bohlen-Pierce's steps run to 1,756 cents, past the read's ±1200, and every read of it failed.
+        bohlen = FakeTuningSystem("Bohlen Pierce", 13, 1901.955)
+        song, mapper = self._mapper_with_tuning(bohlen)
+        result = mapper.invoke("tuning.read", {"setRef": mapper.snapshot()["set"]["ref"]})
+        self.assertEqual(len(result["tuningSystem"]["noteTunings"]), 13); self.assertEqual(result["notesInPseudoOctave"], 13)
+        self.assertTrue(all(abs(row["deviation"]) < 0.001 for row in result["tuningSystem"]["noteTunings"]))
+        validate_operation_payload("tuning.read", "result", result)
+        # Just intonation's third sits 13.7 cents under the equal one.
+        just = FakeTuningSystem("Just", 12, 1200.0); just._tunings[4] = 386.3137
+        song.tuning_system = just
+        rows = mapper.invoke("tuning.read", {"setRef": mapper.snapshot()["set"]["ref"]})["tuningSystem"]["noteTunings"]
+        self.assertEqual(rows[4], {"note": 4, "deviation": -13.6863})
+        # More steps than the read holds: no rows, and the read still answers.
+        song.tuning_system = FakeTuningSystem("311-EDO", 311, 1200.0)
+        result = mapper.invoke("tuning.read", {"setRef": mapper.snapshot()["set"]["ref"]})
+        self.assertEqual((result["tuningSystem"]["noteTunings"], result["notesInPseudoOctave"]), ([], 311)); validate_operation_payload("tuning.read", "result", result)
+
+    def test_tuning_set_takes_lives_types_and_rolls_back_with_them(self):
         song, mapper = self._mapper_with_tuning()
         set_ref = mapper.snapshot()["set"]["ref"]; identity = mapper.snapshot()["set"]["objectIdentity"]
         def fences(): return {"setRef": set_ref, "expectedObjectIdentity": identity, "expectedRevision": mapper._tuning_revision()}
-        result = mapper.invoke("tuning.set", {**fences(), "referencePitch": {"note": 69, "frequency": 432.0}, "rootNote": 9, "scaleName": "Minor", "scaleMode": False})
+        result = mapper.invoke("tuning.set", {**fences(), "referencePitch": {"frequency": 432, "indexInOctave": 9, "octave": 3}, "lowestNote": {"indexInOctave": 0, "octave": -1},
+                                              "rootNote": 9, "scaleName": "Minor", "scaleMode": False})
         self.assertTrue(result["changed"]); validate_operation_payload("tuning.set", "result", result)
-        self.assertEqual(song.tuning_system.reference_pitch, {"note": 69, "frequency": 432.0}); self.assertEqual(song.root_note, 9); self.assertEqual(song.scale_name, "Minor"); self.assertEqual(song.scale_mode, False)
+        self.assertEqual(song.tuning_system.reference_pitch, FakeReferencePitch(frequency=432.0, index_in_octave=9, octave=3)); self.assertEqual(song.tuning_system.lowest_note, FakePitchClassAndOctave(0, -1))
+        self.assertEqual((song.root_note, song.scale_name, song.scale_mode), (9, "Minor", False))
         stale = fences(); stale["expectedRevision"] = "0" * 64
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("tuning.set", {**stale, "rootNote": 0})
-        with self.assertRaisesRegex(ValueError, "referencePitch is invalid"): mapper.invoke("tuning.set", {**fences(), "referencePitch": 432.0})
+        for bad in (432.0, {"note": 69, "frequency": 432.0}, {"frequency": 0, "indexInOctave": 9, "octave": 3}, {"frequency": 440, "indexInOctave": 12, "octave": 3}):
+            with self.assertRaisesRegex(ValueError, "referencePitch is invalid"): mapper.invoke("tuning.set", {**fences(), "referencePitch": bad})
+        with self.assertRaisesRegex(ValueError, "highestNote is invalid"): mapper.invoke("tuning.set", {**fences(), "highestNote": {"note": 127, "deviation": 0.0}})
         with self.assertRaisesRegex(ValueError, "tuning fields are invalid"): mapper.invoke("tuning.set", {**fences(), "scaleIntervals": [0, 2, 3]})
         with self.assertRaisesRegex(ValueError, "scaleMode is invalid"): mapper.invoke("tuning.set", {**fences(), "scaleMode": "Ionian"})
-        with self.assertRaisesRegex(ValueError, "exactly 128"): mapper.invoke("tuning.set", {**fences(), "noteTunings": [{"note": 0, "deviation": 0.0}]})
+        with self.assertRaisesRegex(ValueError, "noteTunings can't be set"): mapper.invoke("tuning.set", {**fences(), "noteTunings": [{"note": index, "deviation": 0.0} for index in range(128)]})
         with self.assertRaisesRegex(ValueError, "no fields"): mapper.invoke("tuning.set", fences())
-        rows = [{"note": index, "deviation": 5.0 if index == 69 else 0.0} for index in range(128)]
-        result = mapper.invoke("tuning.set", {**fences(), "noteTunings": rows})
-        self.assertTrue(result["changed"]); self.assertEqual(song.tuning_system.note_tunings[69]["deviation"], 5.0)
+        # Live refusing one value: the others go back as Live had them, in its own types.
         class FailingTuning(FakeTuningSystem):
-            @property
-            def reference_pitch(self): return self._pitch
-            @reference_pitch.setter
+            @FakeTuningSystem.reference_pitch.setter
             def reference_pitch(self, value):
-                if value == {"note": 69, "frequency": 415.0}: raise RuntimeError("tuning rejected")
-                self._pitch = value
-        failing = FailingTuning(); failing._pitch = {"note": 69, "frequency": 440.0}; song.tuning_system = failing
+                if isinstance(value, FakeReferencePitch) and value.frequency == 415.0: raise RuntimeError("tuning rejected")
+                FakeTuningSystem.reference_pitch.fset(self, value)
+        failing = FailingTuning(); song.tuning_system = failing
         with self.assertRaisesRegex(RuntimeError, "tuning rejected"):
-            mapper.invoke("tuning.set", {**fences(), "referencePitch": {"note": 69, "frequency": 415.0}, "rootNote": 2})
-        self.assertEqual(failing.reference_pitch, {"note": 69, "frequency": 440.0}); self.assertEqual(song.root_note, 9)
+            mapper.invoke("tuning.set", {**fences(), "highestNote": {"indexInOctave": 0, "octave": 9}, "referencePitch": {"frequency": 415, "indexInOctave": 9, "octave": 3}, "rootNote": 2})
+        self.assertEqual((failing.highest_note, failing.reference_pitch, song.root_note), (FakePitchClassAndOctave(7, 8), FakeReferencePitch(frequency=440.0, index_in_octave=9, octave=3), 9))
+
+    def test_without_lives_types_nothing_is_set(self):
+        song, mapper = self._mapper_with_tuning()
+        set_ref = mapper.snapshot()["set"]["ref"]; identity = mapper.snapshot()["set"]["objectIdentity"]
+        with patch.dict(sys.modules, {"Live": None}):
+            with self.assertRaisesRegex(ValueError, "needs Live's ReferencePitch"):
+                mapper.invoke("tuning.set", {"setRef": set_ref, "expectedObjectIdentity": identity, "expectedRevision": mapper._tuning_revision(),
+                                             "referencePitch": {"frequency": 432, "indexInOctave": 9, "octave": 3}})
+        self.assertEqual(song.tuning_system.reference_pitch, FakeReferencePitch(frequency=440.0, index_in_octave=9, octave=3))
 
 
 class FakeGroove:
@@ -7561,6 +7759,30 @@ class PythonRunTests(unittest.TestCase):
         allowed = self.run_python(f"# not remove_notes or replace_selected_notes\nresult = [callable(getattr({clip}, name, None)) for name in ('remove_notes_extended', 'remove_notes_by_id')]")
         self.assertTrue(allowed["ok"], allowed)
 
+    def test_a_script_that_routes_an_input_from_main_is_refused_before_it_runs(self):
+        # #195: Live 12.4 crashed (EXCEPTION_ACCESS_VIOLATION, unsaved work lost) on this line from the model.
+        crashing = [
+            "song.tempo = 126\nt = song.tracks[0]\nt.input_routing_type = next(r for r in t.available_input_routing_types if r.display_name == 'Main')",
+            "song.tempo = 126\ndef route(t, name):\n    t.input_routing_type = [r for r in t.available_input_routing_types if r.display_name == name][0]\nroute(song.tracks[0], 'Master')",
+            "song.tempo = 126\nsetattr(song.tracks[0], 'input_routing_type', [r for r in song.tracks[0].available_input_routing_types if r.display_name == 'Main'][0])",
+        ]
+        for code in crashing:
+            with self.subTest(code=code):
+                result = self.run_python(code)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["type"], "ValueError")
+                self.assertTrue(result["error"]["message"].startswith("Live crashes when a track's input is set to Main"), result["error"]["message"])
+                self.assertIn('"Resampling"', result["error"]["message"])
+                self.assertEqual(self.song.tempo, 120, "nothing in the script ran")
+        # An output to Main, an input read or compared, and an input from Resampling all run.
+        for code in [
+            "t = song.tracks[0]\nresult = [r.display_name for r in t.available_output_routing_types if r.display_name == 'Main']",
+            "result = song.tracks[0].input_routing_type == 'Main'",
+            "t = song.tracks[0]\nchoices = [r for r in t.available_input_routing_types if r.display_name == 'Resampling']\nresult = len(choices)",
+        ]:
+            with self.subTest(code=code):
+                self.assertNotIn("crashes", str(self.run_python(code).get("error")), code)
+
     def test_authenticated_invoke_needs_no_authority_and_runs_on_the_live_queue(self):
         self.assertIn("python.run", remote_module._AUTHORITY_FREE_INVOKES)
         self.assertNotIn("python.run", remote_module._READ_ONLY_INVOKES)
@@ -8767,14 +8989,14 @@ class ExtendedOperationTests(unittest.TestCase):
 
     def test_tuning_read_gives_the_reference_pitch_and_the_pseudo_octave(self):
         song = FakeSong(); song.tuning_system = FakeTuningSystem(); song.root_note = 0; song.scale_name = "Major"; song.scale_mode = True; song.scale_intervals = [0, 2, 4, 5, 7, 9, 11]
-        song.tuning_system.reference_pitch = types.SimpleNamespace(frequency=432.0, index_in_octave=9, octave=4); song.tuning_system.number_of_notes_in_pseudo_octave = 12
+        song.tuning_system.reference_pitch = FakeReferencePitch(frequency=432.0, index_in_octave=9, octave=4)
         mapper = LiveObjectMapper(song); set_ref = mapper.snapshot()["set"]["ref"]
         read = mapper.invoke("tuning.read", {"setRef": set_ref}); validate_operation_payload("tuning.read", "result", read)
         self.assertEqual((read["referencePitch"], read["notesInPseudoOctave"]), ({"frequency": 432.0, "indexInOctave": 9, "octave": 4}, 12))
         # The revision covers them: a new reference pitch is a new revision.
-        song.tuning_system.reference_pitch = types.SimpleNamespace(frequency=440.0, index_in_octave=9, octave=4)
+        song.tuning_system.reference_pitch = FakeReferencePitch(frequency=440.0, index_in_octave=9, octave=4)
         self.assertNotEqual(mapper.invoke("tuning.read", {"setRef": set_ref})["revision"], read["revision"])
-        song.tuning_system.reference_pitch = {"note": 69, "frequency": 440.0}
+        song.tuning_system._reference = {"note": 69, "frequency": 440.0}  # nothing Live returns: read as none
         self.assertIsNone(mapper.invoke("tuning.read", {"setRef": set_ref})["referencePitch"])
 
     def test_a_track_shows_its_racks_chains_and_a_clip_shows_a_parameters_envelope(self):

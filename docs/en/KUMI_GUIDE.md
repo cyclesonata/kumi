@@ -257,6 +257,18 @@ Place); consolidating; converting audio to MIDI (melody, harmony, drums);
 separating stems; slicing to a MIDI track; saving the Set, or collecting all and
 saving; exporting audio or a MIDI clip.
 
+Kumi also works with Set files through Live's File menu: it starts a new Set,
+and on Windows it also saves the Set under a name and folder you give (Save Live
+Set As) or opens one by its file. On a Mac Kumi can't fill in Live's Save and
+Open dialogs yet, so it asks you to do those two in Live. When the open Set has
+unsaved changes, Live asks first; Kumi saves or discards them as you said, and
+asks you when you didn't. If a file is already where a Set is to be saved, Live
+asks before replacing it, and Kumi leaves that answer to you. Live keeps a Set in
+a project folder: saved under a new name in a folder that isn't a project, it
+makes "<name> Project" there, and Kumi says where the Set went. Live drops Kumi for
+a moment while a Set opens, and the request that asked for it carries on in the
+new Set. Kumi never writes `.als` files itself.
+
 - Kumi selects what the command works on, presses it, and says what changed.
   When Live opens a dialog (Export, say), Kumi reads it and answers it.
 - Tracks are selected by name through the accessibility Live 12 offers screen
@@ -270,8 +282,11 @@ saving; exporting audio or a MIDI clip.
 - HISTORY lists each command, and Live's own undo (Cmd-Z) takes it back.
 - **On a Mac** this uses Accessibility. The first time, macOS asks: turn on the
   app Kumi runs in (your terminal) in System Settings › Privacy & Security ›
-  Accessibility. `kumi doctor` says whether it's on. **On Windows** it uses UI
-  Automation and needs nothing set up.
+  Accessibility. `kumi doctor` says whether it's on. **On Windows** it reads
+  Live's menu bar and dialogs through Windows itself (and selects tracks through
+  UI Automation), and needs nothing set up; `kumi doctor` checks it can read
+  Live's menus. On Windows, Live's prompts say Yes, No and Cancel where a Mac
+  says Save and Don't Save: Kumi takes either.
 
 ## Listening
 
@@ -395,6 +410,11 @@ the video builds and builds it in your Set. Where the video uses something your
 Set doesn't have (a plugin, a sample), Kumi says so and uses Live's closest
 device.
 
+In one answer, Kumi isn't shown a moment again once it has seen it three times,
+and it sees at most 240 pictures of one video. A long request ("every setting
+it uses") ends with what Kumi read, saying what it couldn't, instead of going
+round the same frames again.
+
 What it needs:
 
 - **yt-dlp**, which Kumi fetches into `~/.kumi/tools` the first time (about
@@ -438,6 +458,11 @@ instrument is written in GenExpr, the language of Max's gen~. Effects get Mix
 and Output knobs; instruments play 8 notes at once, or up to 32. Both end in
 Kumi's output stage, which keeps their output safe (no NaN, denormals or DC,
 held under +6 dBFS). Kumi listens to what it made and fixes what it hears.
+
+A face styled beyond the knobs (panels, words, colours) is drawn by Max, which
+Kumi can't see. When a device from your User Library loads, Kumi reads its face
+and is told what a panel hides there (a backdrop listed before the rest covers
+them), so it doesn't describe a design you won't see.
 
 It needs Max for Live (Live Suite, or Standard with the add-on).
 
@@ -528,7 +553,8 @@ Kumi tells you, offers a way round and notes the missing capability in
 conversation; `kumi report` includes it when you choose to send one.
 
 Kumi also notes where each answer's time went (model, tools, Live requests,
-bytes sent) in `~/.kumi/timings.jsonl`, about the latest 1000 answers. Like the gap
+bytes sent, and its look at the Set before the model is asked) in
+`~/.kumi/timings.jsonl`, about the latest 1000 answers. Like the gap
 log, it stays on your computer and goes out only in a `kumi report`.
 
 ## Conversations and catching up

@@ -8,7 +8,7 @@
 //! again. Each also says where it happened: the conversation, the Set's project and fingerprint, and the producer's
 //! latest requests.
 use super::{
-    contracts::{ChangeRecord, JsonObject, KernelTool, Picked, ToolResult},
+    contracts::{with_final, ChangeRecord, JsonObject, KernelTool, Picked, ToolResult},
     errors::RuntimeError,
     memory::suspect_note,
     store_client::StoreClient,
@@ -31,7 +31,7 @@ const REQUEST_CHARS: usize = 300;
 const QUOTE_CHARS: usize = 200;
 const DESCRIPTION: &str = concat!(
     "When the producer's message reacts to what you did, or says what they like or don't in their music (\"too bright\", ",
-    "\"love that groove\", \"never put reverb on the kick\", \"more like Burial\"), note it here in the same reply, ",
+    "\"love that groove\", \"never put reverb on the kick\", \"more like Burial\"), note it here in the same reply (final: true when that reply is your finished answer), ",
     "quoting their own words, even when you also remember it. The producer doesn't see it, and it changes nothing now. ",
     "Not for a request with no opinion in it (\"add a kick\"), and never for your own judgement."
 );
@@ -300,7 +300,7 @@ impl KernelTool for ReactionTool {
         DESCRIPTION
     }
     fn input_schema(&self) -> JsonObject {
-        json!({"type":"object","additionalProperties":false,"required":["quote","lean"],"properties":{
+        with_final(json!({"type":"object","additionalProperties":false,"required":["quote","lean"],"properties":{
             "quote":{"type":"string","minLength":2,"maxLength":QUOTE_CHARS,"description":"The producer's own words from this message, exactly as they wrote them"},
             "lean":{"type":"string","enum":["like","dislike","more","less","never","always","like_reference"],
                 "description":"like or dislike what it's about; more or less of it; never or always (a rule they state); like_reference: they want it more like an artist, track or sound they name"},
@@ -310,13 +310,13 @@ impl KernelTool for ReactionTool {
         }})
         .as_object()
         .unwrap()
-        .clone()
+        .clone())
     }
     async fn execute(&self, input: JsonObject, _signal: Signal) -> Result<ToolResult, RuntimeError> {
         Ok(match self.log.reaction(&input) {
-            // Not quiet yet: a quiet call ends the answer, and words beside it ("Making it darker now.") would end
-            // the turn before its change. It gets `final` when quiet calls take one.
-            Ok(()) => ToolResult { text: stringify(&json!({"noted":true})), ..Default::default() },
+            // Quiet: beside words like "Making it darker now." the model is called again for the change, and the
+            // answer ends here only with `final` beside a finished one (#180).
+            Ok(()) => ToolResult { text: stringify(&json!({"noted":true})), reply: Some(String::new()), ..Default::default() },
             Err(why) => ToolResult::error(why),
         })
     }

@@ -68,7 +68,11 @@ pub struct ConnectionOptions {
     pub on_retire: Option<Rc<dyn Fn(&str)>>,
     /// A Live restart lets the owner retry its Ears device setup.
     pub on_live_lost: Option<Rc<dyn Fn()>>,
+    /// Whether Live's process is running: with it still running, losing Live means it's opening another
+    /// Set, not that it closed. None: every loss counts as Live closing.
+    pub live_running: Option<LiveRunning>,
 }
+pub type LiveRunning = Rc<dyn Fn() -> LocalBoxFuture<'static, bool>>;
 impl ConnectionOptions {
     pub fn new(on_connection: ConnectionListener) -> Self {
         Self {
@@ -85,6 +89,7 @@ impl ConnectionOptions {
             reconnect_interval_ms: None,
             on_retire: None,
             on_live_lost: None,
+            live_running: None,
         }
     }
 }
@@ -151,6 +156,10 @@ pub struct LiveConnection {
     listening: Cell<bool>,
     hearing: Cell<bool>,
     lost_epoch: Cell<Option<f64>>,
+    /// Why Live was last lost, for what the reconnection says.
+    lost_cause: Cell<Option<DisconnectCause>>,
+    /// Until when (ms) losing Live with it still running is a Set switch Kumi asked for.
+    expect_set_until: Cell<i64>,
     looking: Cell<bool>,
     watcher: RefCell<Option<Signal>>,
     last_fresh_bridge: Cell<i64>,
@@ -195,6 +204,8 @@ impl LiveConnection {
             listening: Cell::new(false),
             hearing: Cell::new(false),
             lost_epoch: Cell::new(None),
+            lost_cause: Cell::new(None),
+            expect_set_until: Cell::new(0),
             looking: Cell::new(false),
             watcher: RefCell::new(None),
             last_fresh_bridge: Cell::new(0),
@@ -423,19 +434,59 @@ impl LiveConnection {
         }
         self.keep_looking();
     }
+    /// Kumi is about to ask Live for another Set (a new one, or one to open): losing Live in the next
+    /// `for_ms` with it still running is that switch, and the request that asked carries on.
+    pub fn expect_set_change(&self, for_ms: i64) {
+        self.expect_set_until.set(Utc::now().timestamp_millis() + for_ms);
+    }
+    /// A switch Kumi asked for that didn't happen (cancelled, refused, timed out) or is over: the next one is
+    /// the producer's (#188).
+    pub fn forget_set_change(&self) {
+        self.expect_set_until.set(0);
+    }
+    /// Live is back after being lost (or was never lost).
+    pub fn is_back(&self) -> bool {
+        !self.lost.get() && self.available.get()
+    }
     pub fn lose_live(&self) {
         if self.closed.get() || self.closing_started.get() || self.lost.replace(true) {
             return;
         }
         self.lost_epoch.set(self.last_epoch.get());
+        // Live closing until the probe says otherwise: a Live back before it answers is said as such.
+        self.lost_cause.set(Some(DisconnectCause::Live));
         self.invalidate();
-        (self.options.on_connection)(ConnectionState::Disconnected, Some(DisconnectCause::Live));
-        if let Some(callback) = &self.options.on_live_lost {
-            callback();
-        }
         Self::stop_timer(&self.transport_timer);
         self.report_transport(None);
         self.keep_looking();
+        let Some(running) = self.options.live_running.clone() else {
+            self.live_gone(DisconnectCause::Live);
+            return;
+        };
+        // Live still running means its Remote Script went away while it opens another Set (#188): ask
+        // before saying what happened. A reconnection in the meantime has said so already.
+        let weak = self.weak.clone();
+        tokio::task::spawn_local(async move {
+            let running = running().await;
+            let Some(this) = weak.upgrade() else { return };
+            if !this.lost.get() || this.closed.get() {
+                return;
+            }
+            this.live_gone(if !running {
+                DisconnectCause::Live
+            } else if Utc::now().timestamp_millis() <= this.expect_set_until.get() {
+                DisconnectCause::AskedSet
+            } else {
+                DisconnectCause::Set
+            });
+        });
+    }
+    fn live_gone(&self, cause: DisconnectCause) {
+        self.lost_cause.set(Some(cause));
+        (self.options.on_connection)(ConnectionState::Disconnected, Some(cause));
+        if let Some(callback) = &self.options.on_live_lost {
+            callback();
+        }
     }
     fn keep_looking(&self) {
         Self::stop_timer(&self.watcher);
@@ -510,8 +561,11 @@ impl LiveConnection {
     }
     fn back(&self, restarted: bool, fresh_bridge: bool) {
         Self::stop_timer(&self.watcher);
+        let cause = self.lost_cause.take();
         if let Some(retire) = &self.options.on_retire {
-            if restarted {
+            if restarted && matches!(cause, Some(DisconnectCause::Set | DisconnectCause::AskedSet)) {
+                retire("Live opened another Set since, so Kumi can't undo this; it's in the earlier Set if that was saved.");
+            } else if restarted {
                 retire("Live restarted since, so Kumi can't undo this; it's in the Set only if the Set was saved.");
             } else if fresh_bridge {
                 retire("Kumi's link to Live restarted since, so Kumi can't undo this; Live's own undo still can.");

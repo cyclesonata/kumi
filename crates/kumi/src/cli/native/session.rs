@@ -232,6 +232,13 @@ pub(super) async fn run_session(
     };
     let settings_file = load_settings_file(&io.env)?;
     let settings = read_settings(&settings_file);
+    // What's new since this home's Kumi last started. A home an earlier Kumi used (an update kept the app
+    // before it, or Kumi's database is there) is updated, not new, the first time it has no version noted.
+    let used_before = {
+        let home = std::path::Path::new(&settings_file).parent().unwrap_or(std::path::Path::new("."));
+        home.join("app.previous").exists() || home.join("kumi.db").exists()
+    };
+    let whats_new_on = settings.whats_new != Some(false);
     let projects_dir = load_projects_dir(&io.env)?;
     let tools_dir = load_tools_dir(&io.env)?;
     let library = create_library(LibraryOptions {
@@ -322,6 +329,9 @@ pub(super) async fn run_session(
             options.restore_file = Some(restore_file.clone());
             options.project_store = Some(project_store.clone());
             options.user_library = user_library.clone();
+            // With Live still running, losing it means it's opening another Set, not that it closed (#188).
+            options.live_running =
+                Some(Rc::new(|| async { bridge_setup::is_live_running(bridge_setup::default_run()).await }.boxed_local()));
             options.on_focus = Some({
                 let emit = emit.clone();
                 Rc::new(move |focus| emit(SessionEvent::Focus { focus }))
@@ -562,10 +572,18 @@ pub(super) async fn run_session(
     };
     let history = Rc::new(RefCell::new(open_input_history(Some(load_input_history_file(&io.env)?.into()), secrets.clone())));
     let full_screen = io.input.is_tty() && io.out.is_tty() && io.env.get("KUMI_UI").map(String::as_str) != Some("plain");
+    // What's new is for someone reading it: the full screen, or plain lines at a terminal (a screen reader).
+    // A script piping Kumi neither sees it nor uses it up.
+    let whats_new = if full_screen || io.input.is_tty() {
+        crate::whats_new::at_start(&settings_file, KUMI_VERSION, used_before, whats_new_on)
+    } else {
+        None
+    };
     let ui: Rc<dyn Terminal> = if full_screen {
         let mut options = TuiOptions::new(session, io.input.clone(), io.out.clone(), mode);
         options.models = Some(models);
         options.startup_notice = if connect_why.is_some() { None } else { notice };
+        options.whats_new = whats_new;
         options.connect_live = live_possible.then(|| ConnectLive {
             why: connect_why,
             bridge: bundled.clone().unwrap_or_default(),
@@ -607,6 +625,7 @@ pub(super) async fn run_session(
     } else {
         let mut options = TerminalOptions::new(session, io.input.clone(), io.out.clone(), models, mode);
         options.startup_notice = notice;
+        options.whats_new = whats_new;
         options.secrets = secrets.clone();
         options.history = Some(history);
         options.updates = Some(updates);

@@ -52,7 +52,7 @@ Windows against fake Live objects. The records are indexed in
 | Devices | Load from the Browser; parameters, on/off, move, duplicate, delete; racks, chains, drum pads, macros and variations; save, recall and morph device states; Drift, Drum Cell, EQ Eight, Hybrid Reverb, Meld, Looper, Simpler, Wavetable, Roar, Shifter, Spectral Resonator and CC Control settings; plug-in parameters, presets and editor window | Remote Script; Extension or Remote Script for duplicating | Exact; deleting a device and rack actions: not undoable | Acceptance; earlier runs (every device in the Browser) |
 | Macro mappings, Follow Actions | Macro and variation names, mapping parameters to macros, rack chain zones, Session clip Follow Actions | Willington | Exact | Willington records |
 | Browser and library | Search, roots, inspect, preview; Live's library database (tags, kinds, plug-in inventory; opt-in, read-only) | Remote Script; Bridge reads the database | None | Earlier runs |
-| Transport and song | Play, stop, continue, position, loop, metronome, punch, tap tempo, nudge; tempo, time signature, swing, launch and record quantization; scale and tuning; groove pool; Link settings; Live's own undo and redo; one Live undo step for several changes | Remote Script | Exact for settings; actions: none | Acceptance |
+| Transport and song | Play, stop, continue, position, loop, metronome, punch, tap tempo, nudge; tempo, time signature, swing, launch and record quantization; scale; the loaded tuning's name, range and reference pitch (Live loads a tuning only from its Browser, not from Python); groove pool; Link settings; Live's own undo and redo; one Live undo step for several changes | Remote Script | Exact for settings; actions: none | Acceptance |
 | Playing and recording | Launch clips and scenes, hold launch buttons, guarded scene audition, emergency stop; Session and Arrangement recording; capturing MIDI and scenes | Remote Script | None (it plays); captured clips: exact | Acceptance; earlier runs |
 | Offline render | An audio track's own clips, before its devices, many times faster than real time | Extension | None | Acceptance |
 | Views and selection | Selected track, scene, clip, device, parameter and chain; Session or Arrangement, zoom, detail views; Live's dialogs; status-bar messages | Remote Script | Exact where Live lets it be put back; dialogs and messages: none | Earlier runs |
@@ -89,7 +89,7 @@ of reach of both Live's Python API and the Extensions SDK, or out of scope:
 
 | Not offered | What there is instead |
 | --- | --- |
-| Saving, opening or exporting the Set; Collect All and Save | A verified backup of the saved Set; importing a single file into the project. Save in Live. |
+| Saving, opening or exporting the Set; Collect All and Save (through Live's scripting) | Through Live's own menus instead: save, new Set, Collect All and Save, export; save as and open a Set on Windows. A verified backup of the saved Set; importing a single file into the project. |
 | Exporting the mix or stems; freezing and flattening | Offline render of an audio track's own clips; recording through Resampling |
 | Creating group tracks | — |
 | Editing Arrangement automation | Reading it; envelopes in Session clips |

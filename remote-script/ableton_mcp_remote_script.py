@@ -46,6 +46,60 @@ _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-ti
 _encode_string = json.encoder.encode_basestring
 
 
+def _wire_keys(value: dict[Any, Any]) -> list[Any]:
+    """An object's keys in the bridge's order: JavaScript's, by UTF-16 code units. That is Python's
+    code-point order except where a character above U+FFFF (an emoji) meets one in U+E000-U+FFFF
+    (fullwidth letters, halfwidth katakana, the variation selector in "❤️"): "💀 KICK" sorts before
+    "ＢＡＳＳ" there and after it here, and a frame signed in the wrong order is refused (#201)."""
+    if all(type(key) is str and key.isascii() for key in value):
+        return sorted(value)
+    return sorted(value, key=lambda key: (key if type(key) is str else str(key)).encode("utf-16-be", "surrogatepass"))
+
+
+# Each object's key list, laid out for the wire once: its keys in the bridge's order, each with its text and
+# colon. A big read is thousands of rows of a few shapes (a parameter's, a device's), so most are reused. Only
+# a row's few keys are kept, and only so many lists: an object keyed by names or refs (a Python answer's) isn't.
+_WIRE_LAYOUTS: dict[tuple[Any, ...], tuple[tuple[Any, str], ...]] = {}
+_WIRE_LAYOUTS_KEPT = 512
+_WIRE_LAYOUT_KEYS = 64
+
+
+def _wire_layout(value: dict[Any, Any]) -> tuple[tuple[Any, str], ...]:
+    keys = tuple(value)
+    layout = _WIRE_LAYOUTS.get(keys)
+    if layout is None:
+        layout = tuple((key, (_encode_string(key) if type(key) is str else json.dumps(key, ensure_ascii=False)) + ":") for key in _wire_keys(value))
+        # Only string keys are kept: 1 and True are equal keys with different texts.
+        if len(keys) <= _WIRE_LAYOUT_KEYS and len(_WIRE_LAYOUTS) < _WIRE_LAYOUTS_KEPT and all(type(key) is str for key in keys): _WIRE_LAYOUTS[keys] = layout
+    return layout
+
+
+def _wire_scalar(value: Any) -> str | None:
+    """A plain string's, number's, boolean's or null's canonical text; None for anything else (a container,
+    a subclass, a string too long or a number the general path writes or refuses)."""
+    kind = type(value)
+    if kind is str: return _encode_string(value) if len(value) * 2 <= MAX_WIRE_STRING_LENGTH else None
+    if kind is float:
+        if value.is_integer(): return str(int(value)) if abs(value) < 1e21 else None
+        if math.isfinite(value):
+            # Python and JavaScript both write a float's shortest round-trip digits; they differ only in
+            # where they switch to an exponent, so without one Python's text is JavaScript's.
+            text = repr(value)
+            return text if "e" not in text else _js_number(value)
+        return None
+    if kind is int: return str(value)
+    if value is None: return "null"
+    if kind is bool: return "true" if value else "false"
+    return None
+
+
+def _too_long_for_wire(text: str) -> bool:
+    """Whether the bridge refuses a string this long. It counts UTF-16 code units, so an emoji counts two."""
+    if len(text) * 2 <= MAX_WIRE_STRING_LENGTH or text.isascii():
+        return len(text) > MAX_WIRE_STRING_LENGTH
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2 > MAX_WIRE_STRING_LENGTH
+
+
 def _js_number(value: float) -> str:
     """A float as JavaScript writes it (Number::toString), so both ends of the wire sign the
     same text: Python writes 0.0000022 as "2.2e-06", JavaScript as "0.0000022". The digits are
@@ -248,6 +302,29 @@ def _live_module() -> Any:
         return None
 
 
+def _tuning_makers() -> tuple[Any, Any]:
+    """Live's PitchClassAndOctave and ReferencePitch, the types a TuningSystem's lowest_note, highest_note and
+    reference_pitch take: Live 12.4 refuses a dict for any of them (#206). None outside Live."""
+    module = getattr(_live_module(), "TuningSystem", None)
+    place, pitch = getattr(module, "PitchClassAndOctave", None), getattr(module, "ReferencePitch", None)
+    return (place if callable(place) else None), (pitch if callable(pitch) else None)
+
+
+def _made(maker: Any, **fields: Any) -> Any:
+    """One of Live's small value types, by keyword, or in the order given (Live's own) where it takes no keywords.
+    Live 12.4: PitchClassAndOctave(index_in_octave, octave), ReferencePitch(index_in_octave, octave, frequency)."""
+    try:
+        return maker(**fields)
+    except TypeError:
+        return maker(*fields.values())
+
+
+# What a tuning's note tunings can't be: Live keeps one value a step of the loaded tuning's pseudo-octave, and
+# Live's Python can neither load a tuning nor make one (#206).
+NOTE_TUNINGS_FIXED = ("noteTunings can't be set: Live tunes each step of the loaded tuning's pseudo-octave (13 for "
+                      "Bohlen-Pierce), not 128 MIDI notes, and loads a tuning only from an .ascl file in its Browser.")
+
+
 def _warp_marker_maker() -> Any:
     """Live's WarpMarker, which Clip.add_warp_marker takes: called by keyword, since its positional order is sample
     time, then beat time. Live 12.4 refuses the dict the LOM docs show. None outside Live."""
@@ -259,6 +336,33 @@ def _warp_marker_maker() -> Any:
 # ("A custom MIDI Remote Script uses an older process to modify MIDI notes…"), holding the bridge until
 # someone answers, and notes rewritten that way lose their MPE, probability and velocity data.
 _LEGACY_NOTE_CALLS = ("remove_notes", "replace_selected_notes")
+
+
+# Live 12.4 crashes (EXCEPTION_ACCESS_VIOLATION, unsaved work lost) when an audio track's input is
+# set to "Main", the main output (#195); Live 11 called it "Master". Recording the mix goes through
+# "Resampling", as Kumi's own capture does.
+_CRASHING_INPUTS = frozenset({"Main", "Master"})
+INPUT_FROM_MAIN = ("Live crashes when a track's input is set to Main (Live 12.4: unsaved work is lost), so nothing ran. "
+                   "To record the mix, set the input to \"Resampling\", which is what Main plays. A script that sets an output to Main "
+                   "and an input to something else can do them in two scripts; a track named Main or Master needs another name to be an input.")
+
+
+def _sets_input_from_main(code: Any) -> bool:
+    """Whether a compiled script assigns a track's input routing and names Main (or Master) anywhere:
+    crude by design, since the choice is usually found by its name. Its functions are included."""
+    try:
+        import dis
+    except ImportError:
+        dis = None
+    sets_input = False; strings: set[str] = set(); pending = [code]
+    while pending:
+        current = pending.pop()
+        if dis is None: sets_input = sets_input or "input_routing_type" in current.co_names
+        else: sets_input = sets_input or any(instruction.opname == "STORE_ATTR" and instruction.argval == "input_routing_type" for instruction in dis.get_instructions(current))
+        for constant in current.co_consts:
+            if isinstance(constant, str): strings.add(constant)
+            elif hasattr(constant, "co_consts"): pending.append(constant)
+    return (sets_input or "input_routing_type" in strings) and bool(strings & _CRASHING_INPUTS)
 
 
 def _legacy_note_calls(code: Any) -> list[str]:
@@ -691,40 +795,51 @@ class AuthenticatedRemoteScript:
     @classmethod
     def _canonical(cls, value: Any, depth: int = 0) -> str:
         """The canonical wire text both ends sign. The common types go straight to their text (a big
-        Set's answer is thousands of strings and numbers, and Live's thread waits while it's made);
-        anything else takes the general path, which writes the same text."""
+        Set's answer is thousands of strings and numbers, and Live's thread waits while it's made): an
+        object's or list's plain values are written in its own loop, and an object's key order and key
+        texts are laid out once per key list (#174). Anything else takes the general path, which
+        writes the same text."""
         if depth > MAX_WIRE_DEPTH:
             raise ValueError("wire payload is too deeply nested")
         kind = type(value)
-        if kind is str:
-            if len(value) > MAX_WIRE_STRING_LENGTH:
-                raise ValueError("wire string is too large")
-            return _encode_string(value)
         if kind is dict:
             if len(value) > MAX_WIRE_OBJECT_PROPERTIES:
                 raise ValueError("wire object is too large")
-            return "{" + ",".join((_encode_string(key) if type(key) is str else json.dumps(key, ensure_ascii=False)) + ":" + cls._canonical(value[key], depth + 1) for key in sorted(value)) + "}"
+            if not value:
+                return "{}"
+            # Its values are a level down, where any value is too deep.
+            if depth >= MAX_WIRE_DEPTH:
+                raise ValueError("wire payload is too deeply nested")
+            depth += 1; parts = []
+            for key, prefix in _wire_layout(value):
+                item = value[key]; text = _wire_scalar(item)
+                parts.append(prefix + (text if text is not None else cls._canonical(item, depth)))
+            return "{" + ",".join(parts) + "}"
         if kind is list:
             if len(value) > MAX_WIRE_ARRAY_LENGTH:
                 raise ValueError("wire array is too large")
-            return "[" + ",".join(cls._canonical(item, depth + 1) for item in value) + "]"
-        if kind is int:
-            return str(value)
-        if kind is float and math.isfinite(value) and value != 0 and not (value.is_integer() and abs(value) < 1e21):
-            # Python and JavaScript both write a float's shortest round-trip digits; they differ only in
-            # where they switch to an exponent, so without one Python's text is JavaScript's.
-            text = repr(value)
-            return text if "e" not in text else _js_number(value)
-        if value is None:
-            return "null"
-        if kind is bool:
-            return "true" if value else "false"
+            if not value:
+                return "[]"
+            if depth >= MAX_WIRE_DEPTH:
+                raise ValueError("wire payload is too deeply nested")
+            depth += 1; parts = []
+            for item in value:
+                text = _wire_scalar(item)
+                parts.append(text if text is not None else cls._canonical(item, depth))
+            return "[" + ",".join(parts) + "]"
+        text = _wire_scalar(value)
+        if text is not None:
+            return text
+        if kind is str:
+            if _too_long_for_wire(value):
+                raise ValueError("wire string is too large")
+            return _encode_string(value)
         return cls._canonical_general(value, depth)
 
     @classmethod
     def _canonical_general(cls, value: Any, depth: int) -> str:
         if value is None or isinstance(value, (str, bool)):
-            if isinstance(value, str) and len(value) > MAX_WIRE_STRING_LENGTH:
+            if isinstance(value, str) and _too_long_for_wire(value):
                 raise ValueError("wire string is too large")
             return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         if isinstance(value, int):
@@ -744,7 +859,7 @@ class AuthenticatedRemoteScript:
         if isinstance(value, dict):
             if len(value) > MAX_WIRE_OBJECT_PROPERTIES:
                 raise ValueError("wire object is too large")
-            return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + cls._canonical(value[key], depth + 1) for key in sorted(value)) + "}"
+            return "{" + ",".join(json.dumps(key, ensure_ascii=False) + ":" + cls._canonical(value[key], depth + 1) for key in _wire_keys(value)) + "}"
         raise TypeError("unsupported wire value")
 
     @classmethod
@@ -1815,40 +1930,49 @@ class LiveObjectMapper:
         return [row for parameter_index, parameter in enumerate(native_parameters) for row in [self._parameter_row(parameter, parameter_index, device_ref)] if row is not None]
 
     def _parameter_row(self, parameter: Any, parameter_index: int, device_ref: str) -> dict[str, Any] | None:
-        """One parameter's row; None for one without a numeric value and range (rows leave it out)."""
-        minimum = self._read_attr(parameter, "min", "min_value")
-        maximum = self._read_attr(parameter, "max", "max_value")
-        value = self._read_attr(parameter, "value")
-        numeric = (minimum, maximum, value)
-        if any(not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)) for item in numeric):
-            return None
+        """One parameter's row; None for one without a numeric value and range (rows leave it out).
+        A big rack's whole read is thousands of these on Live's thread (#174), so each of Live's
+        attributes is read once."""
+        read = self._read_attr
+        minimum = read(parameter, "min", "min_value")
+        maximum = read(parameter, "max", "max_value")
+        value = read(parameter, "value")
+        for item in (minimum, maximum, value):
+            if not isinstance(item, (int, float)) or isinstance(item, bool) or not math.isfinite(float(item)):
+                return None
         parameter_ref = self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}")
         # Live's own text for the value, as its panel shows it ("20.0 kHz"). Live 12's
         # display_value is a bare number in those units, so it is only the fallback.
         display = None
-        formatter = self._read_attr(parameter, "str_for_value")
+        formatter = read(parameter, "str_for_value")
         if callable(formatter):
             try:
                 display = formatter(value)
             except Exception:
                 display = None
         if display is None or str(display) == "":
-            display = self._read_attr(parameter, "display_value")
+            display = read(parameter, "display_value")
         if display is None:
             display = value
+        enabled = read(parameter, "is_enabled", "enabled"); automatable = read(parameter, "is_automatable", "automatable")
+        default = read(parameter, "default_value"); original_name = read(parameter, "original_name"); state = read(parameter, "state")
+        # Live raises for a continuous parameter's value_items ("Only quantized parameters have value
+        # items"), and a raise costs Live's thread more than the rest of the row.
+        quantized = read(parameter, "is_quantized")
+        items = None if quantized is False else read(parameter, "value_items")
         return {
             "ref": parameter_ref, "parentRef": device_ref, "objectIdentity": self._capture_object_identity(parameter),
-            "name": str(self._read_attr(parameter, "name") or f"Parameter {parameter_index + 1}"),
+            "name": str(read(parameter, "name") or f"Parameter {parameter_index + 1}"),
             "value": float(value), "min": float(minimum), "max": float(maximum),
-            "quantization": self._parameter_step(parameter),
-            "enabled": bool(self._read_attr(parameter, "is_enabled", "enabled") if self._read_attr(parameter, "is_enabled", "enabled") is not None else True),
-            "automatable": bool(self._read_attr(parameter, "is_automatable", "automatable") if self._read_attr(parameter, "is_automatable", "automatable") is not None else True),
-            "automationState": str(self._read_attr(parameter, "automation_state") or "none"),
+            "quantization": self._parameter_step(parameter, quantized),
+            "enabled": bool(enabled if enabled is not None else True),
+            "automatable": bool(automatable if automatable is not None else True),
+            "automationState": str(read(parameter, "automation_state") or "none"),
             "displayValue": str(display), "revision": self.refs.revision(parameter_ref),
-            "defaultValue": float(self._read_attr(parameter, "default_value")) if isinstance(self._read_attr(parameter, "default_value"), (int, float)) and not isinstance(self._read_attr(parameter, "default_value"), bool) and math.isfinite(float(self._read_attr(parameter, "default_value"))) else None,
-            "originalName": str(self._read_attr(parameter, "original_name") or "") if isinstance(self._read_attr(parameter, "original_name"), str) else None,
-            "state": int(self._read_attr(parameter, "state")) if isinstance(self._read_attr(parameter, "state"), int) and not isinstance(self._read_attr(parameter, "state"), bool) else None,
-            "valueItems": [str(item) for item in self._items(self._read_attr(parameter, "value_items") or [])] if self._read_attr(parameter, "value_items") is not None else None,
+            "defaultValue": float(default) if isinstance(default, (int, float)) and not isinstance(default, bool) and math.isfinite(float(default)) else None,
+            "originalName": str(original_name or "") if isinstance(original_name, str) else None,
+            "state": int(state) if isinstance(state, int) and not isinstance(state, bool) else None,
+            "valueItems": [str(item) for item in self._items(items or [])] if items is not None else None,
         }
 
     def _device_row(self, device: Any, device_ref: str, track_ref: str, track_index: int, path: str, index: int, traversal: dict[str, Any], depth: int) -> dict[str, Any]:
@@ -2791,13 +2915,18 @@ class LiveObjectMapper:
         if cache is not None: cache[key] = rows
         return rows
 
-    def _parameter_step(self, parameter: Any) -> float:
+    # A parameter's is_quantized, when its caller hasn't read it already.
+    _UNREAD: Any = object()
+
+    def _parameter_step(self, parameter: Any, quantized: Any = _UNREAD) -> float:
         """The step between a parameter's values: 1 for Live's stepped parameters (a switch, a
         waveform choice), which only take whole numbers; 0 for continuous ones. Live's API has no
-        step size of its own; an explicit one (the simulator's) is used as given."""
+        step size of its own; an explicit one (the simulator's) is used as given. `quantized` is
+        is_quantized as a row read it (it reads each attribute once)."""
         step = self._read_attr(parameter, "quantization")
         if isinstance(step, (int, float)) and not isinstance(step, bool) and math.isfinite(float(step)) and step > 0: return float(step)
-        return 1.0 if self._read_attr(parameter, "is_quantized") is True else 0.0
+        if quantized is self._UNREAD: quantized = self._read_attr(parameter, "is_quantized")
+        return 1.0 if quantized is True else 0.0
 
     def _set_parameter_in_gesture(self, reference: str, value: Any) -> dict[str, Any]:
         """A parameter change as a hand on a control makes it (begin_gesture, the value, end_gesture):
@@ -6780,32 +6909,21 @@ class LiveObjectMapper:
         return result
 
     def _tuning_state(self) -> dict[str, Any]:
+        """The loaded tuning system (Live's, #206) and the Set's scale. Live has no tuning loaded in a Set in
+        12-TET: then the system is empty. Its lowest and highest notes are places, a step of the
+        pseudo-octave and an octave; its note tunings one row a step (see _step_tunings)."""
         tuning = getattr(self.song, "tuning_system", None)
         def float_or_none(value: Any) -> float | None:
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         def int_or_none(value: Any) -> int | None:
             return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
-        note_tunings = []
-        if tuning is not None:
-            raw_tunings = self._items(self._read_attr(tuning, "note_tunings") or [])
-            if len(raw_tunings) > 128: raise ValueError("note tunings exceed their bound")
-            for index, entry in enumerate(raw_tunings):
-                if isinstance(entry, dict):
-                    note = entry.get("note", index); deviation = entry.get("deviation", entry.get("tuning", entry.get("cents")))
-                elif isinstance(entry, (int, float)) and not isinstance(entry, bool):
-                    note, deviation = index, entry
-                else:
-                    note = self._read_attr(entry, "note"); deviation = self._read_attr(entry, "deviation", "tuning", "cents")
-                    note = note if isinstance(note, int) else index
-                deviation_value = float_or_none(deviation)
-                if not isinstance(note, int) or isinstance(note, bool) or not 0 <= note <= 127 or deviation_value is None: raise ValueError("note tunings contain an unreadable entry")
-                note_tunings.append({"note": int(note), "deviation": deviation_value})
+        pseudo_octave = float_or_none(self._read_attr(tuning, "pseudo_octave_in_cents")) if tuning is not None else None
         system = {"name": str(self._read_attr(tuning, "name") or "") if tuning is not None else "",
-                  "lowestNote": self._setting_dict_or_none(self._read_attr(tuning, "lowest_note")) if tuning is not None else None,
-                  "highestNote": self._setting_dict_or_none(self._read_attr(tuning, "highest_note")) if tuning is not None else None,
-                  "referencePitch": self._setting_dict_or_none(self._read_attr(tuning, "reference_pitch")) if tuning is not None else None,
-                  "pseudoOctaveInCents": float_or_none(self._read_attr(tuning, "pseudo_octave_in_cents")) if tuning is not None else None,
-                  "noteTunings": note_tunings}
+                  "lowestNote": self._pitch_place(self._read_attr(tuning, "lowest_note")) if tuning is not None else None,
+                  "highestNote": self._pitch_place(self._read_attr(tuning, "highest_note")) if tuning is not None else None,
+                  "referencePitch": self._reference_pitch(tuning),
+                  "pseudoOctaveInCents": pseudo_octave,
+                  "noteTunings": self._step_tunings(self._read_attr(tuning, "note_tunings"), pseudo_octave) if tuning is not None else []}
         intervals = []
         for value in self._items(self._read_attr(self.song, "scale_intervals") or []):
             if not isinstance(value, int) or isinstance(value, bool): raise ValueError("scale intervals contain an unreadable entry")
@@ -6828,6 +6946,30 @@ class LiveObjectMapper:
         if isinstance(frequency, bool) or not isinstance(frequency, (int, float)) or not math.isfinite(float(frequency)) or not 0 <= float(frequency) <= 100000: return None
         if any(not isinstance(value, int) or isinstance(value, bool) for value in (index, octave)) or not 0 <= index <= 1024 or not -64 <= octave <= 64: return None
         return {"frequency": float(frequency), "indexInOctave": int(index), "octave": int(octave)}
+
+    def _pitch_place(self, value: Any) -> dict[str, int] | None:
+        """A PitchClassAndOctave (a tuning's lowest or highest note) as the wire has it: the step of the
+        pseudo-octave, from 0, and the octave."""
+        if value is None: return None
+        read = (lambda name, alias: value.get(name, value.get(alias))) if isinstance(value, dict) else (lambda name, alias: self._read_attr(value, name))
+        index, octave = read("index_in_octave", "indexInOctave"), read("octave", "octave")
+        if any(not isinstance(item, int) or isinstance(item, bool) for item in (index, octave)) or not 0 <= index <= 1024 or not -64 <= octave <= 64: return None
+        return {"indexInOctave": int(index), "octave": int(octave)}
+
+    @staticmethod
+    def _step_tunings(cents: Any, pseudo_octave: float | None) -> list[dict[str, Any]]:
+        """Live's note tunings: the cents of each step of the loaded tuning's pseudo-octave from its first,
+        one value a step (13 for Bohlen-Pierce), up to 1,902 cents. As rows, each step (note, from 0) and how
+        far it lies from the pseudo-octave split evenly (step × pseudoOctaveInCents ÷ steps), which keeps any
+        tuning Live loads within ±1200: an equal tuning is all 0. Empty for more than 128 steps or values
+        Kumi can't place, so a read never fails on them (#206)."""
+        try: values = list(cents) if cents is not None and not isinstance(cents, (str, bytes, dict)) else []
+        except TypeError: return []
+        if not values or len(values) > 128 or pseudo_octave is None or pseudo_octave <= 0: return []
+        if any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in values): return []
+        step = pseudo_octave / len(values)
+        rows = [{"note": index, "deviation": round(float(value) - index * step, 4) + 0.0} for index, value in enumerate(values)]
+        return rows if all(abs(row["deviation"]) <= 1200 for row in rows) else []
 
     def _setting_dict_or_none(self, value: Any) -> dict[str, Any] | None:
         if not isinstance(value, dict) or len(value) > 8: return None
@@ -6858,60 +7000,67 @@ class LiveObjectMapper:
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(self.song), args["expectedObjectIdentity"]): raise ValueError("Set identity changed since preview")
         if not isinstance(args.get("expectedRevision"), str) or not hmac.compare_digest(self._tuning_revision(), args["expectedRevision"]): raise ValueError("tuning or scale state changed since preview")
         tuning = getattr(self.song, "tuning_system", None)
-        proposals: list[tuple[Any, str, Any]] = []
+        # Each change: what's set, Live's own value for it, and what a read must show after.
+        proposals: list[tuple[Any, str, Any, Any]] = []
         if "name" in args:
             if tuning is None or not isinstance(args["name"], str) or not 1 <= len(args["name"]) <= 256: raise ValueError("name is invalid")
-            proposals.append((tuning, "name", args["name"]))
-        for key, attr in (("lowestNote", "lowest_note"), ("highestNote", "highest_note"), ("referencePitch", "reference_pitch")):
+            proposals.append((tuning, "name", args["name"], args["name"]))
+        place_maker, pitch_maker = _tuning_makers()
+        steps = self._read_attr(tuning, "number_of_notes_in_pseudo_octave") if tuning is not None else None
+        steps = steps if isinstance(steps, int) and not isinstance(steps, bool) and steps > 0 else 1025
+        def whole(value: Any) -> bool: return isinstance(value, int) and not isinstance(value, bool)
+        for key, attr in (("lowestNote", "lowest_note"), ("highestNote", "highest_note")):
             if key in args:
                 if tuning is None: raise ValueError("tuning system is unavailable")
-                normalized = self._setting_dict_or_none(args[key])
-                if normalized is None: raise ValueError(f"{key} is invalid")
-                proposals.append((tuning, attr, normalized))
-        if "noteTunings" in args:
-            rows = args["noteTunings"]
-            if tuning is None or not isinstance(rows, list) or len(rows) != 128: raise ValueError("noteTunings must contain exactly 128 entries")
-            seen: set[int] = set()
-            for row in rows:
-                if not isinstance(row, dict) or set(row) - {"note", "deviation"}: raise ValueError("noteTunings entries are invalid")
-                note, deviation = row.get("note"), row.get("deviation")
-                if not isinstance(note, int) or isinstance(note, bool) or not 0 <= note <= 127 or note in seen: raise ValueError("noteTunings notes are invalid")
-                if not isinstance(deviation, (int, float)) or isinstance(deviation, bool) or not math.isfinite(float(deviation)) or not -1200 <= float(deviation) <= 1200: raise ValueError("noteTunings deviations are invalid")
-                seen.add(note)
-            if self._read_attr(tuning, "note_tunings") is None: raise ValueError("note tunings are unavailable")
-            proposals.append((tuning, "note_tunings", rows))
+                place = args[key]
+                if not isinstance(place, dict) or set(place) != {"indexInOctave", "octave"} or not all(whole(place[name]) for name in place) \
+                        or not 0 <= place["indexInOctave"] < steps or not -64 <= place["octave"] <= 64:
+                    raise ValueError(f"{key} is invalid: it's {{indexInOctave, octave}}, a step of the tuning's pseudo-octave (from 0) and an octave")
+                if place_maker is None: raise ValueError(f"{key} needs Live's PitchClassAndOctave")
+                wanted = {"indexInOctave": place["indexInOctave"], "octave": place["octave"]}
+                proposals.append((tuning, attr, _made(place_maker, index_in_octave=wanted["indexInOctave"], octave=wanted["octave"]), wanted))
+        if "referencePitch" in args:
+            if tuning is None: raise ValueError("tuning system is unavailable")
+            pitch = args["referencePitch"]
+            frequency = pitch.get("frequency") if isinstance(pitch, dict) else None
+            if not isinstance(pitch, dict) or set(pitch) != {"frequency", "indexInOctave", "octave"} or isinstance(frequency, bool) or not isinstance(frequency, (int, float)) \
+                    or not math.isfinite(float(frequency)) or not 0 < float(frequency) <= 100000 or not whole(pitch["indexInOctave"]) or not whole(pitch["octave"]) \
+                    or not 0 <= pitch["indexInOctave"] < steps or not -64 <= pitch["octave"] <= 64:
+                raise ValueError("referencePitch is invalid: it's {frequency, indexInOctave, octave}, a frequency in Hz on a step of an octave")
+            if pitch_maker is None: raise ValueError("referencePitch needs Live's ReferencePitch")
+            wanted = {"frequency": float(frequency), "indexInOctave": pitch["indexInOctave"], "octave": pitch["octave"]}
+            proposals.append((tuning, "reference_pitch", _made(pitch_maker, index_in_octave=wanted["indexInOctave"], octave=wanted["octave"], frequency=wanted["frequency"]), wanted))
+        if "noteTunings" in args: raise ValueError(NOTE_TUNINGS_FIXED)
         if "rootNote" in args:
             value = args["rootNote"]
             if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 11: raise ValueError("rootNote is invalid")
             if self._read_attr(self.song, "root_note") is None: raise ValueError("root_note is unavailable")
-            proposals.append((self.song, "root_note", value))
+            proposals.append((self.song, "root_note", value, value))
         if "scaleName" in args:
             value = args["scaleName"]
             if not isinstance(value, str) or not 1 <= len(value) <= 256: raise ValueError("scaleName is invalid")
             if not isinstance(self._read_attr(self.song, "scale_name"), str): raise ValueError("scale_name is unavailable")
-            proposals.append((self.song, "scale_name", value))
+            proposals.append((self.song, "scale_name", value, value))
         if "scaleMode" in args:
             value = args["scaleMode"]
             if not isinstance(value, bool): raise ValueError("scaleMode is invalid")
             if not isinstance(self._read_attr(self.song, "scale_mode"), bool): raise ValueError("scale_mode is unavailable")
-            proposals.append((self.song, "scale_mode", value))
+            proposals.append((self.song, "scale_mode", value, value))
         if not proposals: raise ValueError("tuning mutation has no fields")
-        assignments = [(target, attr, value, self._read_attr(target, attr)) for target, attr, value in proposals]
+        def observed(target: Any, attr: str) -> Any:
+            if attr in ("lowest_note", "highest_note"): return self._pitch_place(self._read_attr(target, attr))
+            if attr == "reference_pitch": return self._reference_pitch(target)
+            return self._read_attr(target, attr)
+        # The prior values as Live returned them, its own types: a rollback sets those back.
+        assignments = [(target, attr, value, wanted, self._read_attr(target, attr)) for target, attr, value, wanted in proposals]
         before_state = self._tuning_state()
         try:
-            for target, attr, value, _ in assignments: setattr(target, attr, value)
-            after = self._tuning_state()
-            for target, attr, value, _ in assignments:
-                if attr == "note_tunings":
-                    normalized = sorted(([row["note"], row["deviation"]] for row in value), key=lambda item: item[0])
-                    observed = sorted(([row["note"], row["deviation"]] for row in after["tuningSystem"]["noteTunings"]), key=lambda item: item[0])
-                    if self._bounded_canonical(observed) != self._bounded_canonical(normalized): raise ValueError("note tunings were not confirmed")
-                else:
-                    observed = self._read_attr(target, attr)
-                    if self._bounded_canonical(observed) != self._bounded_canonical(value): raise ValueError(f"tuning field {attr} was not confirmed")
+            for target, attr, value, _, _ in assignments: setattr(target, attr, value)
+            for target, attr, _, wanted, _ in assignments:
+                if self._bounded_canonical(observed(target, attr)) != self._bounded_canonical(wanted): raise ValueError(f"tuning field {attr} was not confirmed")
         except BaseException as error:
             rollback_failed = False
-            for target, attr, _, prior in reversed(assignments):
+            for target, attr, _, _, prior in reversed(assignments):
                 try: setattr(target, attr, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._bounded_canonical(self._tuning_state()) != self._bounded_canonical(before_state): raise ValueError("tuning change failed and exact rollback failed") from error
@@ -9869,6 +10018,7 @@ class LiveObjectMapper:
             try:
                 sys.settrace(trace)
                 compiled = compile(code, "<python.run>", mode)
+                if _sets_input_from_main(compiled): raise ValueError(INPUT_FROM_MAIN)
                 legacy = _legacy_note_calls(compiled)
                 if legacy:
                     raise ValueError(f"{' and '.join(legacy)} {'is' if len(legacy) == 1 else 'are'} Live's old way to remove notes: Live would stop to ask the producer before it ran, and the notes would lose their MPE, probability and velocity data. Nothing ran. "
@@ -10836,6 +10986,10 @@ class LiveObjectMapper:
     # its item tree are undocumented Python Remote Script internals. No root is
     # a stable public binding; the tier labels below say so explicitly.
     _BROWSER_SEARCHABLE_CATEGORIES = {"instruments", "audio_effects", "midi_effects", "modulators", "drums", "plugins", "packs", "max_for_live", "clips"}
+    # A search with no category walks these in this order: the producer's own places first (the User Library,
+    # this project, their folders), so the bound a big Pack can fill doesn't keep them out (#183).
+    _BROWSER_SEARCH_ORDER = ("user_library", "current_project", "user_folders", "instruments", "audio_effects", "midi_effects",
+                             "modulators", "plugins", "max_for_live", "drums", "clips", "sounds", "samples", "packs")
 
     def _browser_item_identity(self, path: str, item: Any) -> str:
         uri = self._read_attr(item, "uri")
@@ -10908,13 +11062,17 @@ class LiveObjectMapper:
                 is_device = explicit_device is True or (explicit_device is None and category_name in self._DEVICE_BROWSER_CATEGORIES and is_loadable)
                 if not self._items(self._read_attr(child, "children") or []) or is_device:
                     if not needle or needle in name.lower() or needle in child_path.lower():
-                        if child_path in seen_ids: raise ValueError("browser item identity collision")
-                        object_identity = self._browser_item_identity(child_path, child)
-                        seen_ids.add(child_path); items.append({"id": child_path, "objectIdentity": object_identity, "name": name, "category": category_name, "path": child_path, "isDevice": is_device})
+                        # Live lists one thing twice under one path when it comes from two files (Core Library
+                        # and a Pack, two library versions): the second is "<path>#2", and so on (#183).
+                        repeats[child_path] = repeats.get(child_path, 0) + 1
+                        item_id = child_path if repeats[child_path] == 1 else f"{child_path}#{repeats[child_path]}"
+                        if len(item_id) <= 256 and item_id not in seen_ids:
+                            seen_ids.add(item_id); items.append({"id": item_id, "objectIdentity": self._browser_item_identity(item_id, child), "name": name, "category": category_name, "path": child_path, "isDevice": is_device})
                 if not is_device:
                     walk(child, child_path, depth + 1)
 
-        categories = [category] if category else sorted(self._BROWSER_CATEGORIES)
+        repeats: dict[str, int] = {}
+        categories = [category] if category else [name for name in self._BROWSER_SEARCH_ORDER if name in self._BROWSER_CATEGORIES]
         for category_name in categories:
             if len(items) >= limit:
                 break
@@ -10924,30 +11082,37 @@ class LiveObjectMapper:
         return {"items": items}
 
     def _browser_find(self, item_id: Any) -> tuple[Any, dict[str, Any]]:
+        """The Browser item a search named: by its path, the first of several Live lists under it, or the nth
+        by "<path>#n" as a search names a repeat (#183). Its identity holds its uri, so a different file at
+        the same place isn't taken for it."""
         if not isinstance(item_id, str) or not 1 <= len(item_id) <= 256:
             raise ValueError("browser item id is invalid")
         browser = self._browser(); item_category = item_id.split("/", 1)[0] if "/" in item_id else ""
         if item_category not in self._BROWSER_CATEGORIES: raise ValueError("browser item id is invalid")
-        matches: list[Any] = []; traversal_count = 0
-        def find(node: Any, path: str, depth: int) -> None:
-            nonlocal traversal_count
-            if depth > 6: return
-            children = self._items(self._read_attr(node, "children") or [])
-            if len(children) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("browser child collection exceeds its traversal bound")
-            for child in children:
-                traversal_count += 1
-                if traversal_count > MAX_DISCOVERY_COLLECTION_LENGTH * 7: raise ValueError("browser lookup exceeds its path traversal bound")
-                name = str(self._read_attr(child, "name") or ""); child_path = f"{path}/{name}"
-                if len(name) > 256 or len(child_path) > 256: continue
-                if child_path == item_id:
-                    matches.append(child)
-                    if len(matches) > 1: raise ValueError("browser item identity is ambiguous")
-                elif item_id.startswith(f"{child_path}/"):
-                    find(child, child_path, depth + 1)
-        find(self._browser_category(browser, item_category), item_category, 0)
-        if len(matches) != 1: raise ValueError("browser item identity is missing or ambiguous")
-        item = matches[0]; name = str(self._read_attr(item, "name") or ""); explicit_device = self._read_attr(item, "is_device"); is_device = explicit_device is True or (explicit_device is None and item_category in self._DEVICE_BROWSER_CATEGORIES and self._read_attr(item, "is_loadable") is True)
-        return item, {"id": item_id, "objectIdentity": self._browser_item_identity(item_id, item), "name": name, "category": item_category, "path": item_id, "isDevice": is_device}
+        def lookup(path_id: str) -> list[Any]:
+            matches: list[Any] = []; traversal_count = 0
+            def find(node: Any, path: str, depth: int) -> None:
+                nonlocal traversal_count
+                if depth > 6: return
+                children = self._items(self._read_attr(node, "children") or [])
+                if len(children) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("browser child collection exceeds its traversal bound")
+                for child in children:
+                    traversal_count += 1
+                    if traversal_count > MAX_DISCOVERY_COLLECTION_LENGTH * 7: raise ValueError("browser lookup exceeds its path traversal bound")
+                    name = str(self._read_attr(child, "name") or ""); child_path = f"{path}/{name}"
+                    if len(name) > 256 or len(child_path) > 256: continue
+                    if child_path == path_id: matches.append(child)
+                    elif path_id.startswith(f"{child_path}/"): find(child, child_path, depth + 1)
+            find(self._browser_category(browser, item_category), item_category, 0)
+            return matches
+        matches = lookup(item_id); path = item_id
+        repeat = re.fullmatch(r"(.+)#([2-9]|[1-9]\d+)", item_id)
+        if matches: item = matches[0]
+        elif repeat and len(again := lookup(repeat.group(1))) >= int(repeat.group(2)):
+            item = again[int(repeat.group(2)) - 1]; path = repeat.group(1)
+        else: raise ValueError("browser item identity is missing")
+        name = str(self._read_attr(item, "name") or ""); explicit_device = self._read_attr(item, "is_device"); is_device = explicit_device is True or (explicit_device is None and item_category in self._DEVICE_BROWSER_CATEGORIES and self._read_attr(item, "is_loadable") is True)
+        return item, {"id": item_id, "objectIdentity": self._browser_item_identity(item_id, item), "name": name, "category": item_category, "path": path, "isDevice": is_device}
 
     def _browser_inspect(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._browser_find(args.get("itemId"))[1]

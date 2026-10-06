@@ -297,6 +297,7 @@ async fn video_tool_shows_the_model_frames_and_app_thumbnails_and_heard_sound() 
             let events = events.clone();
             move |event| events.borrow_mut().push(event)
         }),
+        answer: None,
     })
     .remove(0);
     assert_eq!(tool.name(), WATCH_VIDEO_TOOL);
@@ -346,6 +347,7 @@ async fn one_look_shows_each_moment_in_each_part_asked_for() {
         tools_dir: folder.path().join("tools").to_string_lossy().into(),
         env: None,
         on_event: Rc::new(|_| {}),
+        answer: None,
     })
     .remove(0);
     let look = |input: Value| {
@@ -388,6 +390,56 @@ async fn one_look_shows_each_moment_in_each_part_asked_for() {
     assert!(named.is_error && named.text.contains("zoom's parts are names"), "{}", named.text);
     let alone = look(json!({"url":video,"zoom":["bottom"]})).await;
     assert!(alone.is_error && alone.text.contains("zoom goes with look_at"), "{}", alone.text);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn moments_shown_again_in_one_answer_are_said_so_and_past_three_times_not_shown_again() {
+    // #193: frames put away to make room were asked for again and again, 205 looks at one tutorial.
+    use kumi_runtime::video::tool::{video_tools, VideoToolOptions};
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "again", true).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let answer = Rc::new(std::cell::Cell::new(1u64));
+    let tool = video_tools(VideoToolOptions {
+        videos_dir: folder.path().join("again-videos").to_string_lossy().into(),
+        tools_dir: folder.path().join("tools").to_string_lossy().into(),
+        env: None,
+        on_event: Rc::new(|_| {}),
+        answer: Some({
+            let answer = answer.clone();
+            Rc::new(move || answer.get())
+        }),
+    })
+    .remove(0);
+    let look = |input: Value| {
+        let tool = tool.clone();
+        async move { tool.execute(input.as_object().unwrap().clone(), Signal::new()).await.unwrap() }
+    };
+    let same = json!({"url":video,"look_at":["0:02","0:07"],"zoom":"bottom"});
+    let first = look(same.clone()).await;
+    assert_eq!(first.images.len(), 2, "{}", first.text);
+    assert!(!first.text.contains("shown in this answer before"));
+    assert!(first.text.contains("Note what you read from them as you go"));
+    let second = look(same.clone()).await;
+    assert_eq!(second.images.len(), 2);
+    assert!(second.text.contains("2 of these were shown in this answer before"), "{}", second.text);
+    look(same.clone()).await;
+    let fourth = look(same.clone()).await;
+    assert!(fourth.images.is_empty(), "{}", fourth.text);
+    assert!(!fourth.is_error);
+    assert!(fourth.text.contains("Kumi showed each of these moments 3 times in this answer already"), "{}", fourth.text);
+    // One new moment among them: only it is shown, and the worn ones are named.
+    let mixed = look(json!({"url":video,"look_at":["0:02","0:05"],"zoom":"bottom"})).await;
+    assert_eq!(mixed.images.len(), 1, "{}", mixed.text);
+    assert!(mixed.images[0].caption.as_deref().unwrap().starts_with("Frame at 0:05"), "{:?}", mixed.images[0].caption);
+    assert!(mixed.text.contains("1 of the 2 were shown 3 times in this answer already, so they're left out (0:02)"), "{}", mixed.text);
+    // The next answer starts afresh.
+    answer.set(2);
+    let next = look(same).await;
+    assert_eq!(next.images.len(), 2, "{}", next.text);
+    assert!(!next.text.contains("before"), "{}", next.text);
 }
 
 #[tokio::test(flavor = "current_thread")]

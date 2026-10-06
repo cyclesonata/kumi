@@ -55,6 +55,13 @@ struct Adapter {
     fired: Cell<bool>,
     read_fail: Cell<bool>,
     compensate_fail: Cell<bool>,
+    /// How many reads after a track is made see Live still setting it up, a value changing each time (#203).
+    settle_reads: Cell<usize>,
+    settling: RefCell<Vec<(Value, usize)>>,
+    /// What the first read after the injected fault finds changed on the first track made: "value" (Live's
+    /// late setup), or a "clip" or "device" the producer put there.
+    after_fault: RefCell<Option<&'static str>>,
+    first_created: RefCell<Value>,
 }
 impl Adapter {
     fn new() -> Self {
@@ -68,6 +75,10 @@ impl Adapter {
             fired: Cell::new(false),
             read_fail: Cell::new(false),
             compensate_fail: Cell::new(false),
+            settle_reads: Cell::new(0),
+            settling: Default::default(),
+            after_fault: Default::default(),
+            first_created: Default::default(),
         }
     }
     fn reset(&self, fault: &str) {
@@ -132,6 +143,14 @@ impl Adapter {
             });
         }
         let mut result = if trigger && fault == "no-effect" { json!({"ok":true}) } else { self.sim.invoke(i)? };
+        if i.operation == "track.create" {
+            if self.first_created.borrow().is_null() {
+                *self.first_created.borrow_mut() = result["ref"].clone();
+            }
+            if self.settle_reads.get() > 0 {
+                self.settling.borrow_mut().push((result["ref"].clone(), self.settle_reads.get()));
+            }
+        }
         if c.is_some() && !(trigger && fault == "no-effect") {
             self.cache.borrow_mut().insert(key, result.clone());
         }
@@ -207,6 +226,38 @@ impl LiveAdapter for Adapter {
 impl AsyncLiveAdapter for Adapter {
     async fn snapshot_async(&self, c: Option<&LiveOperationContext>, r: Option<&LiveSnapshotRequest>) -> Result<LiveSnapshot, LiveError> {
         self.read()?;
+        {
+            let mut state = self.sim.state.borrow_mut();
+            for (reference, left) in self.settling.borrow_mut().iter_mut().filter(|(_, left)| *left > 0) {
+                *left -= 1;
+                if let Some(row) = state["tracks"].as_array_mut().unwrap().iter_mut().find(|row| row["ref"] == *reference) {
+                    row["volume"] = json!(row["volume"].as_f64().unwrap_or(0.85) - 0.1);
+                }
+            }
+            if self.fired.get() {
+                let change = self.after_fault.borrow_mut().take();
+                let drums = state["tracks"].as_array().unwrap().iter().find(|row| row["ref"] == "track:track-1").unwrap().clone();
+                let first = self.first_created.borrow().clone();
+                if let Some(row) = state["tracks"].as_array_mut().unwrap().iter_mut().find(|row| row["ref"] == first) {
+                    match change {
+                        Some("value") => row["volume"] = json!(0.25),
+                        Some("clip") => {
+                            let mut clip = drums["clips"][0].clone();
+                            clip["ref"] = json!("clip:producers");
+                            clip["objectIdentity"] = json!("simulator:clip:producers");
+                            row["clips"] = json!([clip]);
+                        }
+                        Some("device") => {
+                            let mut device = drums["devices"][0].clone();
+                            device["ref"] = json!("device:producers");
+                            device["parentRef"] = row["ref"].clone();
+                            row["devices"].as_array_mut().unwrap().push(device);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
         self.sim.snapshot_async(c, r).await
     }
     async fn discover_async(&self, r: &LiveDiscoveryRequest, c: Option<&LiveOperationContext>) -> Result<LiveDiscoveryResult, LiveError> {
@@ -356,5 +407,103 @@ async fn structure_apply_compensation_replay_and_undo_workflows_match_source() {
         same(&json!(states), &row["states"], &format!("{label} states"));
         same(&json!(*adapter.calls.borrow()), &row["calls"], &format!("{label} calls"));
         same(&adapter.sim.state.borrow(), &row["state"], &format!("{label} state"));
+    }
+}
+
+async fn preview(host: &McpHost, tracks: Value) -> Value {
+    let preview = host.live_session_structure_preview_async(&json!(1), &json!({"tracks":tracks,"scenes":[]})).await;
+    let text = preview["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{preview}"));
+    serde_json::from_str::<Value>(text).unwrap()["transactionId"].clone()
+}
+fn body(result: &Value) -> Value {
+    serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap_or_else(|| panic!("{result}"))).unwrap()
+}
+fn track_count(adapter: &Adapter) -> usize {
+    adapter.sim.state.borrow()["tracks"].as_array().unwrap().len()
+}
+
+#[tokio::test]
+async fn a_track_live_goes_on_setting_up_after_making_it_is_kept_and_its_undo_still_removes_it() {
+    // #203: Live sets a new track up after making it (its routing, a default track's devices with their
+    // saved values), so the Remote Script's fingerprint from the moment it made the track was gone by the
+    // bridge's first read: the apply failed, and its cleanup refused too, leaving stray tracks.
+    for reads in [1, 2, 4] {
+        let adapter = Rc::new(Adapter::new());
+        adapter.settle_reads.set(reads);
+        let host = McpHost::new(adapter.clone(), McpHostOptions::default()).unwrap();
+        let tracks = track_count(&adapter);
+        let txid = preview(&host, json!([{"name":"CAP A","kind":"audio"},{"name":"CAP B","kind":"audio"}])).await;
+        let applied = host
+            .live_session_structure_apply_async(
+                &json!(2),
+                &json!({"transactionId":txid,"confirmation":"apply","idempotencyKey":"apply-key"}),
+                None,
+            )
+            .await;
+        assert_eq!(body(&applied)["state"], "applied", "{reads} reads: {applied}");
+        assert_eq!(track_count(&adapter), tracks + 2);
+        let undone = host
+            .undo_structure_async(&json!(3), &json!({"transactionId":txid,"confirmation":"undo","idempotencyKey":"undo-key"}), None)
+            .await
+            .unwrap();
+        assert_eq!(body(&undone)["state"], "undone", "{reads} reads: {undone}");
+        assert_eq!(track_count(&adapter), tracks, "{reads} reads: both tracks are gone again");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_apply_still_removes_a_track_live_changed_and_says_both_causes_when_it_cant() {
+    // The second track comes back unconfirmed (another name), so both are cleaned up. The first, which
+    // Live changed after its baseline (a late template value), still goes, since nothing was put on it.
+    let failed = |after: &'static str| {
+        let adapter = Rc::new(Adapter::new());
+        adapter.settle_reads.set(1);
+        adapter.reset("wrong-name");
+        adapter.fault_step.set(2);
+        *adapter.after_fault.borrow_mut() = Some(after);
+        adapter
+    };
+    let adapter = failed("value");
+    let host = McpHost::new(adapter.clone(), McpHostOptions::default()).unwrap();
+    let tracks = track_count(&adapter);
+    let txid = preview(&host, json!([{"name":"CAP A","kind":"audio"},{"name":"CAP B","kind":"audio"}])).await;
+    let applied = host
+        .live_session_structure_apply_async(
+            &json!(2),
+            &json!({"transactionId":txid,"confirmation":"apply","idempotencyKey":"apply-key"}),
+            None,
+        )
+        .await;
+    assert_eq!(body(&applied)["reason"], "Live did not confirm created track", "{applied}");
+    assert_eq!(
+        track_count(&adapter),
+        tracks,
+        "the track made first is gone: {applied} {} {:?}",
+        host.transaction_record(txid.as_str().unwrap()).unwrap().borrow(),
+        adapter.calls.borrow()
+    );
+    assert_eq!(host.transaction_record(txid.as_str().unwrap()).unwrap().borrow()["state"], "undone");
+    // A clip or a device put on the track made first keeps it. The error says why the apply failed, that a
+    // retry won't remove what's left, and what's left in Live.
+    for change in ["clip", "device"] {
+        let adapter = failed(change);
+        let host = McpHost::new(adapter.clone(), McpHostOptions::default()).unwrap();
+        let txid = preview(&host, json!([{"name":"CAP A","kind":"audio"},{"name":"CAP B","kind":"audio"}])).await;
+        let applied = host
+            .live_session_structure_apply_async(
+                &json!(2),
+                &json!({"transactionId":txid,"confirmation":"apply","idempotencyKey":"apply-key"}),
+                None,
+            )
+            .await;
+        let reason = body(&applied)["reason"].as_str().unwrap().to_string();
+        assert!(reason.starts_with("Session-structure apply failed (Live did not confirm created track)."), "{change}: {reason}");
+        assert!(
+            reason.contains("changed in Live since (a new name, a clip or a device), so Kumi stopped cleaning up."),
+            "{change}: {reason}"
+        );
+        assert!(reason.contains("Left in Live: track:track-2 \"CAP A\"."), "only CAP A is left: {reason}");
+        assert!(reason.contains("A retry won't remove them; ask the producer before deleting any of them."), "{reason}");
+        assert_eq!(track_count(&adapter), track_count(&Adapter::new()) + 1, "{change}: CAP A stays, with the producer's {change}");
     }
 }
