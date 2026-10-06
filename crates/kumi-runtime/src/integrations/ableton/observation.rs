@@ -8,6 +8,7 @@ use super::{
     pins::pin_context,
     project,
     remember::{CurrentProject, Remember},
+    set_model::SetModel,
     track_ids,
     views::{self, ViewHost},
 };
@@ -58,6 +59,8 @@ pub struct Observer {
     pub beats_per_bar: Cell<f64>,
     pub last_track_count: Cell<usize>,
     previous: RefCell<Option<Previous>>,
+    /// The Set as the last observation read it.
+    model: RefCell<Rc<SetModel>>,
 }
 impl Observer {
     pub fn new(connection: Rc<LiveConnection>, remember: Rc<Remember>) -> Self {
@@ -68,9 +71,23 @@ impl Observer {
             beats_per_bar: Cell::new(4.),
             last_track_count: Cell::new(0),
             previous: RefCell::new(None),
+            model: RefCell::new(Rc::new(SetModel::default())),
+        }
+    }
+    /// The Set as the last observation read it: its tracks and their devices, found by id or name.
+    pub fn model(&self) -> Rc<SetModel> {
+        self.model.borrow().clone()
+    }
+    /// The tracks weren't read this turn: what the model holds may be out of date.
+    fn model_stale(&self) {
+        if self.model.borrow().complete {
+            let mut stale = (**self.model.borrow()).clone();
+            stale.complete = false;
+            *self.model.borrow_mut() = Rc::new(stale);
         }
     }
     fn away(&self) -> Observation {
+        self.model_stale();
         let previous = self.previous.borrow();
         no_access(
             &previous.as_ref().map(|p| p.key.clone()).unwrap_or_else(|| format!("{}:no-live", self.connection.generation)),
@@ -226,6 +243,8 @@ impl Observer {
             // What the tracks read says about their ids: the list's revision, and the tracks whose id is missing or shared.
             let mut track_revision: Option<String> = None;
             let mut track_gaps: Vec<String> = vec![];
+            // The rows the Set model is built from, as read.
+            let mut model_rows: Option<(Vec<JsonObject>, Option<Vec<JsonObject>>)> = None;
             let mut more_devices = false;
 
             let tracks_result: Result<(), ReadError> = (|| {
@@ -237,6 +256,7 @@ impl Observer {
                 let rows = objects(&page)?;
                 track_revision = page.get("revision").and_then(Value::as_str).map(str::to_owned);
                 track_gaps = track_ids::gaps(&rows);
+                model_rows = Some((rows.clone(), None));
                 connection.register_rows("track", &rows, &track_args, cursor(&page))?;
 
                 let mut shown = rows.iter().map(|row| track_row(connection, row)).collect::<Result<Vec<_>, _>>()?;
@@ -252,6 +272,9 @@ impl Observer {
                     let page = context::discovery_payload(&read, "device", epoch)?;
                     let devices = objects(&page)?;
                     connection.register_rows("device", &devices, &device_args, None)?;
+                    if let Some((_, read)) = model_rows.as_mut() {
+                        *read = Some(devices.clone());
+                    }
 
                     add_devices(connection, &rows, &mut shown, &devices)?;
                     more_devices = cursor(&page).is_some() || page.get("truncated") == Some(&Value::Bool(true));
@@ -270,6 +293,13 @@ impl Observer {
                     return Err(error);
                 }
                 track_list = None;
+            }
+            if let Some((tracks, devices)) = &model_rows {
+                let complete = devices.is_some() && !more_tracks && !more_devices;
+                let next = SetModel::next(&self.model.borrow(), tracks, devices.as_deref().unwrap_or(&[]), complete);
+                *self.model.borrow_mut() = Rc::new(next);
+            } else {
+                self.model_stale();
             }
             let selected: Option<JsonObject> = (|| {
                 let read = selection_read.ok()?;
@@ -507,6 +537,8 @@ impl Observer {
             if lease != connection.lease.get() {
                 return RuntimeError::plain("Observation changed; late refresh discarded");
             }
+            // The Set wasn't read through (Live switching Sets, say): the model may still hold the old one.
+            self.model_stale();
             connection.discard_reads();
             connection.epoch.set(None);
             match error {
