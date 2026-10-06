@@ -6,7 +6,6 @@ use super::{
     inference::no_access,
     more_changes::set_meter,
     pins::pin_context,
-    project::project_id_of,
     remember::{CurrentProject, Remember},
     views::{self, ViewHost},
 };
@@ -292,16 +291,16 @@ impl Observer {
             let project = self.remember.current();
             let new_set = !project.as_ref().is_some_and(|p| p.identity == identity);
             let mut path = if new_set { None } else { project.as_ref().and_then(|p| p.path.clone()) };
+            // Never saved, as Live says (a saved Set whose file can't be found now has no path either).
+            let mut unsaved = !new_set && project.as_ref().is_some_and(|p| p.unsaved);
 
             if new_set || project.as_ref().is_some_and(|p| p.name != name) {
                 if row.contains_key("filePath") {
-                    path = row
-                        .get("filePath")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty() && std::path::Path::new(s).exists())
-                        .map(str::to_owned);
+                    let file = row.get("filePath").and_then(Value::as_str).filter(|s| !s.is_empty());
+                    unsaved = file.is_none();
+                    path = file.filter(|s| std::path::Path::new(s).exists()).map(str::to_owned);
                 } else {
-                    path = self.remember.project_path(signal.clone()).await;
+                    (path, unsaved) = self.remember.project_place(signal.clone()).await;
                     connection.assert_lease(lease, &signal)?;
                 }
             }
@@ -324,9 +323,17 @@ impl Observer {
             };
             connection.assert_lease(lease, &signal)?;
 
+            // The saved Set's project: decided once for a Set at a path, from the id kept inside it.
+            let known_project = project.as_ref().filter(|p| p.identity == identity && p.path == path).and_then(|p| p.project.clone());
+            let project_id = match (&path, known_project) {
+                (Some(_), Some(known)) => Some(known),
+                (Some(path), None) => Some(self.remember.project_of(&identity, path, signal.clone()).await),
+                (None, _) => None,
+            };
+            connection.assert_lease(lease, &signal)?;
             *self.remember.current.borrow_mut() =
-                Some(Rc::new(CurrentProject { identity: identity.clone(), name: name.clone(), path: path.clone() }));
-            let project_ref = path.as_ref().map(|path| ProjectRef { id: project_id_of(path), name: name.clone() });
+                Some(Rc::new(CurrentProject { identity: identity.clone(), name: name.clone(), path: path.clone(), project: project_id.clone(), unsaved }));
+            let project_ref = project_id.map(|id| ProjectRef { id, name: name.clone() });
             *self.previous.borrow_mut() =
                 Some(Previous { key: key.clone(), identity: identity.clone(), path: path.clone(), project: project_ref.clone() });
 
