@@ -20,6 +20,7 @@ pub fn run_with_package_root(args: &[String], package_root: &Path) -> CommandOut
             dry_run: args.iter().any(|a| a == "--dry-run"),
             force: args.iter().any(|a| a == "--force"),
             config_path: value(args, "--config").map(resolve).transpose()?,
+            producer_files_from: None,
         };
         let source = package_root.join("remote-script").join(REMOTE_SCRIPT_PACKAGE).join(REMOTE_SCRIPT_ASSET);
         Ok(CommandOutput::json(&install_remote_script(&source, &resolve(destination)?, &options)?))
@@ -27,5 +28,5 @@ pub fn run_with_package_root(args: &[String], package_root: &Path) -> CommandOut
     result.unwrap_or_else(|error| CommandOutput::error(error.message(), 1))
 }
 pub fn main() -> i32 {
-    run(&std::env::args().skip(1).collect::<Vec<_>>()).emit()
+    run(&kumi_common::env::args().skip(1).collect::<Vec<_>>()).emit()
 }

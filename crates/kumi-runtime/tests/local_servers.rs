@@ -239,6 +239,9 @@ fn discovery_addresses_and_ids() {
         (Some("https://ollama.example.test"), "https://ollama.example.test"),
         (Some("http://localhost:80"), "http://localhost"),
         (Some("[::]"), "http://[::1]:11434"),
+        // Schemes Kumi can't talk to Ollama over leave it at its default address (their origin was "null").
+        (Some("tcp://studio.local:11434"), "http://127.0.0.1:11434"),
+        (Some("unix:///var/run/ollama.sock"), "http://127.0.0.1:11434"),
     ] {
         assert_eq!(address(host), want);
     }
@@ -262,6 +265,18 @@ fn discovery_addresses_and_ids() {
     for id in ["anthropic/claude-sonnet-5", "nowhere/model", "ollama/", "ollama/ spaced", "ollama/bad\u{7}"] {
         assert!(parse_local_model_id(id, &servers).is_none(), "{id}");
     }
+}
+/// Windows keeps PATH as "Path": a server's program on it is found all the same.
+#[cfg(windows)]
+#[test]
+fn a_server_program_is_found_on_the_path_as_windows_spells_it() {
+    let folder = std::env::temp_dir().join(format!("kumi-local-path-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("lms.exe"), b"").unwrap();
+    let env = HashMap::from([("Path".to_string(), folder.to_string_lossy().into_owned())]);
+    let found = local_installed(LocalKind::Lmstudio, Some(&env));
+    std::fs::remove_dir_all(&folder).unwrap();
+    assert!(found);
 }
 #[tokio::test]
 async fn ollama_catalog_capabilities_and_probe() {

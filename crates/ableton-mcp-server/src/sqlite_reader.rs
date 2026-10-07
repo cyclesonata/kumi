@@ -81,6 +81,14 @@ const MAX_PAGES: u32 = 1_000_000;
 const MAX_CELLS_PER_PAGE: usize = 500;
 const MAX_BTREE_DEPTH: usize = 64;
 const MAX_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+/// SQLite's own hard limit on a table's columns.
+const MAX_COLUMNS: usize = 32_767;
+/// The schema table's columns: type, name, tbl_name, rootpage and sql.
+const SCHEMA_COLUMNS: usize = 5;
+/// The most definitions a scanned table may have. Live's library tables have at most 21, so this leaves room for those
+/// it adds. It isn't the file's to raise: each value a record names is a byte in the file but 32 decoded, so a table
+/// declared with 32,767 columns would let a 128 MiB file decode to about 4 GiB.
+const MAX_SCANNED_COLUMNS: usize = 64;
 const MAX_ROWS: usize = 1_000_000;
 /// `scanTable`'s default row bound.
 pub const DEFAULT_SCAN_MAX_ROWS: usize = 100_000;
@@ -116,6 +124,42 @@ fn to_safe_integer(value: i64) -> Result<i64, SqliteError> {
     Ok(value)
 }
 
+/// The most values a record of the table `sql` creates can hold: its definitions (the columns, and any table
+/// constraints, which only add room), counted outside quotes and comments. SQLite never writes more, and fewer is fine
+/// (a row from before ADD COLUMN). A statement that doesn't read as one gets SQLite's own limit.
+fn record_bound(sql: &str) -> usize {
+    let mut chars = sql.chars().peekable();
+    let (mut definitions, mut depth) = (1, 0usize);
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '"' | '`' | '[' => {
+                let end = if c == '[' { ']' } else { c };
+                // A doubled quote inside is two quotes in a row: the scan closes and reopens.
+                if !chars.by_ref().any(|next| next == end) {
+                    break;
+                }
+            }
+            '-' if chars.peek() == Some(&'-') => {
+                chars.by_ref().find(|&next| next == '\n');
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut last = ' ';
+                if !chars.by_ref().any(|next| std::mem::replace(&mut last, next) == '*' && next == '/') {
+                    break;
+                }
+            }
+            '(' => depth += 1,
+            ')' if depth == 1 => return definitions.min(MAX_COLUMNS),
+            ')' if depth == 0 => break,
+            ')' => depth -= 1,
+            ',' if depth == 1 => definitions += 1,
+            _ => {}
+        }
+    }
+    MAX_COLUMNS
+}
+
 fn be_u16(bytes: &[u8], offset: usize) -> u16 {
     u16::from_be_bytes([bytes[offset], bytes[offset + 1]])
 }
@@ -137,6 +181,8 @@ fn is_js_whitespace(c: char) -> bool {
 struct Walk {
     visited: usize,
     seen_pages: HashSet<i64>,
+    /// The most values a record of the table holds (`record_bound`).
+    values: usize,
 }
 
 pub struct SqliteReader {
@@ -214,8 +260,9 @@ impl SqliteReader {
         Ok((page as usize - 1) * self.page_size)
     }
 
-    /// Parse one b-tree cell's record payload, following the overflow chain.
-    fn read_cell_payload(&self, page: i64, cell_offset: usize) -> Result<(Vec<u8>, i64), SqliteError> {
+    /// Parse one b-tree cell's record payload, following the overflow chain. `pages` holds every page this walk has
+    /// used, b-tree and overflow alike: a page is any one cell's overflow at most, so cells can't share one chain.
+    fn read_cell_payload(&self, page: i64, cell_offset: usize, pages: &mut HashSet<i64>) -> Result<(Vec<u8>, i64), SqliteError> {
         let base = self.page_offset(page)?;
         let usable = self.usable_size;
         let page_bytes = &self.pages[base..base + usable];
@@ -254,12 +301,10 @@ impl SqliteReader {
                 return Err(fail("sqlite overflow pointer overruns its page"));
             }
             let mut overflow_page = be_u32(&self.pages, base + cursor + local) as i64;
-            let mut seen: HashSet<i64> = HashSet::from([page]);
             while remaining > 0 {
-                if overflow_page == 0 || seen.contains(&overflow_page) {
+                if overflow_page == 0 || !pages.insert(overflow_page) {
                     return Err(fail("sqlite overflow chain is malformed"));
                 }
-                seen.insert(overflow_page);
                 let overflow_base = self.page_offset(overflow_page)?;
                 let next = be_u32(&self.pages, overflow_base) as i64;
                 let take = remaining.min(usable - 4);
@@ -275,7 +320,7 @@ impl SqliteReader {
         Ok((payload, to_safe_integer(signed_row_id as i64)?))
     }
 
-    fn decode_record(&self, payload: &[u8]) -> Result<SqliteRow, SqliteError> {
+    fn decode_record(&self, payload: &[u8], values: usize) -> Result<SqliteRow, SqliteError> {
         let header_length = read_varint(payload, 0)?;
         if header_length.value < 1 || header_length.value > payload.len() as u64 {
             return Err(fail("sqlite record header is invalid"));
@@ -284,6 +329,10 @@ impl SqliteReader {
         let mut serial_types: Vec<u64> = Vec::new();
         let mut cursor = header_length.bytes;
         while cursor < header_end {
+            // Each NULL or empty value is a byte here and a whole value decoded: only the table's columns are read.
+            if serial_types.len() == values {
+                return Err(fail("sqlite record names more columns than its table has"));
+            }
             let serial = read_varint(payload, cursor)?;
             cursor += serial.bytes;
             serial_types.push(serial.value);
@@ -366,11 +415,11 @@ impl SqliteReader {
         Ok(row)
     }
 
-    fn walk_table_btree<F>(&self, root_page: i64, mut visit: F, max_rows: usize) -> Result<usize, SqliteError>
+    fn walk_table_btree<F>(&self, root_page: i64, mut visit: F, max_rows: usize, values: usize) -> Result<usize, SqliteError>
     where
         F: FnMut(SqliteRow, i64) -> Result<(), SqliteError>,
     {
-        let mut walk = Walk { visited: 0, seen_pages: HashSet::new() };
+        let mut walk = Walk { visited: 0, seen_pages: HashSet::new(), values };
         self.walk_page(root_page, 0, &mut walk, &mut visit, max_rows)?;
         Ok(walk.visited)
     }
@@ -423,8 +472,8 @@ impl SqliteReader {
                     return Err(fail(format!("sqlite table scan exceeds its {max_rows}-row bound")));
                 }
                 let cell_offset = cell_at(index, &mut seen_cells)?;
-                let (payload, row_id) = self.read_cell_payload(page, cell_offset)?;
-                visit(self.decode_record(&payload)?, row_id)?;
+                let (payload, row_id) = self.read_cell_payload(page, cell_offset, &mut walk.seen_pages)?;
+                visit(self.decode_record(&payload, walk.values)?, row_id)?;
                 walk.visited += 1;
             }
         } else {
@@ -460,6 +509,7 @@ impl SqliteReader {
                 Ok(())
             },
             MAX_ROWS,
+            SCHEMA_COLUMNS,
         )?;
         Ok(tables)
     }
@@ -512,6 +562,10 @@ impl SqliteReader {
     /// separately because INTEGER PRIMARY KEY alias columns read as NULL.
     pub fn scan_table(&self, name: &str, max_rows: usize) -> Result<Vec<ScannedRow>, SqliteError> {
         let table = self.tables.get(name).ok_or_else(|| fail(format!("sqlite table is not present: {name}")))?;
+        let values = record_bound(&table.sql);
+        if values > MAX_SCANNED_COLUMNS {
+            return Err(fail(format!("sqlite table {name} has more than the {MAX_SCANNED_COLUMNS} columns a scan reads")));
+        }
         let mut rows: Vec<ScannedRow> = Vec::new();
         self.walk_table_btree(
             table.root_page,
@@ -520,10 +574,30 @@ impl SqliteReader {
                 Ok(())
             },
             max_rows,
+            values,
         )?;
         if rows.len() > max_rows {
             return Err(fail(format!("sqlite table {name} exceeds its scan bound")));
         }
         Ok(rows)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_record_holds_at_most_its_tables_definitions() {
+        for (sql, bound) in [
+            ("CREATE TABLE t(v)", 1),
+            ("CREATE TABLE ancestors (file_id INTEGER, ancestor_id INTEGER, UNIQUE (file_id, ancestor_id) ON CONFLICT IGNORE)", 3),
+            ("CREATE TABLE \"a(b)\" (x, y DEFAULT 'it''s, (here', z /* a, b */, -- c, d\n w)", 4),
+            ("CREATE TABLE [t,u] (x, `y,z`)", 2),
+            ("CREATE TABLE t AS SELECT 1", MAX_COLUMNS),
+            ("CREATE TABLE t(x, 'unclosed)", MAX_COLUMNS),
+        ] {
+            assert_eq!(record_bound(sql), bound, "{sql}");
+        }
     }
 }

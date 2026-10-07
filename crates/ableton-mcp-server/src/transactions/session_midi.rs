@@ -2,6 +2,7 @@
 use crate::{
     live::*,
     registry::{canonical_json, UNBOUNDED_CANONICAL_LIMITS},
+    transactions::batch::compensation_context,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use kumi_common::js::json as js_json;
@@ -157,27 +158,51 @@ fn validate_request(request: &mut Value) -> Result<(), LiveError> {
     }
     Ok(())
 }
+/// Whether Live's note `found` is the `wanted` one, within the precision Live keeps notes at.
+fn fits(found: &Value, wanted: &Value) -> bool {
+    (number(&found["start"]) - number(&wanted["start"])).abs() < 1e-6
+        && (number(&found["duration"]) - number(&wanted["duration"])).abs() < 1e-6
+        && (wanted["mute"].is_null() || found["mute"] == wanted["mute"])
+        && [("probability", 0.01), ("velocityDeviation", 0.51), ("releaseVelocity", 0.51)]
+            .iter()
+            .all(|(key, tolerance)| wanted[*key].is_null() || (number(&found[*key]) - number(&wanted[*key])).abs() <= *tolerance)
+}
+/// Whether Live's notes are the proposed ones, each wanted note taking the first unused one of Live's (in Live's order)
+/// that fits it. Live's notes are grouped by pitch, velocity and channel (which must be equal) and sorted by start, so
+/// a wanted note looks only at those of its kind starting within 1e-6 of it.
 fn notes_match(actual: &Value, proposed: &Value) -> bool {
     let actual = array(actual);
     let proposed = array(proposed);
     if actual.len() != proposed.len() {
         return false;
     }
-    let mut remaining: Vec<_> = actual.iter().collect();
+    let bits = |n: f64| if n == 0.0 { 0.0f64.to_bits() } else { n.to_bits() };
+    let kind = |note: &Value| {
+        let [pitch, velocity, channel] = ["pitch", "velocity", "channel"].map(|key| number(&note[key]));
+        (!pitch.is_nan() && !velocity.is_nan() && !channel.is_nan()).then(|| [bits(pitch), bits(velocity), bits(channel)])
+    };
+    let start = |index: &usize| number(&actual[*index]["start"]);
+    let mut kinds: HashMap<[u64; 3], Vec<usize>> = HashMap::new();
+    for (index, found) in actual.iter().enumerate() {
+        if let Some(kind) = kind(found) {
+            kinds.entry(kind).or_default().push(index);
+        }
+    }
+    for indices in kinds.values_mut() {
+        indices.sort_by(|a, b| start(a).total_cmp(&start(b)));
+    }
+    let mut used = vec![false; actual.len()];
     for wanted in proposed {
-        let index = remaining.iter().position(|found| {
-            ["pitch", "velocity", "channel"].iter().all(|key| number(&found[*key]) == number(&wanted[*key]))
-                && (number(&found["start"]) - number(&wanted["start"])).abs() < 1e-6
-                && (number(&found["duration"]) - number(&wanted["duration"])).abs() < 1e-6
-                && (wanted["mute"].is_null() || found["mute"] == wanted["mute"])
-                && [("probability", 0.01), ("velocityDeviation", 0.51), ("releaseVelocity", 0.51)]
-                    .iter()
-                    .all(|(key, tolerance)| wanted[*key].is_null() || (number(&found[*key]) - number(&wanted[*key])).abs() <= *tolerance)
-        });
-        match index {
-            Some(index) => {
-                remaining.remove(index);
-            }
+        let Some(indices) = kind(wanted).and_then(|kind| kinds.get(&kind)) else { return false };
+        let at = number(&wanted["start"]);
+        let from = indices.partition_point(|index| start(index) <= at - 1e-6);
+        let found = indices[from..]
+            .iter()
+            .take_while(|index| start(index) < at + 1e-6)
+            .filter(|index| !used[**index] && fits(&actual[**index], wanted))
+            .min();
+        match found {
+            Some(index) => used[*index] = true,
             None => return false,
         }
     }
@@ -427,6 +452,10 @@ impl SessionMidiTransactionManager {
         }
         result
     }
+    /// The record itself, without waiting on a borrow: the host marks work a panic cut short through it.
+    pub fn try_record(&self, id: &str) -> Option<Rc<RefCell<Value>>> {
+        self.records.try_borrow().ok()?.iter().find(|(key, _)| key == id).map(|(_, record)| record.0.clone())
+    }
     pub fn is_finalizable(&self, id: &str) -> bool {
         self.record(id).is_some_and(|record| ["uncertain", "applied", "undone"].iter().any(|state| record.is("state", state)))
     }
@@ -562,6 +591,7 @@ impl SessionMidiTransactionManager {
         if let Some(result) = self.existing(id, key)? {
             return Ok(result);
         }
+        let started = now_ms();
         let record = self
             .record(id)
             .filter(|record| !record.is("state", "previewed") || number(&record.get("expiresAt")) > now_ms())
@@ -668,7 +698,9 @@ impl SessionMidiTransactionManager {
                 if let Some(reference) = reference {
                     record.put("clipRef", reference);
                     record.put("recoveryMode", "compensate");
-                    if let Err(compensation) = self.compensate_apply(&record, context).await {
+                    let span = context.and_then(|c| c.deadline_ms).map_or(5000.0, |deadline| deadline - started);
+                    let rollback = compensation_context(&context.cloned().unwrap_or_default(), span);
+                    if let Err(compensation) = self.compensate_apply(&record, Some(&rollback)).await {
                         record.put("state", "uncertain");
                         record.put("recoveryMode", "compensate");
                         return Err(fail(format!(

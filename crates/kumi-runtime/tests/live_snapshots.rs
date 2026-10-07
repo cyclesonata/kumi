@@ -530,6 +530,27 @@ async fn an_undo_live_stops_partway_is_left_to_the_producer_when_kumi_cant_tell(
             assert_eq!(text, "Kumi's undo didn't finish (Live took too long). Cmd-Z in Live once puts back what it changed.");
             assert_eq!(one.state(), ChangeState::Unsure);
             assert!(!one.calls().contains(&"live_song_undo".to_owned()));
+            // Read before, but not after a step that says it changed nothing: Kumi can't tell, so it's left alone too.
+            let reads = Rc::new(Cell::new(0));
+            let count = reads.clone();
+            let python: Python = Rc::new(move |args| match args["op"].as_str() {
+                Some("restore") if args["check"] != true => {
+                    Some(json!({"removed":[],"made":[],"partial":[],"error":"TimeoutError: python.run"}))
+                }
+                Some("state") => {
+                    count.set(count.get() + 1);
+                    Some(if count.get() == 1 { held("Fill") } else { json!({"raise":"RuntimeError: can't read"}) })
+                }
+                _ => None,
+            });
+            let unread = live(TOOLS, bridge_reply(python), None).await;
+            unread.change("delete_clip", json!({"clipRef":VERSE})).await;
+            let (text, is_error) = unread.undo().await;
+            assert!(is_error);
+            assert_eq!(text, "Kumi's undo didn't finish (Live took too long). Cmd-Z in Live once puts back what it changed.");
+            assert_eq!(unread.state(), ChangeState::Unsure);
+            assert_eq!(reads.get(), 2, "read before, and once after");
+            assert!(!unread.calls().contains(&"live_song_undo".to_owned()), "Live's undo isn't pressed blind");
             // Live's undo once, but not back as it was: the producer is told to check Live.
             let reads = Rc::new(Cell::new(0));
             let count = reads.clone();
@@ -662,6 +683,35 @@ fn a_clip_too_big_for_one_call_stays_lives_to_undo() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn what_an_unsaved_set_kept_is_written_once_its_saved_and_its_ops_carry_on() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let projects = tempfile::tempdir().unwrap();
+            let store: Rc<dyn ProjectStore> = create_project_store(projects.path());
+            let history = SetHistory::default();
+            let clip: Captured = serde_json::from_value(verse()).unwrap();
+            let unsaved = CurrentProject { path: None, project: None, unsaved: true, ..project() };
+            history.keep(Some(&store), Some(&unsaved), &[clip.clone()], "Deleted Verse", json!({}), 1);
+            // The producer saves: the next observation finds the project id.
+            history.identified(Some(&store), Some(&project()));
+            history.keep(Some(&store), Some(&project()), &[clip], "Deleted Verse again", json!({}), 2);
+            let path = projects.path().join("0123456789abcdef0123456789abcdef/history.db");
+            let mut ops = vec![];
+            for _ in 0..300 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                ops = kumi_store::read_only(&path, |c| kumi_store::history::recent_ops(c, 10)).unwrap_or_default();
+                if ops.len() == 2 {
+                    break;
+                }
+            }
+            assert_eq!(ops.len(), 2, "both ops written under the project");
+            assert_eq!(ops[1].parent, None);
+            assert_eq!(ops[0].parent.as_deref(), Some(ops[1].id.as_str()), "the saved Set's op follows the unsaved one's");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn an_undo_live_stops_without_saying_what_it_did_is_left_alone_when_nothing_changed() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -710,6 +760,22 @@ async fn a_clip_live_cant_make_at_its_length_leaves_the_change_to_lives_undo() {
             );
             assert_eq!(two.state(), ChangeState::Kept);
             assert!(!two.calls().contains(&"live_song_undo".to_owned()), "Kumi's empty step stays in Live's history");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_missing_audio_file_says_where_to_put_it_back_whatever_its_path_holds() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let python: Python = Rc::new(|args| {
+                (args["check"] == true)
+                    .then(|| json!({"raise":"\u{201c}Verse\u{201d}'s audio file isn't there any more (/Samples/Kick (old) take 2).wav)"}))
+            });
+            let live = live(TOOLS, bridge_reply(python), None).await;
+            live.change("delete_clip", json!({"clipRef":VERSE})).await;
+            let (text, _) = live.undo().await;
+            assert!(text.ends_with("Put the file back at /Samples/Kick (old) take 2).wav, then undo again."), "{text}");
         })
         .await;
 }

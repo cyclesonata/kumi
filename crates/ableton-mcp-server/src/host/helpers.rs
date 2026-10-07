@@ -102,12 +102,10 @@ pub fn transaction_error(id: &Value, message: &str) -> Value {
 pub fn recovery_finalize_error(id: &Value, reason: &str) -> Value {
     reason_error(id, reason, "Reconcile or manually recover the exact transaction, prove all audible work stopped, then submit the explicit finalization evidence.")
 }
+/// The next step after a refusal that changed nothing in Live and that trying again won't pass.
+pub const PREVIEW_AGAIN: &str = "Nothing changed in Live: fix what the reason says (or take another route) and preview again.";
 pub fn adapter_tool_error(id: &Value, cause: &LiveError, remediation: &str) -> Value {
-    let next = if remediation.ends_with("preview requires fresh authoritative state.") {
-        "Nothing changed in Live: fix what the reason says (or take another route) and preview again."
-    } else {
-        remediation
-    };
+    let next = if remediation.ends_with("preview requires fresh authoritative state.") { PREVIEW_AGAIN } else { remediation };
     reason_error(id, &adapter_reason(cause.message()), next)
 }
 pub fn adapter_reason(raw: &str) -> String {
@@ -169,6 +167,23 @@ pub fn same_live_value(observed: Option<&Value>, expected: Option<&Value>) -> bo
             a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_live_value(Some(a), Some(b)))
         }
         (a, b) => a.map(js_json::stringify) == b.map(js_json::stringify),
+    }
+}
+/// A mixer field as Live holds it, compared as `same_live_value` does, but a `sends` list only over the sends it
+/// names: Live sets a shorter list's first sends and leaves the others as they were.
+pub fn same_mixer_value(field: &str, observed: Option<&Value>, expected: Option<&Value>) -> bool {
+    match (field, observed, expected) {
+        ("sends", Some(Value::Array(observed)), Some(Value::Array(expected))) => {
+            observed.len() >= expected.len() && observed.iter().zip(expected).all(|(a, b)| same_live_value(Some(a), Some(b)))
+        }
+        _ => same_live_value(observed, expected),
+    }
+}
+/// The part of a mixer field's value a change named: for `sends`, the first as many sends as `named` lists.
+pub fn named_mixer_part(field: &str, value: &Value, named: &Value) -> Value {
+    match (field, value.as_array(), named.as_array()) {
+        ("sends", Some(value), Some(named)) => Value::Array(value.iter().take(named.len()).cloned().collect()),
+        _ => value.clone(),
     }
 }
 pub fn same_follow_action_value(field: &str, observed: Option<&Value>, expected: Option<&Value>) -> bool {

@@ -169,8 +169,7 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Track-view state is uncertain; perform fresh discovery before retrying.")
+            self.apply_failed(id, &record, &e, "Track-view state is uncertain; perform fresh discovery before retrying.")
         }))
     }
     pub async fn undo_track_view_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {

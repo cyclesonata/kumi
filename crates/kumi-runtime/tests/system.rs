@@ -1,7 +1,18 @@
-use kumi_runtime::system::{system_program, Env, SystemProgram};
+use kumi_runtime::system::{env_var, system_program, windows_device_name, Env, SystemProgram};
 
 fn env(pairs: &[(&str, &str)]) -> Env {
     pairs.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect()
+}
+
+#[test]
+fn the_names_windows_takes_for_its_devices_are_known_with_any_extension() {
+    for name in ["CON", "aux.json", "Aux.amxd", "nul.tar.gz", "Prn ", "AUX .amxd", "com1.json", "LPT9", "COM0", "lpt\u{b9}", "COM\u{b3}.x"]
+    {
+        assert!(windows_device_name(name), "{name}");
+    }
+    for name in ["console", "auxiliary.json", "con-1", "com10", "lpt", "COM", "Aux 2", " aux", "x.aux", "", "com\u{b4}", "CO\u{b9}"] {
+        assert!(!windows_device_name(name), "{name}");
+    }
 }
 
 #[test]
@@ -17,4 +28,17 @@ fn on_windows_windows_own_programs_are_run_by_their_full_path_wherever_windows_i
     );
     assert_eq!(system_program(SystemProgram::Tar, &env(&[("SystemRoot", "C:\\Windows")]), "darwin"), "tar");
     assert_eq!(system_program(SystemProgram::Tar, &env(&[]), "linux"), "tar");
+}
+
+#[test]
+fn on_windows_a_variable_is_read_by_its_name_in_any_case_the_exact_name_first() {
+    let path = env(&[("Path", "C:\\Tools")]);
+    assert_eq!(env_var(&path, "PATH", "win32"), Some("C:\\Tools"));
+    assert_eq!(env_var(&path, "path", "win32"), Some("C:\\Tools"));
+    assert_eq!(env_var(&path, "PATH", "darwin"), None);
+    assert_eq!(env_var(&path, "PATH", "linux"), None);
+    let both = env(&[("PATH", "C:\\Exact"), ("path", "C:\\Other")]);
+    assert_eq!(env_var(&both, "PATH", "win32"), Some("C:\\Exact"));
+    assert_eq!(env_var(&both, "path", "win32"), Some("C:\\Other"));
+    assert_eq!(env_var(&env(&[]), "PATH", "win32"), None);
 }

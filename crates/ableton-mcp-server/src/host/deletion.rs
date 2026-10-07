@@ -12,6 +12,30 @@ fn device_fence(reference: &Value, row: &device_parameter::DeviceRow) -> String 
         &json!({"ref":reference,"objectIdentity":row.device["objectIdentity"],"ownerRef":row.owner_ref,"ownerIdentity":row.owner_identity,"siblings":row.siblings,"trackRef":row.track["ref"],"trackIdentity":row.track["objectIdentity"]}),
     )
 }
+/// Whether a device that is `identity` is still in `snapshot`'s tracks, in chains and drum pads too. Live's device
+/// refs are positional: the next device takes a deleted one's ref, so only its identity says it's still there.
+fn device_remains(snapshot: &LiveSnapshot, identity: &Value) -> bool {
+    fn walk(devices: &Value, identity: &Value, depth: usize) -> bool {
+        depth < 64
+            && devices.as_array().into_iter().flatten().any(|device| {
+                device["objectIdentity"] == *identity
+                    || device["chains"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .chain(
+                            device["drumPads"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .flat_map(|pad| pad["chains"].as_array().into_iter().flatten()),
+                        )
+                        .any(|chain| walk(&chain["devices"], identity, depth + 1))
+            })
+    }
+    let snapshot = serde_json::to_value(snapshot).unwrap();
+    snapshot["tracks"].as_array().into_iter().flatten().any(|track| walk(&track["devices"], identity, 0))
+}
 impl McpHost {
     pub async fn dispatch_deletion_tool(&self, call: &ToolCall, signal: Option<&Signal>) -> Option<Result<Option<Value>, LiveError>> {
         let p = call.arguments.as_ref().unwrap_or(&Value::Null);
@@ -95,7 +119,7 @@ impl McpHost {
                 .views
                 .view_for(Some(&context), &[t["payload"]["ref"].clone(), t["payload"]["expectedTrackRef"].clone()], None, &[])
                 .await?;
-            if self.device_row(&after, t["payload"]["ref"].as_str().unwrap()).is_ok() {
+            if device_remains(&after, &t["payload"]["expectedObjectIdentity"]) {
                 return Err(LiveError::error("deleted device remains discoverable after apply"));
             }
             record.borrow_mut()["applyKey"] = p["idempotencyKey"].clone();
@@ -103,10 +127,11 @@ impl McpHost {
             Ok(success_text(id, &json!({"transactionId":t["id"],"state":"applied","kept":KEPT,"idempotent":false})))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Device state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Device state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     async fn deletion_plan(&self, kind: &str, reference: &str, context: Option<&LiveOperationContext>) -> Result<Plan, LiveError> {
         if kind == "clip" {
@@ -283,11 +308,12 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|e| {
-            if record.borrow()["state"] == "applying" || reconciliation {
+            if reconciliation {
                 record.borrow_mut()["state"] = json!("uncertain");
             }
-            adapter_tool_error(
+            self.apply_failed(
                 id,
+                &record,
                 &e,
                 &format!("Whether the {kind} is gone is uncertain; discover it again before retrying with the same key."),
             )

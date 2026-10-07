@@ -1,6 +1,7 @@
 use super::super::{
     audition::silent_render, bridge_version::RENDER_BRIDGE, concurrent::eager_all, connection::NO_CURRENT_LIVE, more_changes::bars,
 };
+use super::ears::RawFile;
 use super::*;
 use crate::{
     audio::{matching::closeness, tools::summary},
@@ -350,10 +351,10 @@ impl Rendering {
                 let link = link.clone();
                 let takes = &takes;
                 async move {
-                    let raw = self.ears_folder.join(format!("{}.raw", uuid::Uuid::new_v4()));
+                    let raw = RawFile(self.ears_folder.join(format!("{}.raw", uuid::Uuid::new_v4())));
                     let write: Result<(), RuntimeError> = async {
-                        let written = link.write(tap, &raw.to_string_lossy().replace('\\', "/"), Some(signal)).await.map_err(plain)?;
-                        let capture = read_capture(&raw, written.channels, written.sample_rate).await.map_err(plain)?;
+                        let written = link.write(tap, &raw.0.to_string_lossy().replace('\\', "/"), Some(signal)).await.map_err(plain)?;
+                        let capture = read_capture(&raw.0, written.channels, written.sample_rate).await.map_err(plain)?;
                         let wav = self.ears_folder.join(format!("{}.wav", uuid::Uuid::new_v4()));
                         write_capture_wav(&wav, &capture, 0., capture.left.len() as f64).await.map_err(plain)?;
                         takes.borrow_mut().push(HeardTake {
@@ -366,7 +367,7 @@ impl Rendering {
                         Ok(())
                     }
                     .await;
-                    let _ = tokio::fs::remove_file(raw).await;
+                    drop(raw);
                     write
                 }
             }))
@@ -383,8 +384,7 @@ impl Rendering {
         self.history
             .quietly(None, async {
                 for id in steps.iter().rev() {
-                    let _ = self.history.undo(id, cleanup.clone(), false).await;
-                    self.history.entries.borrow_mut().shift_remove(id);
+                    self.take_back(id, cleanup.clone(), false).await;
                 }
             })
             .await;

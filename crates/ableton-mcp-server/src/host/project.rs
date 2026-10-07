@@ -45,6 +45,10 @@ fn file_authority(path: &Value, root: &Value) -> Result<(PathBuf, PathBuf), Live
     }
     let path = path.as_str().unwrap();
     let root = root.as_str().unwrap();
+    // Before anything touches either path: opening a share sends Windows' credentials to its host.
+    if kumi_common::path::network_or_device(path) || kumi_common::path::network_or_device(root) {
+        return Err(LiveError::error("Sets on a network share aren't read: copy the Set onto this computer first"));
+    }
     let bytes = path.as_bytes();
     if !path.starts_with('/') && !(bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':') {
         return Err(LiveError::error("path must be an absolute path"));
@@ -126,7 +130,7 @@ impl McpHost {
                         })
                         .map(|k| k.artifact.clone());
                     if let Some(artifact) = kept {
-                        return Ok(success_text(id, &project(page_semantic_project_snapshot(&artifact, &page_options(params)))?));
+                        return Ok(success_text(id, &project(page_valid_semantic_project_snapshot(&artifact, &page_options(params)))?));
                     }
                 }
                 let snapshot = self.views.whole_set(None, None).await?;
@@ -160,7 +164,7 @@ impl McpHost {
                         exports.pop_front();
                     }
                 }
-                Ok(success_text(id, &project(page_semantic_project_snapshot(&artifact, &page_options(params)))?))
+                Ok(success_text(id, &project(page_valid_semantic_project_snapshot(&artifact, &page_options(params)))?))
             }
             .await,
             "Semantic snapshot export is read-only; retry only after a fresh readable snapshot or restart paging from the first page.",
@@ -186,8 +190,8 @@ impl McpHost {
                 }
                 let before = project(assemble_semantic_project_pages(params["beforePages"].as_array().unwrap()))?;
                 let after = project(assemble_semantic_project_pages(params["afterPages"].as_array().unwrap()))?;
-                let diff = project(diff_semantic_project_snapshots(&before, &after))?;
-                Ok(success_text(id, &project(page_semantic_project_diff(&diff, &page_options(params)))?))
+                let diff = project(diff_valid_semantic_project_snapshots(&before, &after))?;
+                Ok(success_text(id, &project(page_audited_semantic_project_diff(&diff, &page_options(params)))?))
             })(),
             "Semantic diff requires complete untampered page bundles with the same schema and privacy profile; no merge was attempted.",
         )
@@ -215,7 +219,7 @@ let artifact = project(create_offline_als_artifact(
                         max_records: params["maxRecords"].as_f64(),
                     },
                 ))?;
-let page = project(page_semantic_project_snapshot(&artifact, &page_options(params)))?;
+let page = project(page_valid_semantic_project_snapshot(&artifact, &page_options(params)))?;
 let mut result = json!({"page":page,"provenance":"offline-file"});
 if params["includeNotes"] == true {
                     let rows = extract_als_midi(&model, artifact["policy"]["profile"].as_str());
@@ -329,8 +333,8 @@ let after = side(&params["after"], before["policy"]["profile"].as_str().unwrap()
 if before["policy"]["profile"] != after["policy"]["profile"] {
                     return Err(LiveError::error("semantic diff sides must share one privacy profile"));
 }
-                let diff = project(diff_semantic_project_snapshots(&before, &after))?;
-Ok(success_text(id, &project(page_semantic_project_diff(&diff, &page_options(params)))?))
+                let diff = project(diff_valid_semantic_project_snapshots(&before, &after))?;
+Ok(success_text(id, &project(page_audited_semantic_project_diff(&diff, &page_options(params)))?))
             })(),
             "Offline .als diff requires owner-authorized files or complete untampered page bundles with one shared privacy profile; no merge was attempted.",
         )

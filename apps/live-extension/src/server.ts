@@ -15,8 +15,13 @@ export interface Handlers {
 const REQUIRED = ["version", "id", "method", "nonce", "sequence", "bridgeEpoch", "connectionChallenge", "deadlineMs", "mac"];
 const OPTIONAL = ["operation", "args", "ref", "transactionId", "idempotencyKey", "stateDigest", "ownershipToken"];
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
+// Until a connection's first signed request, any local process may be on the other end: its lines stay small, it
+// gets a while to sign in, and there are only so many connections.
+const UNSIGNED_FRAME_BYTES = 64 * 1024;
+const SIGN_IN_WITHIN_MS = 10_000;
+const MAX_CONNECTIONS = 16;
 
-interface Connection { socket: Socket; challenge: string; lastSequence: number; eventSequence: number; pieces: Buffer[]; buffered: number }
+interface Connection { socket: Socket; challenge: string; lastSequence: number; eventSequence: number; pieces: Buffer[]; buffered: number; signedIn: boolean; signIn?: NodeJS.Timeout }
 
 export class ExtensionServer {
   readonly bridgeEpoch = token(24);
@@ -55,12 +60,15 @@ export class ExtensionServer {
   }
 
   private accept(socket: Socket): void {
+    if (this.connections.size >= MAX_CONNECTIONS) { socket.destroy(); return; }
     socket.setNoDelay(true);
-    const connection: Connection = { socket, challenge: token(24), lastSequence: 0, eventSequence: 0, pieces: [], buffered: 0 };
+    const connection: Connection = { socket, challenge: token(24), lastSequence: 0, eventSequence: 0, pieces: [], buffered: 0, signedIn: false };
+    connection.signIn = setTimeout(() => { if (!connection.signedIn) socket.destroy(); }, SIGN_IN_WITHIN_MS);
+    connection.signIn.unref();
     this.connections.add(connection);
     socket.on("data", (chunk: Buffer) => this.onData(connection, chunk));
     socket.on("error", () => undefined);
-    socket.on("close", () => this.connections.delete(connection));
+    socket.on("close", () => { clearTimeout(connection.signIn); this.connections.delete(connection); });
     this.send(connection, { version: LOOPBACK_PROTOCOL, id: "hello", ok: true, bridgeEpoch: this.bridgeEpoch, connectionChallenge: connection.challenge, result: { protocol: LIVE_PROTOCOL, registryHash: REGISTRY_HASH, maxDeadlineMs: 600_000 } });
   }
 
@@ -71,15 +79,23 @@ export class ExtensionServer {
 
   private onData(connection: Connection, chunk: Buffer): void {
     // A request arrives in pieces: keep them until one holds a line end, then join once.
+    if (connection.socket.destroyed) return;
+    const bound = () => connection.signedIn ? MAX_FRAME_BYTES : UNSIGNED_FRAME_BYTES;
     connection.pieces.push(chunk); connection.buffered += chunk.length;
     if (chunk.indexOf(10) < 0) {
-      if (connection.buffered > MAX_FRAME_BYTES) connection.socket.destroy();
+      if (connection.buffered > bound()) connection.socket.destroy();
       return;
     }
     let buffer = Buffer.concat(connection.pieces); connection.pieces = []; connection.buffered = 0;
     for (let index = buffer.indexOf(10); index >= 0; index = buffer.indexOf(10)) {
       const line = buffer.subarray(0, index); buffer = buffer.subarray(index + 1);
-      if (line.length > 0) void this.onFrame(connection, line.toString("utf8"));
+      // Checked as each line comes: the first signed one lifts the bound for those after it.
+      if (line.length > bound()) { connection.socket.destroy(); return; }
+      // Nothing a frame does may reject unhandled: Node would end the whole Extension Host for it.
+      if (line.length > 0) this.onFrame(connection, line.toString("utf8")).catch((error: unknown) => {
+        this.log(`a request failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+        this.error(connection, "invalid", "request failed");
+      });
     }
     if (buffer.length > 0) { connection.pieces.push(buffer); connection.buffered = buffer.length; }
   }
@@ -91,6 +107,8 @@ export class ExtensionServer {
   private async onFrame(connection: Connection, text: string): Promise<void> {
     let request: Record<string, unknown>;
     try { request = JSON.parse(text) as Record<string, unknown>; } catch { this.error(connection, "invalid", "malformed request"); return; }
+    // Only an object can be a request (Object.keys(null) throws).
+    if (typeof request !== "object" || request === null || Array.isArray(request)) { this.error(connection, "invalid", "malformed request"); return; }
     const keys = Object.keys(request);
     const now = Date.now();
     if (!REQUIRED.every((key) => keys.includes(key)) || keys.some((key) => !REQUIRED.includes(key) && !OPTIONAL.includes(key))
@@ -101,6 +119,7 @@ export class ExtensionServer {
       this.error(connection, request.id, "invalid request"); return;
     }
     if (!verify(this.secret, request)) { this.error(connection, request.id, "authentication or replay check failed"); return; }
+    if (!connection.signedIn) { connection.signedIn = true; clearTimeout(connection.signIn); }
     connection.lastSequence = request.sequence as number;
     const id = request.id;
     try {

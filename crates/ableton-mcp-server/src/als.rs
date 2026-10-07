@@ -50,18 +50,24 @@ pub fn parse_als_xml(xml: &str) -> Result<AlsXmlNode, ProjectError> {
         return Err(fail("Live Set XML exceeds the bounded size"));
     }
     let mut stack: Vec<AlsXmlNode> = vec![];
+    // Each open element's text length in UTF-16 units so far: text split by comments or CDATA is measured as it
+    // comes, not counted again from its start for every piece.
+    let mut lengths: Vec<usize> = vec![];
     let mut root = None;
     let mut nodes = 0;
     let mut cursor = 0;
-    fn push_text(stack: &mut [AlsXmlNode], raw: &str, cdata: bool) -> Result<(), ProjectError> {
+    fn push_text(stack: &mut [AlsXmlNode], lengths: &mut [usize], raw: &str, cdata: bool) -> Result<(), ProjectError> {
         if string::trim(raw).is_empty() {
             return Ok(());
         }
         let parent = stack.last_mut().ok_or_else(|| fail("Live Set XML is malformed (text outside the root)"))?;
-        if string::utf16_len(raw) + string::utf16_len(&parent.text) > 1024 * 1024 {
+        let Some(length) = lengths.last_mut() else { return Err(fail("Live Set XML is malformed (text outside the root)")) };
+        if string::utf16_len(raw) + *length > 1024 * 1024 {
             return Err(fail("Live Set XML text node exceeds the bounded size"));
         }
-        parent.text.push_str(&if cdata { raw.to_owned() } else { decode_xml_text(raw)? });
+        let text = if cdata { raw.to_owned() } else { decode_xml_text(raw)? };
+        *length += string::utf16_len(&text);
+        parent.text.push_str(&text);
         Ok(())
     }
     fn append(stack: &mut [AlsXmlNode], root: &mut Option<AlsXmlNode>, node: AlsXmlNode) -> Result<(), ProjectError> {
@@ -78,7 +84,7 @@ pub fn parse_als_xml(xml: &str) -> Result<AlsXmlNode, ProjectError> {
         let rest = &xml[cursor..];
         if !rest.starts_with('<') {
             let end = rest.find('<').map_or(xml.len(), |n| cursor + n);
-            push_text(&mut stack, &xml[cursor..end], false)?;
+            push_text(&mut stack, &mut lengths, &xml[cursor..end], false)?;
             cursor = end;
             continue;
         }
@@ -92,7 +98,7 @@ pub fn parse_als_xml(xml: &str) -> Result<AlsXmlNode, ProjectError> {
         }
         if rest.starts_with("<![CDATA[") {
             let end = rest[9..].find("]]>").map(|n| cursor + 9 + n).ok_or_else(|| fail("Live Set XML is malformed (CDATA)"))?;
-            push_text(&mut stack, &xml[cursor + 9..end], true)?;
+            push_text(&mut stack, &mut lengths, &xml[cursor + 9..end], true)?;
             cursor = end + 3;
             continue;
         }
@@ -115,6 +121,7 @@ pub fn parse_als_xml(xml: &str) -> Result<AlsXmlNode, ProjectError> {
                 .pop()
                 .filter(|node| node.tag == tag)
                 .ok_or_else(|| fail(format!("Live Set XML is malformed (unexpected </{tag}>)")))?;
+            lengths.pop();
             append(&mut stack, &mut root, node)?;
             continue;
         }
@@ -146,6 +153,7 @@ pub fn parse_als_xml(xml: &str) -> Result<AlsXmlNode, ProjectError> {
             append(&mut stack, &mut root, node)?;
         } else {
             stack.push(node);
+            lengths.push(0);
         }
     }
     if !stack.is_empty() {
@@ -453,20 +461,41 @@ pub struct AlsLintOptions {
 fn resolve(path: impl AsRef<Path>) -> Result<PathBuf, ProjectError> {
     crate::command::resolve(path).map_err(|e| fail(e.message()))
 }
-fn media_exists_without_links(root: &Path, candidate: &Path) -> Option<bool> {
+/// What a path is, its own link not followed: kept for the rest of one lint, whose references share folders.
+#[derive(Clone, Copy)]
+enum Entry {
+    Directory,
+    Other,
+    Link,
+    Missing,
+    Unreadable,
+}
+fn entry(path: &Path, seen: &mut HashMap<PathBuf, Entry>) -> Entry {
+    if let Some(found) = seen.get(path) {
+        return *found;
+    }
+    let found = match std::fs::symlink_metadata(path) {
+        Ok(stats) if stats.is_symlink() => Entry::Link,
+        Ok(stats) if stats.is_dir() => Entry::Directory,
+        Ok(_) => Entry::Other,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Entry::Missing,
+        Err(_) => Entry::Unreadable,
+    };
+    seen.insert(path.to_owned(), found);
+    found
+}
+fn media_exists_without_links(root: &Path, candidate: &Path, seen: &mut HashMap<PathBuf, Entry>) -> Option<bool> {
     let mut current = root.to_owned();
     let components: Vec<_> = candidate.strip_prefix(root).ok()?.components().collect();
     for index in 0..=components.len() {
         if index > 0 {
             current.push(components[index - 1]);
         }
-        match std::fs::symlink_metadata(&current) {
-            Ok(stats) => {
-                if stats.is_symlink() || (index < components.len() && !stats.is_dir()) {
-                    return None;
-                }
-            }
-            Err(e) => return if e.kind() == std::io::ErrorKind::NotFound { Some(false) } else { None },
+        match entry(&current, seen) {
+            Entry::Link | Entry::Unreadable => return None,
+            Entry::Missing => return Some(false),
+            Entry::Other if index < components.len() => return None,
+            Entry::Directory | Entry::Other => {}
         }
     }
     Some(true)
@@ -484,6 +513,7 @@ pub fn lint_als_model(model: &AlsModel, options: &AlsLintOptions) -> Result<Valu
     };
     let last_locator = model.locators.last().map(|l| l.time);
     let media_root = options.allowed_root.as_ref().map(resolve).transpose()?;
+    let mut seen = HashMap::new();
     let mut names: HashMap<&str, usize> = HashMap::new();
     for track in &model.tracks {
         if !track.name.is_empty() {
@@ -558,7 +588,7 @@ pub fn lint_als_model(model: &AlsModel, options: &AlsLintOptions) -> Result<Valu
                     continue;
                 }
                 let candidate = resolve(options.set_directory.as_ref().map(Path::new).unwrap_or(root).join(path))?;
-                if candidate.starts_with(root) && media_exists_without_links(root, &candidate) == Some(false) {
+                if candidate.starts_with(root) && media_exists_without_links(root, &candidate, &mut seen) == Some(false) {
                     push(
                         "error",
                         "missing-sample-reference",

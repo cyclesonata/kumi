@@ -57,6 +57,8 @@ pub struct Parameters {
     pub display_maps: RefCell<IndexMap<String, DisplayMap>>,
     pub fast_found: RefCell<IndexMap<String, Found>>,
     pub fast_generation: Cell<Option<u64>>,
+    /// The lease `display_maps` were read in.
+    maps_generation: Cell<Option<u64>>,
     fast: Option<bool>,
 }
 impl Parameters {
@@ -67,6 +69,29 @@ impl Parameters {
             display_maps: RefCell::new(IndexMap::new()),
             fast_found: RefCell::new(IndexMap::new()),
             fast_generation: Cell::new(None),
+            maps_generation: Cell::new(None),
+        }
+    }
+    /// What Kumi found of parameters by place goes when the place may mean something else: a new lease (each
+    /// observation, or Live changed outside a change Kumi follows), or a device Kumi moved, deleted or replaced. A
+    /// parameter ref is a position, so a device put in another's place answers to the same ref.
+    pub fn forget(&self) {
+        self.fast_found.borrow_mut().clear();
+        self.display_maps.borrow_mut().clear();
+    }
+    fn forget_stale(&self) {
+        let lease = self.history.connection.lease.get();
+        if self.fast_generation.get() != Some(lease) {
+            self.fast_found.borrow_mut().clear();
+            self.fast_generation.set(Some(lease));
+        }
+        self.forget_stale_maps();
+    }
+    fn forget_stale_maps(&self) {
+        let lease = self.history.connection.lease.get();
+        if self.maps_generation.get() != Some(lease) {
+            self.display_maps.borrow_mut().clear();
+            self.maps_generation.set(Some(lease));
         }
     }
     pub fn fast_on(&self) -> bool {
@@ -98,6 +123,7 @@ impl Parameters {
     }
     pub async fn value_for_text(&self, parameter_ref: &str, text: &str, signal: Signal) -> Result<Result<f64, String>, RuntimeError> {
         let connection = &self.history.connection;
+        self.forget_stale_maps();
         let named = connection.references.borrow().lengthen(&json!({"parameterRef":parameter_ref}));
         let long = named["parameterRef"].as_str().unwrap_or(parameter_ref).to_owned();
         let cached = self.display_maps.borrow().get(&long).cloned();
@@ -136,10 +162,7 @@ impl Parameters {
             return Ok(ChangeOutcome::error("Name the device (deviceRef) whose parameter this is."));
         };
         let connection = &self.history.connection;
-        if self.fast_generation.get() != Some(connection.lease.get()) {
-            self.fast_found.borrow_mut().clear();
-            self.fast_generation.set(Some(connection.lease.get()));
-        }
+        self.forget_stale();
         let several = input.get("values").is_some_and(Value::is_array);
         let asked = if several {
             input["values"].as_array().unwrap().iter().map(context::object).collect::<Result<Vec<_>, _>>()?
@@ -350,7 +373,8 @@ impl Parameters {
         if let Some(name) = result.get("device").and_then(Value::as_str) {
             device_row.insert("name".into(), json!(name));
         }
-        let track = context::object(result.get("track").unwrap_or(&Value::Null))?;
+        // A track Live couldn't say (none, or unreadable once the change was made) leaves the change as it is.
+        let track = result.get("track").and_then(Value::as_object).cloned().unwrap_or_default();
         if let Some(reference) = track.get("ref") {
             device_row.insert("trackRef".into(), reference.clone());
         }
@@ -415,10 +439,15 @@ impl Parameters {
             } else {
                 object(json!({"device":target["device"],"index":target["index"]}))
             };
-            for (from, to) in [("name", "name"), ("prior", "prior"), ("value", "applied")] {
+            for (from, to) in [("name", "name"), ("prior", "prior")] {
                 if let Some(value) = row.get(from) {
                     back.insert(to.into(), value.clone());
                 }
+            }
+            // What the target's own set left (two targets can be one parameter: the undo puts each back in turn),
+            // else what Live kept in the end.
+            if let Some(value) = row.get("applied").or_else(|| row.get("value")) {
+                back.insert("applied".into(), value.clone());
             }
             revert.push(Value::Object(back));
         }

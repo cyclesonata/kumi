@@ -76,8 +76,56 @@ def _mode_owner_only(path: Path) -> bool:
         return False
 
 
+def _local_path(path: Path) -> bool:
+    r"""Whether a path is an absolute one on this machine: not a share's (two leading separators in any mix,
+    \\host\share or //host/share) nor one in a device namespace (\\?\, \\.\ or \??\), where even a stat can reach
+    another host."""
+    return path.is_absolute() and not str(path).replace("/", "\\").startswith(("\\\\", "\\??\\"))
+
+
+def _no_link_on_the_way(path: Path) -> bool:
+    """Whether path, and each folder above it, is reached without following a link: a symlink, or on Windows a
+    junction or other name-surrogate reparse point (a cloud file's isn't one). os.lstat reads each from the root down
+    without following it, so nothing past the first link is touched. A part that isn't there ends the way."""
+    try:
+        for step in reversed((path, *path.parents)):
+            found = os.lstat(step)
+            if stat.S_ISLNK(found.st_mode) or getattr(found, "st_reparse_tag", 0) & 0x20000000:
+                return False
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _config_paths(reference: Path) -> list[Path]:
+    """The files _read_config checks the owner of, as far as they can be read now: its checks then find their
+    verdicts waiting, one PowerShell run in all on Windows instead of one each. Nothing in them is trusted until those
+    checks pass, so no link is followed, at the path or a folder above it (the checks refuse a linked file anyway), and
+    a path that isn't a _local_path isn't touched at all, left to its own check: a reference or config another
+    account can write mustn't have Live contact a host it names."""
+    looked_at = lambda path: _local_path(path) and _no_link_on_the_way(path)
+    paths: list[Path] = []
+    try:
+        if not looked_at(reference): return paths
+        paths.append(reference)
+        config = Path(json.loads(reference.read_text(encoding="utf-8"))["config"])
+        if not looked_at(config): return paths
+        paths.append(config)
+        value = _normalize_bridge_config(json.loads(config.read_text(encoding="utf-8")))
+        diagnostics = Path(value["diagnostics"]["path"]) if isinstance(value.get("diagnostics"), dict) else None
+        named = [Path(value["secretFile"])] + ([diagnostics, diagnostics.parent] if diagnostics is not None else [])
+        paths += [path for path in named if looked_at(path)]
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError):
+        pass
+    return paths
+
+
 def _read_config() -> dict[str, Any]:
     reference = Path(__file__).with_name("bridge-reference.json")
+    if os.name == "nt":
+        _prefetch_acl_verdicts(_config_paths(reference))
     if reference.is_symlink() or not reference.is_file() or not _owner_controlled(reference) or not _mode_owner_only(reference):
         raise ValueError("bridge configuration reference is missing or unsafe")
     try:
@@ -153,30 +201,96 @@ def _diagnostics_path_safe(path: Path) -> bool:
         return False
 
 
+# Verdicts of the Windows ACL check, by the path and what's on disk there (device, file id, size, times), each for a
+# short while: the Control Surface's start asks about the same few files more than once, and each check of Live's
+# own Python (it has no ctypes) is a PowerShell run on Live's main thread.
+_ACL_VERDICTS: dict[tuple[Any, ...], tuple[bool, float]] = {}
+_ACL_VERDICT_SECONDS = 30.0
+# A batch's answer: this bit set, and bit i for path i that failed. Any other exit (PowerShell failing to start, a
+# script error's 1) fails every path, closed.
+_ACL_ANSWERED = 128
+_ACL_BATCH = 7
+
+
+def _acl_key(path: Path) -> tuple[Any, ...] | None:
+    try:
+        entry = os.stat(path)
+    except (OSError, ValueError, TypeError):
+        return None
+    return (str(path), entry.st_dev, entry.st_ino, entry.st_size, entry.st_mtime_ns, getattr(entry, "st_ctime_ns", None))
+
+
+def _keep_acl_verdict(key: tuple[Any, ...], verdict: bool) -> None:
+    """Keep a verdict, dropping those past their time: a file that grows (the diagnostics log, checked once a minute
+    for as long as Live runs) has a new key at each check. The diagnostics writer's thread keeps verdicts too, hence
+    the copy and the pop."""
+    now = time.monotonic()
+    for held, (_, at) in list(_ACL_VERDICTS.items()):
+        if now - at >= _ACL_VERDICT_SECONDS: _ACL_VERDICTS.pop(held, None)
+    _ACL_VERDICTS[key] = (verdict, now)
+
+
+def _acl_cached(key: tuple[Any, ...] | None) -> bool | None:
+    held = _ACL_VERDICTS.get(key) if key is not None else None
+    return held[0] if held is not None and time.monotonic() - held[1] < _ACL_VERDICT_SECONDS else None
+
+
 def _windows_acl_owner_only(path: Path) -> bool:
     """Require a protected DACL containing exactly one owner FullControl ACE.
 
     Verification uses the Windows security API with explicit exit codes so no
     localized or serialized output is parsed.
     """
+    key = _acl_key(path); cached = _acl_cached(key)
+    if cached is not None:
+        return cached
+    verdict = _windows_acl_owner_only_all([path])[0]
+    if key is not None:
+        _keep_acl_verdict(key, verdict)
+    return verdict
+
+
+def _prefetch_acl_verdicts(paths: list[Path]) -> None:
+    """Check several files' ACLs in one PowerShell run and keep the verdicts, so the checks after it don't each
+    start one. Best effort: a path that can't be looked at is left for its own check."""
+    wanted = []
+    for path in paths:
+        key = _acl_key(path) if path is not None else None
+        if key is not None and _acl_cached(key) is None and key not in [held for _, held in wanted]:
+            wanted.append((path, key))
+    for start in range(0, len(wanted), _ACL_BATCH):
+        batch = wanted[start:start + _ACL_BATCH]
+        verdicts = _windows_acl_owner_only_all([path for path, _ in batch])
+        for (_, key), verdict in zip(batch, verdicts):
+            _keep_acl_verdict(key, verdict)
+
+
+def _windows_acl_owner_only_all(paths: list[Path]) -> list[bool]:
+    """The ACL check for up to _ACL_BATCH paths in one PowerShell run, by its exit code (no output is parsed)."""
+    if not 1 <= len(paths) <= _ACL_BATCH:
+        return [False] * len(paths)
     try:
-        encoded = base64.b64encode(str(path).encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode("\n".join(str(path) for path in paths).encode("utf-8")).decode("ascii")
         script = (
-            "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ABLETON_MCP_ACL_PATH));"
             "$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;"
+            "function OwnerOnly($p) {"
             "$c=[System.IO.File]::GetAccessControl($p);"
-            "if ($c.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { exit 2 }"
-            "if (-not $c.AreAccessRulesProtected) { exit 3 }"
-            "$rules=@($c.Access); if ($rules.Count -ne 1) { exit 4 }"
+            "if ($c.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { return $false }"
+            "if (-not $c.AreAccessRulesProtected) { return $false }"
+            "$rules=@($c.Access); if ($rules.Count -ne 1) { return $false }"
             "$rule=$rules[0];"
-            "if ($rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { exit 5 }"
-            "if ($rule.IsInherited) { exit 6 }"
-            "if ($rule.AccessControlType.ToString() -ne 'Allow') { exit 7 }"
-            "if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { exit 8 }"
-            "exit 0"
+            "if ($rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { return $false }"
+            "if ($rule.IsInherited) { return $false }"
+            "if ($rule.AccessControlType.ToString() -ne 'Allow') { return $false }"
+            "if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { return $false }"
+            "return $true };"
+            "$paths=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ABLETON_MCP_ACL_PATHS)) -split \"`n\";"
+            f"$mask={_ACL_ANSWERED}; $i=0;"
+            "foreach ($p in $paths) { $ok=$false; try { $ok=(OwnerOnly $p) -eq $true } catch { $ok=$false }; if (-not $ok) { $mask=$mask -bor (1 -shl $i) }; $i++ };"
+            "exit $mask"
         )
         environment = dict(os.environ)
-        environment["ABLETON_MCP_ACL_PATH"] = encoded
+        environment["ABLETON_MCP_ACL_PATHS"] = encoded
         # By its full path: a bare name is looked for in Live's own folder and the working folder first.
         powershell = os.path.join(os.environ.get("SYSTEMROOT") or r"C:\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
         # Live has no console of its own: without this flag each check would open a console window.
@@ -184,9 +298,12 @@ def _windows_acl_owner_only(path: Path) -> bool:
             [powershell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
             capture_output=True, timeout=10, env=environment, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        return result.returncode == 0
+        code = result.returncode
+        if not isinstance(code, int) or code & ~((1 << len(paths)) - 1) != _ACL_ANSWERED:
+            return [False] * len(paths)
+        return [not code & (1 << index) for index in range(len(paths))]
     except (AttributeError, OSError, ValueError, TypeError, subprocess.SubprocessError):
-        return False
+        return [False] * len(paths)
 
 
 def _windows_owner_controlled(path: Path) -> bool | None:
@@ -339,6 +456,12 @@ class _WillingtonProvider:
                 from WillingtonRuntime import ComponentUnavailableError as unavailable
             except ImportError:
                 unavailable = ()  # Older packages have no typed availability error.
+            try:
+                import WillingtonRuntime as willington_runtime
+            except ImportError:
+                willington_runtime = None
+            if willington_runtime is not None:
+                _keep_willington_identity(willington_runtime)
 
             def install_component(component, module):
                 if component in getattr(Live, "_kumi_willington_unavailable_components", ()):
@@ -426,6 +549,25 @@ class _WillingtonProvider:
 
 
 _WILLINGTON_CHECK_SECONDS = 1.0
+
+
+def _keep_willington_identity(runtime: Any) -> None:
+    """Willington's identity() hashes the whole Live executable (SHA-256) each call, and its components' installs
+    ask for it up to five times a provider, on every /willington switch too, on Live's main thread. What it reads (the
+    running Live's version and executable) can't change while Live runs, so its answer is kept for the life of the
+    process. vendor/willington keeps Willington's own files as they ship; the wrapper is Kumi's."""
+    original = getattr(runtime, "identity", None)
+    if not callable(original) or getattr(original, "_kumi_kept", False):
+        return
+    kept: list[dict[str, Any]] = []
+
+    def identity() -> dict[str, Any]:
+        if not kept:
+            kept.append(original())
+        return dict(kept[0])
+
+    identity._kumi_kept = True  # type: ignore[attr-defined]
+    runtime.identity = identity
 
 
 def _willington_switch() -> tuple[int, int, int] | None:
@@ -521,9 +663,12 @@ class AbletonMcpBridge(_ControlSurface):
     def _drain(self) -> None:
         if self._disconnected:
             return
-        self._keep_willington()
-        self._bridge.update_display()
-        self._schedule_next()
+        try:
+            self._keep_willington()
+            self._bridge.update_display()
+        finally:
+            # A tick that fails once doesn't end the drain: the next one is scheduled whatever happened.
+            self._schedule_next()
 
     def update_display(self) -> None:
         self._keep_willington()

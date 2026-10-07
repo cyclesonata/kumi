@@ -122,8 +122,7 @@ impl McpHost {
             record.borrow_mut()["applyKey"]=p["idempotencyKey"].clone();record.borrow_mut()["state"]=json!("applied");let mut response=json!({"transactionId":t["id"],"state":"applied"});if !jumping{if let Some(revision)=result.get("revision"){response["revision"]=revision.clone();}}response["idempotent"]=json!(false);Ok(success_text(id,&response))
         }.await;
         Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Transport state is uncertain; perform fresh discovery before retrying.")
+            self.apply_failed(id, &record, &e, "Transport state is uncertain; perform fresh discovery before retrying.")
         }))
     }
 }

@@ -17,7 +17,8 @@ pub struct Thumb {
     pub height: usize,
     pub rgb: Vec<u8>,
 }
-pub const THUMB_WIDTH: usize = 32;
+/// A frame's thumbnail's longer side.
+pub const THUMB_SIZE: usize = 32;
 pub const REGIONS: [(&str, &str); 9] = [
     ("top", "iw:ih*0.4:0:0"),
     ("bottom", "iw:ih*0.4:0:ih*0.6"),
@@ -148,9 +149,23 @@ pub async fn frame_at(
         })
         .await?;
     }
-    Ok(Frame { jpeg: tokio::fs::read(path).await?, thumb: thumb_of(ffmpeg, path, signal).await? })
+    let jpeg = tokio::fs::read(path).await?;
+    // The picture is what the model sees: a thumbnail that can't be made leaves a whole frame without one (the app
+    // draws none for it), unless the watch was stopped.
+    let thumb = match thumb_of(ffmpeg, path, signal.clone()).await {
+        Ok(thumb) => thumb,
+        Err(_)
+            if jpeg.starts_with(&[0xff, 0xd8]) && jpeg.ends_with(&[0xff, 0xd9]) && !signal.as_ref().is_some_and(Signal::is_cancelled) =>
+        {
+            Thumb { width: 0, height: 0, rgb: vec![] }
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Frame { jpeg, thumb })
 }
 pub async fn thumb_of(ffmpeg: &str, jpeg: &str, signal: Option<Signal>) -> Result<Thumb, VideoFailure> {
+    // The longer side THUMB_SIZE and the other even, as before: a portrait frame's, or a side close-up's, is that high.
+    let scale = format!("scale='if(gte(iw,ih),{THUMB_SIZE},-2)':'if(gte(iw,ih),-2,{THUMB_SIZE})'");
     let output = run(
         ffmpeg,
         &[
@@ -161,7 +176,7 @@ pub async fn thumb_of(ffmpeg: &str, jpeg: &str, signal: Option<Signal>) -> Resul
             "-i",
             jpeg,
             "-vf",
-            "scale=32:-2",
+            &scale,
             "-frames:v",
             "1",
             "-f",
@@ -180,7 +195,7 @@ pub async fn thumb_of(ffmpeg: &str, jpeg: &str, signal: Option<Signal>) -> Resul
     let width = header[1].parse::<usize>().unwrap_or(0);
     let height = header[2].parse::<usize>().unwrap_or(0);
     let start = header[0].chars().count();
-    if width != THUMB_WIDTH || !(2..=THUMB_WIDTH).contains(&height) || data.len() - start != width * height * 3 {
+    if width.max(height) != THUMB_SIZE || width.min(height) < 2 || data.len() - start != width * height * 3 {
         return Err(VideoFailure::other("the frame's thumbnail came out wrong"));
     }
     Ok(Thumb { width, height, rgb: data[start..].to_vec() })
@@ -230,12 +245,45 @@ pub async fn duration_of(ffmpeg: &str, file: &str, signal: Option<Signal>) -> Op
             .to_string_lossy()
             .into_owned()
     };
-    let output = run(
+    let probed = run(
         &probe,
         &["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file],
+        RunOptions { timeout_ms: Some(20_000), signal: signal.clone(), ..Default::default() },
+    )
+    .await;
+    if let Ok(output) = probed {
+        return output.stdout_text().trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0);
+    }
+    // Kumi's own ffmpeg comes without ffprobe: what ffmpeg says of the file it opens, then (it reads nothing past that).
+    let output = run(
+        ffmpeg,
+        &["-hide_banner", "-nostdin", "-i", file, "-t", "0", "-f", "null", "-"],
         RunOptions { timeout_ms: Some(20_000), signal, ..Default::default() },
     )
     .await
     .ok()?;
-    output.stdout_text().trim().parse::<f64>().ok().filter(|n| n.is_finite() && *n > 0.0)
+    duration_in(&output.stderr)
+}
+/// The length ffmpeg prints for the file it opens: its own `Duration:` line, not a tag's text in the `Metadata:` above it.
+fn duration_in(said: &str) -> Option<f64> {
+    static DURATION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^\s+Duration: ([0-9]+):([0-9]{2}):([0-9]{2}(?:\.[0-9]+)?)").unwrap());
+    let found = DURATION.captures(said)?;
+    let seconds = found[1].parse::<f64>().ok()? * 3600.0 + found[2].parse::<f64>().ok()? * 60.0 + found[3].parse::<f64>().ok()?;
+    Some(seconds).filter(|n| n.is_finite() && *n > 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_files_length_is_its_own_duration_line_not_a_tag_that_says_one() {
+        let said = "Input #0, mp3, from 'mix.mp3':\n  Metadata:\n    comment         : Duration: 00:00:01.00\n    title           : Mix\n  Duration: 00:03:00.05, start: 0.025057, bitrate: 128 kb/s\n  Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 128 kb/s\n";
+        assert_eq!(duration_in(said), Some(180.05));
+        // A tag's text on a line of its own (a value with a line break) is still below its key's indent.
+        let wrapped = "  Metadata:\n    comment         : one\n                    : Duration: 00:00:01.00\n  Duration: 01:00:00.00, start: 0.000000\n";
+        assert_eq!(duration_in(wrapped), Some(3600.0));
+        assert_eq!(duration_in("  Duration: N/A, start: 0.000000, bitrate: N/A\n"), None);
+    }
 }

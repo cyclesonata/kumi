@@ -170,6 +170,74 @@ fn replace(v: Value, root: &str, to: &str) -> Value {
     })
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_library_database_is_read_once_until_it_changes() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::getuid() } == 0 {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let db = root.join("files.db");
+    std::fs::write(&db, library_fixtures::files_db()).unwrap();
+    let host = McpHost::default();
+    let args = json!({"database":db,"allowlistRoot":root,"limit":2});
+    let first = host.live_library_search_async(&json!(1), &args).await.unwrap();
+    assert_ne!(first["result"]["isError"], true, "{first}");
+    // Unreadable now, but unchanged: the next page (or search) is answered from what was read.
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let again = host.live_library_search_async(&json!(1), &args).await;
+    std::fs::set_permissions(&db, std::fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(again.unwrap(), first);
+    // Changed: it's read again.
+    std::fs::write(&db, "not a database").unwrap();
+    let changed = host.live_library_search_async(&json!(1), &args).await.unwrap();
+    assert!(changed.to_string().contains("unreadable"), "{changed}");
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_library_search_queries_its_database_off_the_bridges_thread() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let root = fixture_paths::native_path(&root.path().canonicalize().unwrap());
+    let (db, plugins) = (root.join("files.db"), root.join("plugins.db"));
+    std::fs::write(&db, library_fixtures::files_db()).unwrap();
+    std::fs::write(&plugins, library_fixtures::plugins_db()).unwrap();
+    let host = McpHost::default();
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let ticking = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            loop {
+                ticks.fetch_add(1, Ordering::Relaxed);
+                tokio::task::yield_now().await;
+            }
+        }
+    });
+    for mode in ["files", "tags", "plugins"] {
+        let args = json!({"database":db,"pluginsDatabase":plugins,"allowlistRoot":root,"mode":mode,"limit":2});
+        // The first reads the database; the next have only their query left to run. A blocking thread can finish one
+        // this small before the search first waits for it, which then goes on without yielding, so it's asked up to
+        // 50 times: a query on the bridge's thread never lets the ticker run in any of them.
+        let page = host.live_library_search_async(&json!(1), &args).await.unwrap();
+        assert_ne!(page["result"]["isError"], true, "{page}");
+        let mut asked = 0;
+        loop {
+            let before = ticks.load(Ordering::Relaxed);
+            let page = host.live_library_search_async(&json!(1), &args).await.unwrap();
+            assert_ne!(page["result"]["isError"], true, "{page}");
+            asked += 1;
+            if ticks.load(Ordering::Relaxed) > before {
+                break;
+            }
+            assert!(asked < 50, "{mode}: the bridge's thread ran nothing else while any of {asked} queries ran");
+        }
+    }
+    ticking.abort();
+}
 #[tokio::test(flavor = "current_thread")]
 async fn library_host_matches_source_allowlists_wal_queries_and_coercion() {
     let root = tempfile::tempdir().unwrap();

@@ -17627,6 +17627,9 @@ var import_node_net = require("node:net");
 var REQUIRED = ["version", "id", "method", "nonce", "sequence", "bridgeEpoch", "connectionChallenge", "deadlineMs", "mac"];
 var OPTIONAL = ["operation", "args", "ref", "transactionId", "idempotencyKey", "stateDigest", "ownershipToken"];
 var ID = /^[A-Za-z0-9_-]{1,128}$/;
+var UNSIGNED_FRAME_BYTES = 64 * 1024;
+var SIGN_IN_WITHIN_MS = 1e4;
+var MAX_CONNECTIONS = 16;
 var ExtensionServer = class {
   constructor(secret, handlers, log2 = () => void 0) {
     this.secret = secret;
@@ -17669,12 +17672,23 @@ var ExtensionServer = class {
     }
   }
   accept(socket) {
+    if (this.connections.size >= MAX_CONNECTIONS) {
+      socket.destroy();
+      return;
+    }
     socket.setNoDelay(true);
-    const connection = { socket, challenge: token(24), lastSequence: 0, eventSequence: 0, pieces: [], buffered: 0 };
+    const connection = { socket, challenge: token(24), lastSequence: 0, eventSequence: 0, pieces: [], buffered: 0, signedIn: false };
+    connection.signIn = setTimeout(() => {
+      if (!connection.signedIn) socket.destroy();
+    }, SIGN_IN_WITHIN_MS);
+    connection.signIn.unref();
     this.connections.add(connection);
     socket.on("data", (chunk) => this.onData(connection, chunk));
     socket.on("error", () => void 0);
-    socket.on("close", () => this.connections.delete(connection));
+    socket.on("close", () => {
+      clearTimeout(connection.signIn);
+      this.connections.delete(connection);
+    });
     this.send(connection, { version: LOOPBACK_PROTOCOL, id: "hello", ok: true, bridgeEpoch: this.bridgeEpoch, connectionChallenge: connection.challenge, result: { protocol: LIVE_PROTOCOL, registryHash: REGISTRY_HASH, maxDeadlineMs: 6e5 } });
   }
   send(connection, payload) {
@@ -17683,10 +17697,12 @@ var ExtensionServer = class {
 `);
   }
   onData(connection, chunk) {
+    if (connection.socket.destroyed) return;
+    const bound = () => connection.signedIn ? MAX_FRAME_BYTES : UNSIGNED_FRAME_BYTES;
     connection.pieces.push(chunk);
     connection.buffered += chunk.length;
     if (chunk.indexOf(10) < 0) {
-      if (connection.buffered > MAX_FRAME_BYTES) connection.socket.destroy();
+      if (connection.buffered > bound()) connection.socket.destroy();
       return;
     }
     let buffer = Buffer.concat(connection.pieces);
@@ -17695,7 +17711,14 @@ var ExtensionServer = class {
     for (let index = buffer.indexOf(10); index >= 0; index = buffer.indexOf(10)) {
       const line = buffer.subarray(0, index);
       buffer = buffer.subarray(index + 1);
-      if (line.length > 0) void this.onFrame(connection, line.toString("utf8"));
+      if (line.length > bound()) {
+        connection.socket.destroy();
+        return;
+      }
+      if (line.length > 0) this.onFrame(connection, line.toString("utf8")).catch((error) => {
+        this.log(`a request failed unexpectedly: ${error instanceof Error ? error.message : String(error)}`);
+        this.error(connection, "invalid", "request failed");
+      });
     }
     if (buffer.length > 0) {
       connection.pieces.push(buffer);
@@ -17713,6 +17736,10 @@ var ExtensionServer = class {
       this.error(connection, "invalid", "malformed request");
       return;
     }
+    if (typeof request !== "object" || request === null || Array.isArray(request)) {
+      this.error(connection, "invalid", "malformed request");
+      return;
+    }
     const keys = Object.keys(request);
     const now = Date.now();
     if (!REQUIRED.every((key) => keys.includes(key)) || keys.some((key) => !REQUIRED.includes(key) && !OPTIONAL.includes(key)) || request.version !== LOOPBACK_PROTOCOL || request.bridgeEpoch !== this.bridgeEpoch || request.connectionChallenge !== connection.challenge || typeof request.id !== "string" || !ID.test(request.id) || typeof request.deadlineMs !== "number" || !(request.deadlineMs >= now && request.deadlineMs <= now + 6e5) || typeof request.nonce !== "string" || request.nonce.length < 16 || request.nonce.length > 256 || typeof request.sequence !== "number" || !Number.isSafeInteger(request.sequence) || request.sequence <= connection.lastSequence) {
@@ -17722,6 +17749,10 @@ var ExtensionServer = class {
     if (!verify(this.secret, request)) {
       this.error(connection, request.id, "authentication or replay check failed");
       return;
+    }
+    if (!connection.signedIn) {
+      connection.signedIn = true;
+      clearTimeout(connection.signIn);
     }
     connection.lastSequence = request.sequence;
     const id = request.id;

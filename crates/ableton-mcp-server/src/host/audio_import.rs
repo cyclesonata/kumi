@@ -69,7 +69,10 @@ impl McpHost {
         }
         let result = async {
             let authority = self.audio_import_file_authority(&params["filePath"], &params["allowedRoot"]).await?;
-            let staging = self.stage_verified_import_file(authority["canonicalPath"].as_str().unwrap(), &authority).await?;
+            // The file is copied once the destination is known to take it: a refused preview copies nothing. Where it
+            // would go is checked first, as before.
+            self.import_staging_root()?;
+            let mut staged = None::<String>;
             let retained = async {
                 let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
                 if !status.connected || !status.capabilities.iter().any(|c| c.as_str() == "session.read") {
@@ -93,11 +96,10 @@ impl McpHost {
                     let refused = arrangement_clip::lane_track_refuses(&lane_track, true)
                         .or_else(|| (!under.is_empty()).then(|| arrangement_clip::lane_audio_taken(&lane, &under)));
                     if let Some(why) = refused {
-                        self.release_staged_import_file(&json!(staging));
                         return Ok(reason_error(id, &why, arrangement_clip::NOTHING_CHANGED));
                     }
                     let mut payload = fields(params, &["takeLaneRef", "position", "name"]);
-                    payload["filePath"] = json!(staging);
+                    payload["filePath"] = Value::Null;
                     payload["expectedTakeLaneIdentity"] = lane["objectIdentity"].clone();
                     payload["expectedCollectionRevision"] =
                         json!(hex::encode(Sha256::digest(canonical_mutation_identity(&json!(siblings(&lane)))?)));
@@ -129,11 +131,10 @@ impl McpHost {
                         return Err(LiveError::error("Session import target identity is incomplete"));
                     };
                     if truthy(&slot["clipRef"]) {
-                        self.release_staged_import_file(&json!(staging));
                         return Ok(transaction_error(id, "Session slot is occupied"));
                     }
                     let mut payload = fields(params, &["trackRef", "sceneIndex", "name"]);
-                    payload["filePath"] = json!(staging);
+                    payload["filePath"] = Value::Null;
                     for (key, value) in [
                         ("expectedTrackIdentity", &track["objectIdentity"]),
                         ("expectedSlotRef", &slot["ref"]),
@@ -151,6 +152,9 @@ impl McpHost {
                     response["sceneIndex"] = params["sceneIndex"].clone();
                     response["impact"] = json!("creates-session-audio-clip");
                 }
+                let staging = self.stage_verified_import_file(authority["canonicalPath"].as_str().unwrap(), &authority).await?;
+                transaction["payload"]["filePath"] = json!(staging);
+                staged = Some(staging);
                 transaction["id"] = json!(tempo::transaction_id("audioimport"));
                 transaction["expiresAt"] = json!(kumi_common::time::now_ms_f64() + TRANSACTION_TTL_MS);
                 response["transactionId"] = transaction["id"].clone();
@@ -161,7 +165,7 @@ impl McpHost {
                 Ok(success_text(id, &response))
             }
             .await;
-            if retained.is_err() {
+            if let (Err(_), Some(staging)) = (&retained, &staged) {
                 self.release_staged_import_file(&json!(staging))
             }
             retained
@@ -181,7 +185,10 @@ impl McpHost {
             || t["kind"] != "session-audio-create"
             || (t["state"] == "previewed" && t["expiresAt"].as_f64().is_some_and(|n| n <= kumi_common::time::now_ms_f64()))
         {
-            self.release_staged_import_for(&t);
+            // Only an expired import of its own: another kind's id names files that may be in use.
+            if t["kind"] == "session-audio-create" {
+                self.release_staged_import_for(&t);
+            }
             return Some(transaction_error(id, "Unknown or expired audio-import transaction"));
         }
         let record = record.unwrap();
@@ -200,13 +207,18 @@ impl McpHost {
                 self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
             }
             let status = self.require_connected(Some("session.read"))?;
+            // A reconcile's first apply may have made the clip from the staged file: it stays.
             if json!(status.epoch) != t["epoch"] {
-                self.release_staged_import_for(&t);
+                if !reconcile {
+                    self.release_staged_import_for(&t);
+                }
                 return Ok(transaction_error(id, "Live connection epoch changed; preview again"));
             }
             let file = &t["prior"]["file"];
             if !truthy(file) {
-                self.release_staged_import_for(&t);
+                if !reconcile {
+                    self.release_staged_import_for(&t);
+                }
                 return Ok(transaction_error(id, "audio import file authority is missing; preview again"));
             }
             let payload = &t["payload"];
@@ -252,6 +264,12 @@ impl McpHost {
                     self.release_staged_import_for(&t);
                     return Ok(transaction_error(id, "Session slot became occupied since preview; preview again"));
                 }
+            }
+            if let Err(error) = self.keep_staged(&t) {
+                return Ok(transaction_error(
+                    id,
+                    &format!("the staged sample couldn't be kept for the Set ({}); nothing was sent to Live", error.message()),
+                ));
             }
             {
                 let mut t = record.borrow_mut();
@@ -316,8 +334,7 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|cause| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &cause, "Audio-import state is uncertain; perform fresh discovery before retrying.")
+            self.apply_failed(id, &record, &cause, "Audio-import state is uncertain; perform fresh discovery before retrying.")
         }))
     }
     pub async fn undo_audio_import_async(&self, id: &Value, params: &Value, signal: Option<&Signal>) -> Value {
@@ -382,7 +399,7 @@ impl McpHost {
         {
             return error(id, -32602, "filePath and allowedRoot (the folder it must be in) are required", None);
         }
-        if ["filePath", "allowedRoot"].iter().any(|k| params[*k].as_str().is_some_and(|s| s.starts_with("\\\\") || s.starts_with("//"))) {
+        if ["filePath", "allowedRoot"].iter().any(|k| params[*k].as_str().is_some_and(kumi_common::path::network_or_device)) {
             return error(id, -32602, "files on a network share aren't imported: copy the file onto this computer first", None);
         }
         let mut staged = None;

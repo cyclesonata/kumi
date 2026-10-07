@@ -4,9 +4,11 @@ use kumi_common::{
     abort::{Signal, SignalExt},
     js::json as js_json,
 };
+/// The same beat time, within floating point's rounding: an undo moves a marker back by the distance it moved,
+/// and `(b + d) - d` can come back a few ulps from `b`.
 fn same(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+    match (a.as_f64(), b.as_f64()) {
+        (Some(a), Some(b)) => (a - b).abs() <= 1e-9 * 1.0_f64.max(a.abs()).max(b.abs()),
         _ => a == b,
     }
 }
@@ -83,6 +85,9 @@ impl McpHost {
         if params["action"] == "move" && !params["distance"].as_f64().is_some_and(f64::is_finite) {
             return error(id, -32602, "distance is required for move", None);
         }
+        if params["action"] == "move" && params["distance"].as_f64() == Some(0.0) {
+            return error(id, -32602, "distance must move the marker: 0 leaves it where it is", None);
+        }
         let result = async {
             let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(reads::AUDITION_DEADLINE_MS)))).await?;
             if !status.connected || !status.capabilities.iter().any(|c| c.as_str() == "session.read") {
@@ -123,6 +128,11 @@ impl McpHost {
             }
             if params["action"] == "move" {
                 let target = beat + params["distance"].as_f64().unwrap();
+                // A move too small for the beat time to show (1e-20 from beat 2) can never be confirmed, nor told from
+                // no move.
+                if same(&json!(target), &json!(beat)) {
+                    return Ok(error(id, -32602, "distance is too small to move the marker", None));
+                }
                 if target < 0.0 || (beats.iter().any(|v| v.as_f64() == Some(target)) && target != beat) {
                     return Ok(error(id, -32602, "warp-marker move target collides with an existing marker", None));
                 }
@@ -297,8 +307,7 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Warp-marker state is uncertain; perform fresh discovery before retrying.")
+            self.apply_failed(id, &record, &e, "Warp-marker state is uncertain; perform fresh discovery before retrying.")
         }))
     }
 

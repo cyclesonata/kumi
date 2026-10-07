@@ -2671,6 +2671,10 @@ struct ViewAssembly {
     tracks: Vec<Track>,
     clips: Vec<Map<String, Value>>,
     held: Vec<ArrangementClipEntry>,
+    /// The refs of `clips` (as JSON text; None for a clip without one) and of `held`: each page's clips are checked
+    /// against these, not against every clip kept so far.
+    clip_refs: HashSet<Option<String>>,
+    held_refs: HashSet<LiveRef>,
 }
 
 enum FillResult {
@@ -2681,18 +2685,24 @@ enum FillResult {
 
 impl ViewAssembly {
     fn new(first: &LiveSnapshot) -> Self {
-        let mut assembly = Self { tracks: first.tracks().to_vec(), clips: Vec::new(), held: Vec::new() };
+        let mut assembly = Self {
+            tracks: first.tracks().to_vec(),
+            clips: Vec::new(),
+            held: Vec::new(),
+            clip_refs: HashSet::new(),
+            held_refs: HashSet::new(),
+        };
         assembly.keep(first);
         assembly
     }
     fn keep(&mut self, snapshot: &LiveSnapshot) {
         for clip in snapshot.arrangement.as_ref().and_then(|a| a.clips.as_ref()).into_iter().flatten() {
-            if !self.clips.iter().any(|known| known.get("ref") == clip.get("ref")) {
+            if self.clip_refs.insert(clip.get("ref").map(Value::to_string)) {
                 self.clips.push(clip.clone());
             }
         }
         for item in snapshot.arrangement_clips.iter().flatten() {
-            if !self.held.iter().any(|known| known.clip.ref_ == item.clip.ref_) {
+            if self.held_refs.insert(item.clip.ref_.clone()) {
                 self.held.push(item.clone());
             }
         }
@@ -3756,7 +3766,27 @@ impl DeterministicLiveSimulator {
             LiveDiscoveryKind::Set => vec![state["set"].clone()],
             LiveDiscoveryKind::Track => array(&state["tracks"]).to_vec(),
             LiveDiscoveryKind::Scene => array(&state["scenes"]).to_vec(),
-            LiveDiscoveryKind::SessionClip => array(&state["tracks"]).iter().flat_map(|t| array(&t["clips"]).iter().cloned()).collect(),
+            LiveDiscoveryKind::SessionClip => {
+                // A clear's fence, only when asked for, as the Remote Script reports it.
+                let presence = request
+                    .fields
+                    .as_ref()
+                    .is_some_and(|fields| fields.iter().any(|f| f == "envelopesRevision" || f == "envelopesPresent"));
+                array(&state["tracks"])
+                    .iter()
+                    .flat_map(|t| {
+                        array(&t["clips"]).iter().map(move |clip| {
+                            let mut row = clip.clone();
+                            if presence {
+                                let found = simulator_automation::envelope_presence(t, clip);
+                                row["envelopesRevision"] = simulator_revision(&serde_json::json!(found)).into();
+                                row["envelopesPresent"] = found.iter().filter(|p| **p).count().into();
+                            }
+                            row
+                        })
+                    })
+                    .collect()
+            }
             LiveDiscoveryKind::ArrangementClip => array(&state["arrangementClips"])
                 .iter()
                 .filter(|item| parent.is_none_or(|p| item["trackRef"] == p))
@@ -5523,6 +5553,9 @@ impl DeterministicLiveSimulator {
                     }
                     Some("force-link-beat-time") => {
                         let beat = finite("beatTime", "beatTime is required for force-link-beat-time")?;
+                        if beat < 0.0 {
+                            return Err(LiveError::error("beatTime is before the start of the Set, where Live's playhead can't go"));
+                        }
                         state["playback"]["transport"]["position"] = beat.into();
                         state["set"]["position"] = beat.into();
                     }

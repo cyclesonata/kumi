@@ -36,8 +36,8 @@ pub use manual::MANUAL_TOOL;
 use measure_worker::{measure_reference, worker_binary, MeasureJob};
 use plan::{plan_learning, remembered_file, remembered_folders, PlanOptions};
 use search::SoundIndex;
+use sources::{below, resolve, SourceOptions};
 pub use sources::{library_sources, Source};
-use sources::{resolve, SourceOptions, SEP};
 use state::{acquire_lock, write_state};
 pub use state::{read_state, LibraryState};
 use std::{
@@ -188,7 +188,9 @@ impl Library {
         *self.remembered.borrow_mut() = Some(remembered.clone());
         remembered
     }
-    pub fn sources(&self) -> Vec<Source> {
+    /// Where the library is, looked for again at most once a minute, off Kumi's thread: a sleeping NAS or a mapped
+    /// drive that's gone holds each check for the network's timeout.
+    pub async fn sources(&self) -> Vec<Source> {
         if let Some((at, sources)) = &*self.source_cache.borrow() {
             if now_ms() - at < 60000 {
                 return sources.clone();
@@ -204,7 +206,9 @@ impl Library {
                 .chain(self.remembered.borrow().clone().unwrap_or_default())
                 .collect(),
         );
-        let sources = library_sources(&options);
+        let Ok(sources) = tokio::task::spawn_blocking(move || library_sources(&options)).await else {
+            return self.source_cache.borrow().as_ref().map(|(_, sources)| sources.clone()).unwrap_or_default();
+        };
         *self.source_cache.borrow_mut() = Some((now_ms(), sources.clone()));
         sources
     }
@@ -481,7 +485,7 @@ impl Library {
         }
         let (_, presets, sets) = self.counts.get();
         self.counts.set((reader.entries.len(), presets, sets));
-        let current = self.sources();
+        let current = self.sources().await;
         let key = current.iter().map(|s| s.path.as_str()).collect::<Vec<_>>().join("\n");
         let rebuild =
             self.held.borrow().as_ref().is_none_or(|held| {
@@ -599,10 +603,10 @@ impl LibraryAccess for Library {
         tokio::task::spawn_local(async move {
             if let Some(library) = weak.upgrade() {
                 let known = library.remembering().await;
-                let sources = library.sources();
+                let sources = library.sources().await;
                 let added: Vec<_> = folders
                     .into_iter()
-                    .filter(|f| !known.contains(f) && !sources.iter().any(|s| *f == s.path || f.starts_with(&format!("{}{SEP}", s.path))))
+                    .filter(|f| !known.contains(f) && !sources.iter().any(|s| *f == s.path || below(f, &s.path).is_some()))
                     .collect();
                 if added.is_empty() {
                     return;
@@ -619,8 +623,8 @@ impl LibraryAccess for Library {
             }
         });
     }
-    fn folders(&self) -> Vec<String> {
-        self.sources().into_iter().map(|s| s.path).collect()
+    async fn folders(&self) -> Vec<String> {
+        self.sources().await.into_iter().map(|s| s.path).collect()
     }
     async fn measure(&self, path: String, options: features::MeasureOptions) -> Result<SoundEntry, RuntimeError> {
         let relative = path.split(['\\', '/']).next_back().unwrap_or("").to_owned();

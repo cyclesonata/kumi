@@ -1196,6 +1196,99 @@ async fn a_songs_form_sections_where_whats_played_and_how_it_sounds_change_in_ba
     let heard: serde_json::Value = serde_json::from_str(&heard.text).unwrap();
     assert_eq!(heard["form"]["summary"], form.summary);
 }
+#[tokio::test(flavor = "current_thread")]
+async fn a_big_wavetable_is_made_while_kumi_keeps_running() {
+    use kumi_runtime::audio::wavetable::{build_wavetable, Keyframe, WavetableSpec};
+    let keyframe = Keyframe { harmonics: Some(vec![1.0; 1023]), ..Default::default() };
+    let spec = WavetableSpec { keyframes: Some(vec![keyframe; 2]), count: Some(16.0), from_audio: None };
+    // Kumi's thread draws the screen and answers the model meanwhile: here, a tick each millisecond.
+    let (done, ticks) = (std::cell::Cell::new(false), std::cell::Cell::new(0));
+    let build = async {
+        let frames = build_wavetable(&spec).await;
+        done.set(true);
+        frames
+    };
+    let ticker = async {
+        while !done.get() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            ticks.set(ticks.get() + 1);
+        }
+    };
+    let (frames, ()) = tokio::join!(build, ticker);
+    assert_eq!(frames.unwrap().len(), 16);
+    assert!(ticks.get() >= 3, "{} ticks while it was made", ticks.get());
+}
+#[tokio::test]
+async fn a_long_compressed_file_is_converted_only_as_far_as_its_read() {
+    use kumi_runtime::audio::decode::{open_audio, open_audio_to, prepare_audio_to};
+    let Some(ffmpeg) = find_ffmpeg(FfmpegOptions { installed_only: true, ..Default::default() }).await.unwrap() else {
+        eprintln!("ffmpeg makes the test file; unavailable");
+        return;
+    };
+    // Ogg: ffmpeg converts it everywhere (a Mac's afconvert, which copies whole, can't). M4A: a Mac's afconvert reads it
+    // too, and a read with a reach still goes to ffmpeg first.
+    let root = tempfile::tempdir().unwrap();
+    for (name, codec) in [("long.ogg", "libvorbis"), ("long.m4a", "aac")] {
+        let file = root.path().join(name);
+        let made = run(
+            &ffmpeg,
+            &["-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=40", "-c:a", codec, "-y", &file.to_string_lossy()],
+            RunOptions::default(),
+        )
+        .await;
+        if made.is_err() {
+            eprintln!("this ffmpeg has no {codec} encoder; {name} unavailable");
+            continue;
+        }
+        // Read for its first 10 s: the copy holds those (and a little), and the file is still 40 s long.
+        let cut = prepare_audio_to(&file, None, Some(10.0)).await.unwrap();
+        assert!((cut.seconds.unwrap() - 40.0).abs() < 0.1, "{name}: {:?}", cut.seconds);
+        let copy = open_audio(&cut.path, None).await.unwrap();
+        assert!((copy.frames as f64 / copy.sample_rate - 10.0).abs() < 0.1, "{name}: {}", copy.frames as f64 / copy.sample_rate);
+        cut.cleanup().await;
+        let mut source = open_audio_to(&file, None, Some(10.0)).await.unwrap();
+        assert!((source.frames as f64 / source.sample_rate - 40.0).abs() < 0.1, "{name}");
+        let mut read = 0;
+        while let Some(block) = source.read(65536).await.unwrap() {
+            read += block[0].len();
+        }
+        assert!((read as f64 / source.sample_rate - 10.0).abs() < 0.1, "{name}: reads end where the copy does");
+        source.close().await.unwrap();
+        // Read further than it goes: copied whole, as before.
+        let whole = prepare_audio_to(&file, None, Some(60.0)).await.unwrap();
+        assert_eq!(whole.seconds, None, "{name}");
+        let copy = open_audio(&whole.path, None).await.unwrap();
+        assert!((copy.frames as f64 / copy.sample_rate - 40.0).abs() < 0.1, "{name}");
+        whole.cleanup().await;
+    }
+}
+#[test]
+fn a_near_silent_float_sound_has_an_envelope() {
+    use kumi_runtime::audio::analyze::analyze_sound;
+    // Every level under the 1e-9 floor, quiet and then silent: no peak to start from.
+    let mono: Vec<f32> = (0..9600).map(|i| if i < 4800 { 5e-10 } else { 0.0 }).collect();
+    let heard = analyze_sound(&mono, 48000.0, None);
+    assert_eq!(heard.envelope.length_ms, 95.0);
+    assert!(heard.pitch.is_none());
+}
+#[tokio::test]
+async fn a_form_asked_for_in_bars_of_no_beats_or_at_a_tempo_past_the_schema_is_still_heard() {
+    use kumi_runtime::audio::structure::{hear_form, FormOptions};
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("tone.wav");
+    let tone: Vec<f32> = (0..12 * 48000).map(|i| (0.3 * (2.0 * std::f64::consts::PI * 220.0 * i as f64 / 48000.0).sin()) as f32).collect();
+    wav(&file, &[tone.clone(), tone], 16);
+    let path = file.to_str().unwrap();
+    // A bar of no beats was endless bars (a capacity overflow): the schema's 1 to 16 holds.
+    let none = hear_form(path, FormOptions { beats_per_bar: Some(0.0), ..Default::default() }).await.unwrap();
+    assert_eq!(none.beats_per_bar, 1.0);
+    let many = hear_form(path, FormOptions { beats_per_bar: Some(64.0), ..Default::default() }).await.unwrap();
+    assert_eq!(many.beats_per_bar, 16.0);
+    // A Set tempo past 20 to 999 BPM isn't one: the file's own, or 120, counts the bars, as without one.
+    let wild = hear_form(path, FormOptions { tempo: Some(1e9), ..Default::default() }).await.unwrap();
+    let without = hear_form(path, FormOptions::default()).await.unwrap();
+    assert_eq!((wild.bars, &wild.tempo.bpm, &wild.at_set_tempo), (without.bars, &without.tempo.bpm, &None));
+}
 #[test]
 fn section_edges_come_from_diagonal_novelty_snapped_to_four_bar_phrases_never_closer_than_four_bars() {
     use kumi_runtime::audio::structure::boundaries;

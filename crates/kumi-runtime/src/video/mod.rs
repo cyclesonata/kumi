@@ -217,11 +217,9 @@ async fn prune(folder: &str) -> Result<(), VideoFailure> {
         }
     }
     folders.sort_by(|a, b| b.1.cmp(&a.1));
+    // Tidying, not the watch: a file held (a WAV loaded in Live, one being scanned) waits for the next prune.
     for (path, _) in folders.into_iter().skip(24) {
-        match tokio::fs::remove_dir_all(path).await {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-            _ => {}
-        }
+        let _ = tokio::fs::remove_dir_all(path).await;
     }
     Ok(())
 }
@@ -290,7 +288,9 @@ fn streams(info: &Value) -> Sources {
         .collect();
     let input = |f: Option<&&Value>| {
         f.map(|f| Input {
-            url: f["url"].as_str().unwrap().into(),
+            // As Kumi read it when it checked it public: ffmpeg reads the same host (its own reading takes a
+            // `\@` the URL standard doesn't).
+            url: url::Url::parse(f["url"].as_str().unwrap()).map(String::from).unwrap_or_default(),
             headers: f["http_headers"]
                 .as_object()
                 .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.into()))).collect()),
@@ -327,6 +327,36 @@ fn streams(info: &Value) -> Sources {
         audio: input(sounds.first().copied().or(combined)),
     }
 }
+/// Captions fetched by Kumi itself: a client that gives up on a server that doesn't answer, and at most
+/// CAPTIONS_MAX read, so a hostile address can neither hold a watch nor fill memory. As the web client does, it
+/// refuses a name that resolves to this computer or a private network, and checks each redirect as the first address
+/// was: a public address that sends Kumi to a private one (127.0.0.1, 169.254.169.254) isn't followed.
+static CAPTIONS: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    crate::web::net::guarded_http()
+        .redirect(reqwest::redirect::Policy::custom(|hop| {
+            if hop.previous().len() < 10 && public_address(hop.url().as_str()) {
+                hop.follow()
+            } else {
+                hop.stop()
+            }
+        }))
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("an HTTP client")
+});
+const CAPTIONS_MAX: usize = 16 * 1024 * 1024;
+/// A sidecar's captions as text: by its BOM (UTF-8 or UTF-16), as UTF-8, or else as Windows-1252, which older
+/// subtitle tools write.
+fn caption_text(bytes: &[u8]) -> String {
+    if let Some((encoding, length)) = encoding_rs::Encoding::for_bom(bytes) {
+        return encoding.decode_without_bom_handling(&bytes[length..]).0.into_owned();
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_owned(),
+        Err(_) => encoding_rs::WINDOWS_1252.decode_without_bom_handling(bytes).0.into_owned(),
+    }
+}
 async fn captions_for(
     info: &Value,
     url: &str,
@@ -340,10 +370,20 @@ async fn captions_for(
     if let (Some(address), Some(ext)) = (&track.url, &track.ext) {
         if public_address(address) {
             let fetched = async {
-                let response = reqwest::Client::new().get(address).header("User-Agent", "Mozilla/5.0").send().await?;
+                let mut response = CAPTIONS.get(address).header("User-Agent", "Mozilla/5.0").send().await?;
                 let status = response.status();
-                let body = if status.is_success() { response.text().await? } else { String::new() };
-                Ok::<_, reqwest::Error>((status, body))
+                let mut body = Vec::new();
+                if status.is_success() {
+                    while let Some(piece) = response.chunk().await? {
+                        body.extend_from_slice(&piece);
+                        // More than any captions: none from here (yt-dlp is asked instead).
+                        if body.len() > CAPTIONS_MAX {
+                            body.clear();
+                            break;
+                        }
+                    }
+                }
+                Ok::<_, reqwest::Error>((status, String::from_utf8_lossy(&body).into_owned()))
             };
             let result = tokio::select! {result=fetched=>Some(result),_=async{if let Some(signal)=&signal{signal.cancelled().await;}else{std::future::pending::<()>().await;}}=>None};
             match result {
@@ -397,12 +437,8 @@ async fn captions_for(
         Ok(Vec::new())
     }
     .await;
-    let removed = tokio::fs::remove_dir_all(&scratch).await;
-    if let Err(e) = removed {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            return Err(e.into());
-        }
-    }
+    // Tidying: a file left here is removed with the video's folder later.
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
     match result {
         Ok(cues) => Ok((cues, Some(track), false)),
         Err(_) => {
@@ -590,6 +626,13 @@ async fn watching_ffmpeg(options: &WatchOptions, unfetched: &mut Option<String>)
     }
 }
 
+/// Where a video ends, and the stretch of it asked for: without its duration, as far as its words go.
+fn stretch(duration: Option<f64>, cues: &[Cue], from: Option<f64>, to: Option<f64>) -> (f64, f64, f64) {
+    let end = duration.unwrap_or_else(|| cues.iter().map(|c| c.end).fold(0.0, f64::max));
+    let from = from.unwrap_or(0.0).min(end).max(0.0);
+    let to = to.unwrap_or(end).min(if end != 0.0 { end } else { f64::INFINITY }).max(from);
+    (end, from, to)
+}
 /// Watch a video's words, selected frames, close-ups and a requested stretch of its sound.
 pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result<Watched, VideoFailure> {
     use crate::core::contracts::WordsSource;
@@ -604,6 +647,12 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             .into();
     }
     let remote = address.to_ascii_lowercase().starts_with("http://") || address.to_ascii_lowercase().starts_with("https://");
+    // yt-dlp reads it from this computer: a public address only, as for the streams and captions it gives back. And
+    // given as Kumi read it, so yt-dlp reads the host Kumi checked: in `http://public.example\@127.0.0.1/` the URL
+    // standard's host is public.example, and Python's (yt-dlp's) is 127.0.0.1.
+    if remote {
+        address = crate::web::net::checked_url(&address, None).map_err(|error| VideoFailure::video(error.to_string()))?.to_string();
+    }
     let file = if remote {
         None
     } else {
@@ -639,6 +688,8 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
     let mut watcher = Watcher { options: &options, address: address.clone(), file: file.clone(), ytdlp: None, info: None, sources: None };
     let mut notes = Vec::new();
     let mut refused = false;
+    // Captions the video has that didn't come (turned away, or yt-dlp failed): not kept as none, so the next watch asks again.
+    let mut unsure = false;
     // Why there's no ffmpeg, when fetching it failed.
     let mut unfetched = None;
     if meta.is_none() || cues.is_none() {
@@ -661,7 +712,9 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             for ext in ["srt", "vtt"] {
                 let sidecar = path.with_extension(ext);
                 if sidecar.exists() {
-                    words = parse_captions(&tokio::fs::read_to_string(sidecar).await?, ext);
+                    // One that can't be read is as none beside it.
+                    let Ok(bytes) = tokio::fs::read(&sidecar).await else { continue };
+                    words = parse_captions(&caption_text(&bytes), ext);
                     found.words = Some(Words { language: String::new(), source: WordsSource::Captions });
                     break;
                 }
@@ -689,6 +742,7 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
                 let ytdlp = watcher.ytdlp().await?;
                 let (words, track, denied) = captions_for(&info, &address, &ytdlp, &folder, signal.clone()).await?;
                 refused = denied;
+                unsure = words.is_empty() && track.is_some();
                 let captions = if words.is_empty() {
                     None
                 } else {
@@ -733,9 +787,7 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
     let mut cues = cues.unwrap();
     let folder = join(&options.videos_dir, &meta.key);
     mkdir(&folder).await?;
-    let end = meta.duration.unwrap_or_else(|| cues.iter().map(|c| c.end).fold(0.0, f64::max));
-    let from = request.from.unwrap_or(0.0).min(end).max(0.0);
-    let to = request.to.unwrap_or(end).min(if end != 0.0 { end } else { f64::INFINITY }).max(from);
+    let (mut end, mut from, mut to) = stretch(meta.duration, &cues, request.from, request.to);
     let ffmpeg = watching_ffmpeg(&options, &mut unfetched).await?;
     if cues.is_empty() && meta.words.is_none() {
         let whisper = if ffmpeg.is_some() { find_whisper(&watcher.programs()).await.unwrap_or(None) } else { None };
@@ -758,7 +810,17 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             ));
         } else if let Some(audio) = watcher.streams().await?.audio {
             let language = watcher.info.as_ref().and_then(|info| info["language"].as_str()).unwrap_or("en").to_string();
-            let model = whisper_model(speech_model_for(Some(&language)), &watcher.programs()).await?;
+            let model = match whisper_model(speech_model_for(Some(&language)), &watcher.programs()).await {
+                Ok(model) => Some(model),
+                // Offline, or short of disk: the frames still come, as when transcribing fails.
+                Err(error) => {
+                    if let Some(signal) = &signal {
+                        signal.check()?;
+                    }
+                    notes.push(format!("Kumi couldn't transcribe the video's speech ({}).", head(&error.to_string(), 160)));
+                    None
+                }
+            };
             let whole = end == 0.0 || end <= 5400.0;
             let start = if whole { 0.0 } else { from };
             let stop = if whole {
@@ -770,8 +832,10 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             } else {
                 to.min(from + 5400.0)
             };
-            let stretch = format!("{}|{}-{}", meta.key, to_fixed(start, 0), to_fixed(stop, 0));
-            let heard = if let Some(why) = unheard(signal.as_ref(), &stretch) {
+            let taken = format!("{}|{}-{}", meta.key, to_fixed(start, 0), to_fixed(stop, 0));
+            let heard = if model.is_none() {
+                Ok(None)
+            } else if let Some(why) = unheard(signal.as_ref(), &taken) {
                 notes.push(format!(
                     "Kumi couldn't transcribe the video's speech earlier in this request ({why}), so it didn't try again; it will on the next request."
                 ));
@@ -797,7 +861,7 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
                         let on_progress = options.on_progress.clone();
                         let heard = transcribe(
                             whisper.as_deref().unwrap(),
-                            &model,
+                            model.as_deref().unwrap(),
                             &wav,
                             TranscribeOptions {
                                 language: Some(language.clone()),
@@ -814,17 +878,15 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
                             },
                         )
                         .await;
-                        match tokio::fs::remove_file(&wav).await {
-                            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                            _ => {}
-                        }
+                        // Tidying: one still held goes with the video's folder later.
+                        let _ = tokio::fs::remove_file(&wav).await;
                         heard.map(Some)
                     }
                     Err(error) => Err(error),
                 }
                 .inspect_err(|error| {
                     if !error.is_aborted() {
-                        remember_unheard(signal.as_ref(), &stretch, head(&error.to_string(), 160));
+                        remember_unheard(signal.as_ref(), &taken, head(&error.to_string(), 160));
                     }
                 })
             };
@@ -860,7 +922,11 @@ pub async fn watch_video(request: WatchRequest, options: WatchOptions) -> Result
             notes.push(format!("There's no transcript: {why}, and Kumi couldn't find the video's sound to transcribe."));
         }
     }
-    if meta.words.is_some() || cues.is_empty() {
+    // Words transcribed just now say how long a video without a duration is.
+    if meta.duration.is_none() {
+        (end, from, to) = stretch(None, &cues, request.from, request.to);
+    }
+    if meta.words.is_some() || (cues.is_empty() && !unsure) {
         let empty = Vec::new();
         write_json(&join(&folder, "cues.json"), if meta.words.is_some() { &cues } else { &empty }).await?;
     }

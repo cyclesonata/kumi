@@ -204,7 +204,7 @@ impl McpHost {
             let verified = self.mixer_read_async(Some(&context), reference).await?;
             for field in MIXER_FIELDS {
                 if let Some(expected) = t["payload"].get(*field) {
-                    if !same_live_value(verified.mixer.get(*field), Some(expected)) {
+                    if !same_mixer_value(field, verified.mixer.get(*field), Some(expected)) {
                         return Err(LiveError::error("mixer postcondition was not confirmed"));
                     }
                 }
@@ -222,10 +222,11 @@ impl McpHost {
             Ok(success_text(id, &body))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Mixer state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Mixer state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     pub async fn undo_mixer_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {
         let Some(record) = p["transactionId"].as_str().and_then(|key| self.clip_lifecycle_transactions.get(key)) else {
@@ -267,22 +268,27 @@ impl McpHost {
             )? {
                 return Ok(moved);
             }
+            // What the change named: a shorter `sends` list set only the first sends, so only they go back.
+            let named = |field: &str, value: &Value| named_mixer_part(field, value, &t["payload"][field]);
             if reconcile {
                 for field in MIXER_FIELDS {
-                    if t["payload"].get(*field).is_some() && !same_live_value(Some(&current.mixer[*field]), Some(&t["prior"][*field])) {
+                    if t["payload"].get(*field).is_some()
+                        && !same_live_value(Some(&named(field, &current.mixer[*field])), Some(&named(field, &t["prior"][*field])))
+                    {
                         return Ok(transaction_error(id, "mixer undo replay did not restore prior state"));
                     }
                 }
             }
             let already = MIXER_FIELDS.iter().all(|field| {
-                t["payload"].get(*field).is_none() || js_json::stringify(&current.mixer[*field]) == js_json::stringify(&t["prior"][*field])
+                t["payload"].get(*field).is_none()
+                    || js_json::stringify(&named(field, &current.mixer[*field])) == js_json::stringify(&named(field, &t["prior"][*field]))
             });
             if !reconcile && !already {
                 let mut restore = json!({"ref":t["clipRef"]});
                 restore.as_object_mut().unwrap().extend(mixer_authority(&current)?.as_object().unwrap().clone());
                 for field in MIXER_FIELDS {
                     if t["payload"].get(*field).is_some() {
-                        restore[*field] = t["prior"][*field].clone();
+                        restore[*field] = named(field, &t["prior"][*field]);
                     }
                 }
                 record.borrow_mut()["state"] = json!("undoing");
@@ -297,7 +303,7 @@ impl McpHost {
             current = self.mixer_read_async(Some(&context), reference).await?;
             for field in MIXER_FIELDS {
                 if t["payload"].get(*field).is_some()
-                    && js_json::stringify(&current.mixer[*field]) != js_json::stringify(&t["prior"][*field])
+                    && js_json::stringify(&named(field, &current.mixer[*field])) != js_json::stringify(&named(field, &t["prior"][*field]))
                 {
                     return Err(LiveError::error("mixer exact prior state was not restored"));
                 }

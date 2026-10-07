@@ -277,14 +277,7 @@ impl CommandTools {
             .collect())
     }
     async fn track_ref_of(&self, named: &str, signal: &Signal) -> Result<String, CommandError> {
-        let rows = self.track_rows(json!(["name"]), signal).await?;
-        rows.iter()
-            .find(|r| r.get("ref").and_then(Value::as_str) == Some(named))
-            .or_else(|| rows.iter().find(|r| r.get("name").and_then(Value::as_str) == Some(named)))
-            .and_then(|r| r.get("ref"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| ObservationError(format!("{named} isn't a track in this turn's discovery; discover it again.")).into())
+        track_ref_in(&self.track_rows(json!(["name"]), signal).await?, named)
     }
     fn lengthen(&self, reference: &str, field: &str) -> String {
         string(self.connection.references.borrow().lengthen(&json!({field:reference})).get(field))
@@ -435,7 +428,8 @@ impl CommandTools {
             let all = self.track_rows(json!(["name", "kind", "isFrozen", "isVisible"]), signal).await?;
             let mut targets = Vec::new();
             for one in &list {
-                let reference = self.track_ref_of(one, signal).await?;
+                // Found in the tracks just read, not in another read of them for each target.
+                let reference = track_ref_in(&all, one)?;
                 let index = all.iter().position(|r| r.get("ref").and_then(Value::as_str) == Some(reference.as_str()));
                 let row = index.map(|i| &all[i]);
                 let name = row.and_then(|r| r.get("name")).and_then(Value::as_str).unwrap_or(one);
@@ -1165,10 +1159,38 @@ fn raw_harmonics(value: &Value) -> Result<Option<Vec<f64>>, CommandError> {
                 return Err(CommandError::Other("Invalid array length".into()));
             }
             let length = if length.is_nan() || length <= 0.0 { 0 } else { length.floor() as usize };
+            // A frame holds FRAME / 2 - 1 harmonics and only those are synthesized: read no more of a spectrum, so a
+            // length in the billions can't ask for gigabytes.
+            let length = length.min(wavetable::FRAME / 2 - 1);
             let values =
                 (0..length).map(|i| value.get(&i.to_string()).filter(|v| !v.is_null()).map(js_number).unwrap_or(0.0)).collect::<Vec<_>>();
             Some(if values.is_empty() { vec![0.0] } else { values })
         }
         _ => None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_spectrum_longer_than_a_frame_holds_reads_what_it_holds() {
+        // Only the first FRAME / 2 - 1 harmonics are synthesized; a length up to u32's range reads just those.
+        let keyframe = raw_keyframe(&json!({"harmonics":{"length":u32::MAX,"0":1,"1022":0.5,"1023":0.25}})).unwrap();
+        let harmonics = keyframe.harmonics.unwrap();
+        assert_eq!((harmonics.len(), harmonics[0], harmonics[1], harmonics[1022]), (1023, 1.0, 0.0, 0.5));
+        assert_eq!(raw_harmonics(&json!({"length":3,"1":2})).unwrap(), Some(vec![0.0, 2.0, 0.0]), "a short one as it is");
+        assert!(matches!(raw_harmonics(&json!({"length":4294967296.0})), Err(CommandError::Other(_))), "past u32's range, refused");
+    }
+}
+/// A track's ref, by its ref or else its name, among `rows` (a read of the Set's tracks).
+fn track_ref_in(rows: &[JsonObject], named: &str) -> Result<String, CommandError> {
+    rows.iter()
+        .find(|r| r.get("ref").and_then(Value::as_str) == Some(named))
+        .or_else(|| rows.iter().find(|r| r.get("name").and_then(Value::as_str) == Some(named)))
+        .and_then(|r| r.get("ref"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| ObservationError(format!("{named} isn't a track in this turn's discovery; discover it again.")).into())
 }

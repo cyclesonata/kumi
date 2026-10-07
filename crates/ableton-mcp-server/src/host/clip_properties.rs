@@ -211,7 +211,7 @@ impl McpHost {
             let verified = self.clip_row(&snapshot, reference)?.clip;
             for field in FIELDS {
                 if let Some(expected) = t["payload"].get(*field) {
-                    if !scalar_same(verified.get(*field), Some(expected)) {
+                    if !same_live_value(verified.get(*field), Some(expected)) {
                         return Err(LiveError::error("clip postcondition was not confirmed"));
                     }
                 }
@@ -231,10 +231,11 @@ impl McpHost {
             Ok(success_text(id, &body))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Clip state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Clip state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     pub async fn undo_clip_properties_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {
         let Some(record) = p["transactionId"].as_str().and_then(|key| self.clip_lifecycle_transactions.get(key)) else {
@@ -286,7 +287,7 @@ impl McpHost {
                 } else if field == "groove" {
                     js_json::stringify(&row.clip["groove"]) == js_json::stringify(value)
                 } else {
-                    scalar_same(row.clip.get(field), Some(value))
+                    same_live_value(row.clip.get(field), Some(value))
                 };
                 if !same {
                     return Ok(transaction_error(
@@ -324,7 +325,7 @@ impl McpHost {
                 if if field == "groove" {
                     js_json::stringify(&restored["groove"]) != js_json::stringify(value)
                 } else {
-                    !scalar_same(restored.get(field), Some(value))
+                    !same_live_value(restored.get(field), Some(value))
                 } {
                     return Err(LiveError::error("Clip exact prior state was not restored"));
                 }

@@ -260,20 +260,41 @@ impl Rendering {
         }
         Ok((reference, prior))
     }
-    pub(super) fn save_main(&self, rig: &Rig, volume: f64, scratch: bool) {
-        if let Some(restore) = &self.restore {
-            restore.save(&MainRestore {
-                set: self.connection().set.borrow().clone().unwrap_or_default(),
-                path: self.history.remember.current().and_then(|p| p.path.clone()),
-                volume,
-                at: self.connection().now().timestamp_millis() as f64,
-                scratch: scratch.then(|| rig.sources.iter().map(|s| s.scratch.clone()).collect()),
-            });
-        }
+    /// Notes Main's level to put back after a crash: whether it's noted (or there's no journal to keep).
+    pub(super) fn save_main(&self, rig: &Rig, volume: f64, scratch: bool) -> bool {
+        let Some(restore) = &self.restore else { return true };
+        restore.save(&MainRestore {
+            set: self.connection().set.borrow().clone().unwrap_or_default(),
+            path: self.history.remember.current().and_then(|p| p.path.clone()),
+            volume,
+            at: self.connection().now().timestamp_millis() as f64,
+            scratch: scratch.then(|| rig.sources.iter().map(|s| s.scratch.clone()).collect()),
+        })
     }
     pub(super) fn clear_restore(&self) {
         if let Some(restore) = &self.restore {
             restore.clear();
+        }
+    }
+    /// Takes back one of Kumi's own steps (a listening device, an earlier best take) and forgets it. One Live won't
+    /// take back stays in the history, and the producer hears what's left in their Set.
+    pub(super) async fn take_back(&self, id: &str, signal: Signal, discard: bool) {
+        let title = self.history.entries.borrow().get(id).map(|entry| entry.borrow().record.title.clone());
+        match self.history.undo(id, signal, discard).await {
+            Ok(undone) if !undone.is_error => {
+                self.history.entries.borrow_mut().shift_remove(id);
+            }
+            failed => {
+                let why = failed.map(|undone| undone.text).unwrap_or_else(|error| error.to_string());
+                self.tell(
+                    &format!(
+                        "Couldn't take back “{}” ({}); check it in Live.",
+                        title.unwrap_or_else(|| "a step of Kumi's".into()),
+                        kumi_common::js::string::head(&why, 200)
+                    ),
+                    None,
+                );
+            }
         }
     }
     pub(super) async fn close_rig(&self, rig: &mut Rig) {

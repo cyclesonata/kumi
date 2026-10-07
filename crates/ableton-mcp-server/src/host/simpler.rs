@@ -3,8 +3,15 @@ use super::*;
 use super::{arrangement::truthy, reads::AUDITION_DEADLINE_MS};
 use kumi_common::{abort::Signal, js::json as js_json};
 use sha2::{Digest, Sha256};
+/// The file a Simpler plays: the Remote Script's row has it as its sample's `filePath` (the simulator's as
+/// `samplePath`), and an empty Simpler has none ("", as Live fences it).
 fn path_of(device: &Value) -> Value {
-    device.get("samplePath").filter(|v| !v.is_null()).cloned().unwrap_or(json!(""))
+    device
+        .get("samplePath")
+        .filter(|v| !v.is_null())
+        .or_else(|| device["sample"].get("filePath").filter(|v| !v.is_null()))
+        .cloned()
+        .unwrap_or(json!(""))
 }
 fn revision(path: &Value) -> Result<String, LiveError> {
     Ok(hex::encode(Sha256::digest(canonical_mutation_identity(&json!({"filePath":path}))?)))
@@ -47,7 +54,10 @@ impl McpHost {
         if t["kind"] != "simpler"
             || (t["state"] == "previewed" && t["expiresAt"].as_f64().is_some_and(|n| n <= kumi_common::time::now_ms_f64()))
         {
-            self.release_staged_import_for(&t);
+            // Only an expired replacement of its own: another kind's id names files that may be in use.
+            if t["kind"] == "simpler" {
+                self.release_staged_import_for(&t);
+            }
             return Some(transaction_error(id, "Unknown or expired simpler transaction"));
         }
         let record = record.unwrap();
@@ -66,12 +76,17 @@ impl McpHost {
                 self.fresh_status(Some(&LiveOperationContext::with_deadline(self.deadline(AUDITION_DEADLINE_MS)))).await?;
             }
             let status = self.require_connected(Some("session.read"))?;
+            // A reconcile's first apply may have loaded the staged file: it stays.
             if json!(status.epoch) != t["epoch"] {
-                self.release_staged_import_for(&t);
+                if !reconcile {
+                    self.release_staged_import_for(&t);
+                }
                 return Ok(transaction_error(id, "Live connection epoch changed; preview again"));
             }
             if !truthy(&t["prior"]["file"]) {
-                self.release_staged_import_for(&t);
+                if !reconcile {
+                    self.release_staged_import_for(&t);
+                }
                 return Ok(transaction_error(id, "simpler file authority is missing; preview again"));
             }
             let path = t["payload"]["filePath"].as_str().unwrap_or("");
@@ -88,6 +103,12 @@ impl McpHost {
                     self.release_staged_import_for(&t);
                     return Ok(transaction_error(id, "device identity or sample state changed since preview; preview again"));
                 }
+            }
+            if let Err(error) = self.keep_staged(&t) {
+                return Ok(transaction_error(
+                    id,
+                    &format!("the staged sample couldn't be kept for the Set ({}); nothing was sent to Live", error.message()),
+                ));
             }
             {
                 let mut row = record.borrow_mut();
@@ -110,10 +131,11 @@ impl McpHost {
             Ok(success_text(id, &json!({"transactionId":t["id"],"state":"applied","result":result,"idempotent":false})))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Simpler state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Simpler state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     pub async fn undo_simpler_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {
         let record = p["transactionId"].as_str().and_then(|id| self.clip_lifecycle_transactions.get(id));

@@ -1,6 +1,7 @@
 import base64
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -14,7 +15,7 @@ import threading
 import time
 import unittest
 import select as select_module
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import patch
 
 import ableton_mcp_remote_script as remote_module
@@ -181,6 +182,18 @@ class DiagnosticsSecurityTests(unittest.TestCase):
                 self.assertNotIn(b"x", path.read_bytes())
             finally: bounded.close()
 
+    def test_the_security_check_runs_when_opened_and_then_once_a_minute(self):
+        # On Windows the check is two PowerShell runs: not one for every record.
+        with tempfile.TemporaryDirectory() as directory:
+            path = self._owner_file(directory); checks = []
+            sink = _DiagnosticsSink(str(path), start_writer=False, security_validator=lambda candidate: checks.append(candidate) or _diagnostics_path_safe(candidate) if os.name != "nt" else checks.append(candidate) or True)
+            try:
+                for _ in range(5): sink._write((1, "realtime-packet-failure", "internal-error"))
+                self.assertEqual(len(checks), 1, "once, when the file was opened")
+                sink._validated_at -= remote_module._DIAGNOSTICS_REVALIDATE_SECONDS
+                sink._write((2, "realtime-packet-failure", "internal-error")); self.assertEqual(len(checks), 2, "and again once a minute has passed")
+            finally: sink.close()
+
     def test_path_or_security_drift_and_write_failure_disable_logging_without_touching_replacement(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); path = self._owner_file(directory)
@@ -190,8 +203,9 @@ class DiagnosticsSecurityTests(unittest.TestCase):
             try:
                 if os.name == "nt":
                     # Windows intentionally prevents renaming an open file. Model
-                    # the validator rejecting equivalent DACL/path authority drift.
-                    authority["valid"] = False
+                    # the validator rejecting equivalent DACL/path authority drift,
+                    # once its minute since the last check has passed.
+                    authority["valid"] = False; sink._validated_at = float("-inf")
                 else:
                     moved = root / "moved.log"; path.rename(moved)
                     path.write_bytes(b""); path.chmod(0o600)
@@ -278,11 +292,152 @@ class RemoteScriptTests(unittest.TestCase):
         seen = {}
         def run(args, **kwargs):
             seen["args"], seen["kwargs"] = args, kwargs
-            return types.SimpleNamespace(returncode=0)
+            return types.SimpleNamespace(returncode=package._ACL_ANSWERED)
         with patch("AbletonMcpBridge.subprocess.run", run), patch.dict(os.environ, {"SYSTEMROOT": r"D:\Windows"}):
             self.assertTrue(package._windows_acl_owner_only(Path("C:/Kumi/bridge-reference.json")))
         self.assertEqual(seen["args"][0], os.path.join(r"D:\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
         self.assertEqual(seen["kwargs"]["creationflags"], getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def test_the_control_surfaces_owner_checks_take_one_powershell_run(self):
+        # Live's own Python on Windows has no ctypes: each owner check is a PowerShell run on Live's main thread.
+        package = __import__("AbletonMcpBridge"); runs = []
+        def run(args, **kwargs):
+            runs.append(kwargs["env"]["ABLETON_MCP_ACL_PATHS"])
+            return types.SimpleNamespace(returncode=package._ACL_ANSWERED | 0b010)  # the second path fails
+        with tempfile.TemporaryDirectory() as directory:
+            paths = [Path(directory, name) for name in ("reference", "config", "secret")]
+            for path in paths: path.write_text("x", encoding="utf-8")
+            with patch("AbletonMcpBridge.subprocess.run", run), patch.dict(package._ACL_VERDICTS, clear=True):
+                package._prefetch_acl_verdicts(paths + [paths[0]])
+                self.assertEqual([package._windows_acl_owner_only(path) for path in paths], [True, False, True])
+                self.assertEqual(len(runs), 1, "the checks after the batch find their verdicts waiting")
+                self.assertEqual(base64.b64decode(runs[0]).decode("utf-8").split("\n"), [str(path) for path in paths])
+                # A file changed since gets a run of its own.
+                paths[0].write_text("changed", encoding="utf-8"); package._windows_acl_owner_only(paths[0])
+                self.assertEqual(len(runs), 2)
+
+    def test_the_owner_checks_are_asked_about_the_configs_files_together(self):
+        package = __import__("AbletonMcpBridge")
+        with tempfile.TemporaryDirectory() as directory:
+            # Resolved: a Mac's temporary folder is under /var, a symlink, and the batch follows none.
+            root = Path(directory).resolve(); config = root / "bridge-config.json"; secret = root / "secret"; log = root / "logs" / "bridge.log"
+            bridge = {"host": "127.0.0.1", "port": 9765, "secretFile": str(secret), "timeoutMs": 5000, "diagnostics": {"path": str(log), "maxBytes": remote_module._DIAGNOSTICS_MAX_BYTES}}
+            config.write_text(json.dumps({"version": 2, "server": {"command": "kumi-bridge", "args": []}, "bridge": bridge}), encoding="utf-8")
+            reference = root / "bridge-reference.json"; reference.write_text(json.dumps({"config": str(config)}), encoding="utf-8")
+            self.assertEqual(package._config_paths(reference), [reference, config, secret, log, log.parent])
+            reference.write_text("not json", encoding="utf-8")
+            self.assertEqual(package._config_paths(reference), [reference], "what can't be read is left to the checks themselves")
+
+    def test_a_powershell_answer_without_its_marker_fails_every_path(self):
+        package = __import__("AbletonMcpBridge")
+        for code in (0, 1, package._ACL_ANSWERED | 0b1000, 255):
+            with patch("AbletonMcpBridge.subprocess.run", lambda args, **kwargs: types.SimpleNamespace(returncode=code)):
+                self.assertEqual(package._windows_acl_owner_only_all([Path("C:/a"), Path("C:/b"), Path("C:/c")]), [False] * 3, code)
+
+    def test_the_owner_checks_batch_never_looks_at_a_share_it_reads_of(self):
+        # Nothing in the reference or config is trusted before their own checks: one another account can write mustn't
+        # have Live contact a host it names (a stat or an ACL read of \\host\share signs in there).
+        package = __import__("AbletonMcpBridge"); asked = []
+        def guarded(function):
+            def call(path, *args, **kwargs):
+                if str(path).replace("\\", "/").startswith(("//", "/??/")): raise AssertionError(f"looked at {path}")
+                return function(path, *args, **kwargs)
+            return call
+        def run(args, **kwargs):
+            asked.append(base64.b64decode(kwargs["env"]["ABLETON_MCP_ACL_PATHS"]).decode("utf-8").split("\n"))
+            return types.SimpleNamespace(returncode=package._ACL_ANSWERED)
+        shares = ["//host/share/x", "\\\\host\\share\\x", "/\\host\\share\\x", "\\\\?\\UNC\\host\\share\\x", "\\\\.\\UNC\\host\\share\\x", "\\??\\UNC\\host\\share\\x"]
+        with tempfile.TemporaryDirectory() as directory, patch("os.stat", guarded(os.stat)), patch("io.open", guarded(io.open)), patch("AbletonMcpBridge.subprocess.run", run), patch.dict(package._ACL_VERDICTS, clear=True):
+            root = Path(directory).resolve(); config = root / "bridge-config.json"; reference = root / "bridge-reference.json"; secret = root / "secret"; log = root / "logs" / "bridge.log"
+            secret.write_text("x", encoding="utf-8")
+            def write(secret_file, log_file, config_file=config):
+                bridge = {"host": "127.0.0.1", "port": 9765, "secretFile": str(secret_file), "timeoutMs": 5000, "diagnostics": {"path": str(log_file), "maxBytes": remote_module._DIAGNOSTICS_MAX_BYTES}}
+                config.write_text(json.dumps({"version": 2, "server": {"command": "kumi-bridge", "args": []}, "bridge": bridge}), encoding="utf-8")
+                reference.write_text(json.dumps({"config": str(config_file)}), encoding="utf-8")
+            for share in shares:
+                write(share, log); self.assertEqual(package._config_paths(reference), [reference, config, log, log.parent], share)
+                write(secret, log, share); self.assertEqual(package._config_paths(reference), [reference], share)
+            write(secret, "//host/share/logs/bridge.log"); self.assertEqual(package._config_paths(reference), [reference, config, secret])
+            package._prefetch_acl_verdicts(package._config_paths(reference))
+            self.assertEqual(asked, [[str(reference), str(config), str(secret)]])
+        for text in shares + ["C:x", "relative\\x"]:
+            self.assertFalse(package._local_path(PureWindowsPath(text)), text)
+        for text in ("C:\\Users\\me\\Kumi\\secret", "C:/Users/me/Kumi/secret"):
+            self.assertTrue(package._local_path(PureWindowsPath(text)), text)
+        self.assertFalse(package._local_path(PurePosixPath("//host/share/x")))
+        self.assertTrue(package._local_path(PurePosixPath("/Users/me/Kumi/secret")))
+
+    def test_the_owner_checks_batch_stops_at_a_symlink(self):
+        # The checks refuse a symlinked reference, config or secret before asking who owns it: the batch mustn't follow
+        # one first (to a share, say).
+        package = __import__("AbletonMcpBridge")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); config = root / "bridge-config.json"; secret = root / "secret"; log = root / "logs" / "bridge.log"; reference = root / "reference.json"
+            bridge = {"host": "127.0.0.1", "port": 9765, "secretFile": str(root / "secret-link"), "timeoutMs": 5000, "diagnostics": {"path": str(log), "maxBytes": remote_module._DIAGNOSTICS_MAX_BYTES}}
+            config.write_text(json.dumps({"version": 2, "server": {"command": "kumi-bridge", "args": []}, "bridge": bridge}), encoding="utf-8")
+            secret.write_text("x", encoding="utf-8"); reference.write_text(json.dumps({"config": str(config)}), encoding="utf-8")
+            try:
+                (root / "secret-link").symlink_to(secret); (root / "config-link").symlink_to(config); (root / "bridge-reference.json").symlink_to(reference)
+            except OSError:
+                self.skipTest("this account can't make symlinks")
+            self.assertEqual(package._config_paths(root / "bridge-reference.json"), [])
+            self.assertEqual(package._config_paths(reference), [reference, config, log, log.parent])
+            reference.write_text(json.dumps({"config": str(root / "config-link")}), encoding="utf-8")
+            self.assertEqual(package._config_paths(reference), [reference])
+
+    def test_the_owner_checks_batch_follows_no_linked_folder_on_the_way(self):
+        # A config another account can write may name a file under a folder that links elsewhere (on Windows, to a
+        # share): the batch reads no further than the link, leaving the file to its own check.
+        package = __import__("AbletonMcpBridge")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); config = root / "bridge-config.json"; log = root / "logs" / "bridge.log"; reference = root / "bridge-reference.json"
+            (root / "elsewhere").mkdir(); (root / "elsewhere" / "secret").write_text("x", encoding="utf-8")
+            def write(secret_file, config_file=config):
+                bridge = {"host": "127.0.0.1", "port": 9765, "secretFile": str(secret_file), "timeoutMs": 5000, "diagnostics": {"path": str(log), "maxBytes": remote_module._DIAGNOSTICS_MAX_BYTES}}
+                config.write_text(json.dumps({"version": 2, "server": {"command": "kumi-bridge", "args": []}, "bridge": bridge}), encoding="utf-8")
+                reference.write_text(json.dumps({"config": str(config_file)}), encoding="utf-8")
+            links = []
+            try:
+                (root / "linked").symlink_to(root / "elsewhere", target_is_directory=True); links.append(root / "linked")
+            except OSError:
+                pass
+            if os.name == "nt":
+                import _winapi
+                _winapi.CreateJunction(str(root / "elsewhere"), str(root / "junction")); links.append(root / "junction")
+            if not links:
+                self.skipTest("this account can't make a linked folder")
+            write(root / "elsewhere" / "secret")
+            self.assertEqual(package._config_paths(reference), [reference, config, root / "elsewhere" / "secret", log, log.parent])
+            for link in links:
+                write(link / "secret"); self.assertEqual(package._config_paths(reference), [reference, config, log, log.parent], link)
+                write(link / "secret", link / "config.json"); self.assertEqual(package._config_paths(reference), [reference], link)
+                self.assertFalse(package._no_link_on_the_way(link / "missing" / "deeper"), link)
+            self.assertTrue(package._no_link_on_the_way(root / "missing" / "deeper"), "a part that isn't there ends the way")
+
+    def test_owner_verdicts_past_their_time_go_when_one_is_kept(self):
+        # The diagnostics log's key changes as it grows, and its owner is checked once a minute for as long as Live runs.
+        package = __import__("AbletonMcpBridge"); stale, fresh = ("stale",), ("fresh",)
+        with tempfile.TemporaryDirectory() as directory, patch("AbletonMcpBridge.subprocess.run", lambda args, **kwargs: types.SimpleNamespace(returncode=package._ACL_ANSWERED)):
+            log = Path(directory, "bridge.log"); log.write_text("", encoding="utf-8")
+            for keep in (package._windows_acl_owner_only, lambda path: package._prefetch_acl_verdicts([path])):
+                with patch.dict(package._ACL_VERDICTS, {stale: (True, time.monotonic() - package._ACL_VERDICT_SECONDS), fresh: (True, time.monotonic())}, clear=True):
+                    keep(log)
+                    self.assertEqual(set(package._ACL_VERDICTS), {fresh, package._acl_key(log)})
+
+    @unittest.skipUnless(sys.platform == "win32", "runs Windows PowerShell's ACL check itself")
+    def test_one_powershell_run_judges_each_file_by_its_own_acl(self):
+        # Unmocked: a file secured by the bridge's own script (delivery_acl.rs, as its setup runs it), one left with the
+        # rules it inherits and one that isn't there, in one run, each verdict at its own place.
+        package = __import__("AbletonMcpBridge")
+        source = (Path(__file__).resolve().parent.parent / "crates" / "ableton-mcp-server" / "src" / "delivery_acl.rs").read_text(encoding="utf-8")
+        target, secure, checks = (re.search(rf'const {name}\s*:\s*&str\s*=\s*"([^"\\]*)";', source).group(1) for name in ("WINDOWS_ACL_TARGET", "SECURE_FILE", "WINDOWS_ACL_CHECKS"))
+        with tempfile.TemporaryDirectory() as directory:
+            owner_only, inherited, missing = Path(directory, "secret"), Path(directory, "inherited"), Path(directory, "missing")
+            owner_only.write_text("x", encoding="utf-8"); inherited.write_text("x", encoding="utf-8")
+            environment = dict(os.environ); environment["ABLETON_MCP_ACL_PATH"] = base64.b64encode(str(owner_only).encode("utf-8")).decode("ascii")
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", f"$ErrorActionPreference='Stop';{target}{secure}{checks}"], check=True, env=environment)
+            self.assertEqual(package._windows_acl_owner_only_all([owner_only, inherited]), [True, False])
+            self.assertEqual(package._windows_acl_owner_only_all([inherited, missing, owner_only]), [False, False, True])
 
     def surface_with_timer(self, serve=None):
         """A Control Surface whose Live has a timer (Live.Base.Timer), the timers it made, its bridge."""
@@ -353,6 +508,19 @@ class RemoteScriptTests(unittest.TestCase):
         surface._bridge = Bridge()
         surface._drain()
         self.assertEqual(surface._bridge.calls, 0)
+
+    def test_a_tick_that_fails_still_schedules_the_next_drain(self):
+        surface = object.__new__(__import__("AbletonMcpBridge").AbletonMcpBridge)
+        surface._disconnected = False; surface._keep_willington = lambda: None
+        scheduled = []; surface.schedule_message = lambda delay, callback: scheduled.append(callback)
+
+        class Bridge:
+            def update_display(self):
+                raise RuntimeError("boom")
+
+        surface._bridge = Bridge()
+        with self.assertRaises(RuntimeError): surface._drain()
+        self.assertEqual(scheduled, [surface._drain])
 
     def test_authentication_and_replay_protection(self):
         remote = AuthenticatedRemoteScript("0123456789abcdef0123456789abcdef", lambda method, request: fake_status_result())
@@ -1358,23 +1526,25 @@ class ControlSurfaceTests(unittest.TestCase):
         mapper = LiveObjectMapper(song); result = mapper.invoke("scene.capture", {"expectedStateRevision": mapper._capture_authority_revision()})
         self.assertIs(mapper.refs.get(result["ref"]), created); self.assertEqual(result["objectIdentity"], mapper._capture_object_identity(created))
 
-    def test_scene_capture_authority_refuses_truncated_warp_markers(self):
+    def test_a_capture_previews_from_rows_that_refuse_truncated_warp_markers(self):
         class Marker:
             def __init__(self, value): self.beat_time = value; self.sample_time = value * 100.0
         song = FakeSong(); clip = FakeClip(4.0); clip.warp_markers = [Marker(float(index)) for index in range(257)]; song.tracks[0].clip_slots[0].clip = clip
         mapper = LiveObjectMapper(song)
-        # A clip's markers aren't capped: 257 read whole. Only past the discovery bound is a read refused.
-        mapper._capture_authority_revision()
-        with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaisesRegex(ValueError, "warp-marker content exceeds"):
-            mapper._capture_authority_revision()
+        # A clip's markers aren't capped: 257 read whole. Only past the discovery bound is a read refused: the
+        # whole-Set rows the host previews a capture from. The authority itself hashes no markers.
+        mapper.snapshot(); revision = mapper._capture_authority_revision()
+        with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256):
+            with self.assertRaisesRegex(ValueError, "warp-marker content exceeds"): mapper.snapshot()
+            self.assertEqual(mapper._capture_authority_revision(), revision)
 
-    def test_scene_capture_authority_refuses_unreadable_warp_markers(self):
+    def test_a_capture_previews_from_rows_that_refuse_unreadable_warp_markers(self):
         class UnreadableWarpClip(FakeClip):
             @property
             def warp_markers(self): raise RuntimeError("unreadable")
         song = FakeSong(); song.tracks[0].clip_slots[0].clip = UnreadableWarpClip(4.0); mapper = LiveObjectMapper(song)
-        with self.assertRaisesRegex(ValueError, "warp-marker collection is unreadable"):
-            mapper._capture_authority_revision()
+        with self.assertRaisesRegex(ValueError, "warp-marker collection is unreadable"): mapper.snapshot()
+        self.assertEqual(len(mapper._capture_authority_revision()), 64, "the authority hashes identities, notes, scenes and playback only")
 
     def test_owned_delete_refuses_replacements_at_the_same_traversal_location(self):
         song = FakeSong(); song.tracks[0].clip_slots[0].clip = FakeClip(4.0); mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); clip_ref = snapshot["tracks"][0]["clips"][0]["ref"]; original_clip = song.tracks[0].clip_slots[0].clip; clip_authority = mapper._session_clip_authority(clip_ref)
@@ -1482,6 +1652,19 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "mapping failed without a residual device"): mapper.invoke("browser.load", {"itemId": item["id"], "trackRef": row["ref"], "expectedName": item["name"], "expectedItemIdentity": item["objectIdentity"], **authority})
         self.assertEqual(len(track.devices), 0); self.assertEqual(mapper.refs.checkpoint(), registry_before)
 
+    def test_browser_search_reads_each_folders_children_once(self):
+        reads = []
+        class Item:
+            def __init__(self, name, children=()): self.name = name; self._children = list(children); self.is_loadable = not children; self.is_device = not children
+            @property
+            def children(self): reads.append(self.name); return self._children
+        class Browser:
+            instruments = Item("instruments", [Item("Synths", [Item("Drift"), Item("Wavetable")]), Item("Keys", [Item("Electric")])])
+        mapper = LiveObjectMapper(FakeSong()); mapper._browser = lambda: Browser()
+        names = [item["name"] for item in mapper.invoke("browser.search", {"category": "instruments", "limit": 10})["items"]]
+        self.assertEqual(names, ["Drift", "Wavetable", "Electric"])
+        self.assertEqual(sorted(name for name in set(reads) if reads.count(name) > 1), [], "no folder's children read twice")
+
     def test_real_live_browser_load_returns_hidden_cleanup_ownership_shape(self):
         class Item:
             def __init__(self, name, children=None): self.name = name; self.children = children or []; self.is_loadable = not bool(children); self.is_device = not bool(children)
@@ -1490,6 +1673,35 @@ class ControlSurfaceTests(unittest.TestCase):
             def load_item(self, _item): self.song.view.selected_track.devices.append(FakeDevice())
         song = FakeSong(); track = song.tracks[0]; track.devices = []; track.delete_device = lambda index: track.devices.pop(index); song.view = type("View", (), {"selected_track": track})(); mapper = LiveObjectMapper(song, provenance="real-live"); browser = Browser(song); mapper._browser = lambda: browser; item = mapper.invoke("browser.search", {"category": "instruments", "limit": 10})["items"][0]; row = mapper.snapshot()["tracks"][0]; transaction = "browser-owned-transaction"; loaded = mapper.invoke("browser.load", {"itemId": item["id"], "trackRef": row["ref"], "expectedName": item["name"], "expectedItemIdentity": item["objectIdentity"], "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": [{"ref": device["ref"], "objectIdentity": device["objectIdentity"]} for device in row["devices"]]}, transaction)
         self.assertIn("ownershipToken", loaded); snapshot = mapper.snapshot(); track_row = snapshot["tracks"][0]; device = next(item for item in track_row["devices"] if item["ref"] == loaded["deviceRef"]); siblings = [{"ref": item["ref"], "objectIdentity": item["objectIdentity"]} for item in track_row["devices"]]; deleted = mapper.invoke("device.delete", {"ref": device["ref"], "expectedObjectIdentity": device["objectIdentity"], "expectedOwnerRef": track_row["ref"], "expectedOwnerIdentity": track_row["objectIdentity"], "expectedSiblings": siblings, "expectedTrackRef": track_row["ref"], "expectedTrackIdentity": track_row["objectIdentity"]}, transaction, loaded["ownershipToken"]); self.assertEqual(deleted, {"deleted": device["ref"]}); self.assertEqual(len(track.devices), 0)
+
+    def test_an_instrument_from_any_category_never_replaces_the_tracks(self):
+        class Item:
+            def __init__(self, name, children=None): self.name = name; self.children = children or []; self.is_loadable = not bool(children); self.is_device = not bool(children)
+        class Browser:
+            def __init__(self, song):
+                self.song = song
+                self.max_for_live = Item("max_for_live", [Item("Max Instrument", [Item("Granulator")]), Item("Max Audio Effect", [Item("Convolution Reverb")])])
+                self.plugins = Item("plugins", [Item("VST3", [Item("Serum 2")])])
+                self.user_library = Item("user_library", [Item("Presets", [Item("Audio Effects", [Item("Room.adv")]), Item("Instruments", [Item("Pad.adg")])])])
+            def load_item(self, item):
+                # Like Live: an instrument takes the track's instrument's place; anything else goes at the end.
+                device = FakeDevice(); device.name = item.name; device.type = 2 if item.name in {"Convolution Reverb", "Room.adv"} else 1
+                devices = self.song.view.selected_track.devices; existing = next((index for index, prior in enumerate(devices) if prior.type == 1), None)
+                if device.type == 1 and existing is not None: devices[existing] = device
+                else: devices.append(device)
+        song = FakeSong(); track = song.tracks[0]; synth = FakeDevice(); synth.name = "Drift"; synth.type = 1; track.devices = [synth]
+        track.delete_device = lambda index: track.devices.pop(index); song.view = type("View", (), {"selected_track": track})()
+        mapper = LiveObjectMapper(song, provenance="real-live"); browser = Browser(song); mapper._browser = lambda: browser
+        def load(category, name):
+            item = next(row for row in mapper.invoke("browser.search", {"category": category, "limit": 20})["items"] if row["name"] == name); row = mapper.snapshot()["tracks"][0]
+            return mapper.invoke("browser.load", {"itemId": item["id"], "trackRef": row["ref"], "expectedName": item["name"], "expectedItemIdentity": item["objectIdentity"], "expectedTrackIdentity": row["objectIdentity"], "expectedSiblings": [{"ref": device["ref"], "objectIdentity": device["objectIdentity"]} for device in row["devices"]]}, "instrument-guard-transaction")
+        with self.assertRaisesRegex(ValueError, "already has an instrument, which Live would replace"): load("max_for_live", "Granulator")
+        with self.assertRaisesRegex(ValueError, "already has an instrument, which Live would replace"): load("user_library", "Pad.adg")
+        with self.assertRaisesRegex(ValueError, "can't tell whether this item is one too"): load("plugins", "Serum 2")
+        self.assertEqual([device.name for device in track.devices], ["Drift"], "the producer's instrument is still there")
+        # Effects still load after it, wherever they come from.
+        load("max_for_live", "Convolution Reverb"); load("user_library", "Room.adv")
+        self.assertEqual([device.name for device in track.devices], ["Drift", "Convolution Reverb", "Room.adv"])
 
     def test_a_device_that_settles_after_loading_records_its_settled_state_and_undoes(self):
         class Item:
@@ -1810,6 +2022,16 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertFalse(mapper._owned_positional_conflict("track", 1))
         kept = song.tracks[0].devices[0]; mapper._owned_cleanup_tokens["kept"] = {"transactionId": "t", "ref": f"{mapper.refs.epoch}:device:0:0", "objectIdentity": mapper._capture_object_identity(kept), "fingerprint": "0" * 64}
         self.assertTrue(mapper._owned_positional_conflict("track", 0))
+
+    def test_owned_positions_look_for_only_the_objects_at_or_after_the_place(self):
+        # Ownership tokens last the session: those before the place aren't looked for, and the Set's identities are read once.
+        song = FakeSong(); song.tracks = [FakeTrack() for _ in range(100)]; mapper = LiveObjectMapper(song, provenance="real-live")
+        for position, track in enumerate(song.tracks):
+            mapper._owned_cleanup_tokens[f"token-{position}"] = {"transactionId": "t", "ref": f"{mapper.refs.epoch}:track:{position}", "objectIdentity": mapper._capture_object_identity(track), "fingerprint": "0" * 64}
+        made = []; identity = mapper._capture_object_identity
+        mapper._capture_object_identity = lambda value: made.append(True) or identity(value)
+        self.assertEqual([token for token, _ in mapper._owned_positions("track", 90)], [f"token-{position}" for position in range(90, 100)])
+        self.assertLess(len(made), 150, "each track's identity read about once, not once per token")
 
     def test_scene_capture_before_an_owned_scene_retires_its_ownership_instead_of_refusing(self):
         mapper = LiveObjectMapper(FakeSong()); transaction = "owned-scene-shift-transaction"; owned = mapper.invoke("scene.create", {"name": "Owned later", "index": 1, "expectedStructureRevision": mapper._structure_revision()}, transaction); mapper.song.capture_and_insert_scene = lambda: mapper.song.scenes.insert(0, FakeScene("Captured before"))
@@ -2186,6 +2408,29 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "note clip hierarchy identity changed"):
             mapper.invoke("note.add", {"ref": created["ref"], "note": note, "expectedClipAuthority": bare, "expectedNotesRevision": session["expectedNotesRevision"]})
 
+    def test_an_arrangement_clip_is_renamed_as_a_session_clip_is(self):
+        song = FakeSong(); track = song.tracks[0]
+        clip = FakeClip(8.0); clip.name = "Verse"; clip.start_time = 16.0; track.arrangement_clips = [clip]
+        mapper = LiveObjectMapper(song)
+        def rename(name, expected):
+            row = mapper._arrangement_clip_items([0])[0]
+            return mapper.invoke("clip.rename", {"ref": row["ref"], "name": name, "expectedName": expected, "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._rename_authority_revision("clip", row["ref"])})
+        renamed = rename("Chorus", "Verse"); validate_operation_payload("clip.rename", "result", renamed)
+        self.assertEqual((renamed["name"], clip.name), ("Chorus", "Chorus"))
+        self.assertEqual(rename("Verse", "Chorus")["name"], "Verse", "and back, as its undo does")
+        with self.assertRaisesRegex(ValueError, "rename target changed since preview"): rename("Bridge", "Chorus")
+        self.assertEqual(clip.name, "Verse")
+
+    def test_refreshing_two_refs_on_one_track_reads_it_once(self):
+        song = FakeSong(); song.tracks[0].clip_slots.append(FakeSlot()); song.tracks[0].clip_slots[0].clip = FakeClip(4.0); song.tracks[0].clip_slots[1].clip = FakeClip(4.0)
+        clip = FakeClip(8.0); clip.start_time = 0.0; song.tracks[0].arrangement_clips = [clip, FakeClip(4.0)]; song.tracks[0].arrangement_clips[1].start_time = 8.0
+        mapper = LiveObjectMapper(song); snapshot = mapper.snapshot(); clips = snapshot["tracks"][0]["clips"]; arranged = snapshot["arrangement"]["clips"]
+        rows = []; whole = mapper._whole_track_row; items = mapper._arrangement_clip_items
+        mapper._whole_track_row = lambda index: rows.append(index) or whole(index)
+        mapper._arrangement_clip_items = lambda *args: rows.append(("arrangement", args)) or items(*args)
+        mapper._refresh(clips[0]["ref"], clips[1]["ref"], arranged[0]["ref"], arranged[1]["ref"])
+        self.assertEqual(rows, [0, ("arrangement", ([0],))])
+
     def test_a_split_arrangement_clip_takes_notes_up_to_its_own_end(self):
         # The right half of an 8-beat clip split at beat 4: start marker 4, end marker 8, so Live's length is 4, but
         # its notes are in its own time, from 0 to 8.
@@ -2395,6 +2640,16 @@ class ControlSurfaceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "token attachment failure"): mapper.invoke("clip.create", self.clip_creation_args(mapper, track_ref, 0, kind="midi", name="Unattached", length=4), "attachment-failure-transaction")
         self.assertIsNone(song.tracks[0].clip_slots[0].clip); self.assertEqual(mapper.refs.checkpoint(), checkpoint); self.assertEqual(mapper._owned_cleanup_tokens, {})
 
+    def test_a_failed_attachment_puts_the_ledger_back_without_copying_its_rows(self):
+        # The ledger lasts the session (up to a million rows): a creation keeps it as it was by its mapping, not a copy of every row.
+        song = FakeSong(); mapper = LiveObjectMapper(song, provenance="real-live"); track_ref = mapper.snapshot()["tracks"][0]["ref"]
+        rows = {f"kept-{index}": {"transactionId": "earlier", "ref": f"{mapper.refs.epoch}:clip:9:{index}", "objectIdentity": f"live:{index}", "fingerprint": "0" * 64} for index in range(1000)}
+        mapper._owned_cleanup_tokens.update(rows)
+        mapper._attach_cleanup_ownership = lambda *_args: (_ for _ in ()).throw(RuntimeError("injected token attachment failure"))
+        with self.assertRaisesRegex(RuntimeError, "token attachment failure"): mapper.invoke("clip.create", self.clip_creation_args(mapper, track_ref, 0, kind="midi", name="Unattached", length=4), "attachment-failure-transaction")
+        self.assertIsNone(song.tracks[0].clip_slots[0].clip)
+        self.assertEqual(set(mapper._owned_cleanup_tokens), set(rows)); self.assertTrue(all(mapper._owned_cleanup_tokens[token] is row for token, row in rows.items()))
+
     def test_mapper_rejects_unsafe_clip_and_note_mutations(self):
         mapper = LiveObjectMapper(FakeSong())
         track = mapper.discover("track")["items"][0]["ref"]
@@ -2543,6 +2798,20 @@ class ControlSurfaceTests(unittest.TestCase):
         source.duplicate_clip_to = lambda destination: setattr(destination, "clip", FakeClip(source.clip.length)); mapper = LiveObjectMapper(song, provenance="real-live"); snapshot = mapper.snapshot(); track = snapshot["tracks"][0]; source_row = track["clips"][0]; target_slot = track["clipSlots"][1]; target_scene = snapshot["scenes"][1]; args = {"ref": source_row["ref"], "targetTrackRef": track["ref"], "targetSceneIndex": 1, "arrangementPosition": None, **mapper._session_clip_authority(source_row["ref"]), "expectedContentFingerprint": mapper._mapped_fingerprint(source_row["ref"]), "expectedTargetTrackIdentity": track["objectIdentity"], "expectedTargetSlotRef": target_slot["ref"], "expectedTargetSlotIdentity": target_slot["objectIdentity"], "expectedTargetSceneRef": target_scene["ref"], "expectedTargetSceneIdentity": target_scene["objectIdentity"], "expectedTargetCollectionRevision": None}; moved = mapper.invoke("clip.move", args, "preexisting-move-transaction")
         self.assertNotIn("ownershipToken", moved); self.assertEqual(mapper._owned_cleanup_tokens, {}); self.assertIsNone(source.clip); self.assertIsNotNone(target.clip)
 
+    def test_the_capture_authority_reads_what_it_hashes_not_the_whole_set(self):
+        song = rich_song(); mapper = LiveObjectMapper(song)
+        snapshot = mapper.snapshot()
+        # The host's formula, from a whole snapshot's rows.
+        expected = hashlib.sha256(mapper._bounded_canonical({
+            "tracks": [{"ref": track["ref"], "objectIdentity": track["objectIdentity"], "clips": [{"ref": clip["ref"], "objectIdentity": clip["objectIdentity"], "notesRevision": clip["notesRevision"]} for clip in track["clips"]]} for track in snapshot["tracks"]],
+            "scenes": [{"ref": scene["ref"], "objectIdentity": scene["objectIdentity"], "index": scene["index"]} for scene in snapshot["scenes"]],
+            "playbackRevision": snapshot["playback"]["revision"]}).encode()).hexdigest()
+        self.assertTrue(any(track["clips"] for track in snapshot["tracks"]), "the Set has clips with notes to hash")
+        with patch.object(mapper, "snapshot", side_effect=AssertionError("the capture authority built a whole-Set snapshot")):
+            self.assertEqual(mapper._capture_authority_revision(), expected)
+        # Within a shared read that already holds a whole snapshot, its rows are used as they are.
+        self.assertEqual(mapper._shared_reads(lambda: (mapper.snapshot(), mapper._capture_authority_revision())[1]), expected)
+
     def test_capture_midi_refuses_any_preexisting_session_content(self):
         song = FakeSong(); song.tracks[0].clip_slots[0].clip = FakeClip(4.0); called = []; song.capture_midi = lambda: called.append(True); mapper = LiveObjectMapper(song); expected = mapper._capture_authority_revision()
         # Advertised on shape (Live can capture MIDI; the Set isn't walked to see whether its slots are empty):
@@ -2563,6 +2832,47 @@ class ControlSurfaceTests(unittest.TestCase):
         song = FakeSong(); clip = Clip(); song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
         with self.assertRaisesRegex(RuntimeError, "partial delete"): mapper.invoke("note.delete", {"ref": ref, "noteIds": [1, 2], **self.note_authority(mapper, ref)})
         self.assertEqual(sorted(note.pitch for note in clip.notes), [36, 38]); self.assertEqual(len({note.note_id for note in clip.notes}), 2)
+
+    def test_a_failed_delete_puts_notes_back_making_each_ones_text_once(self):
+        class Note:
+            def __init__(self, note_id, pitch, start): self.note_id = note_id; self.pitch = pitch; self.start_time = start; self.duration = 0.25; self.velocity = 100; self.channel = 1; self.mute = False; self.probability = 1.0; self.velocity_deviation = 0.0; self.release_velocity = 64.0
+        class Clip:
+            length = 64.0
+            def __init__(self): self.notes = [Note(index + 1, 36 + index % 24, index * 0.25) for index in range(300)]; self.next_id = 301
+            def get_all_notes_extended(self): return list(self.notes)
+            # Live took one note too many, then failed: the rollback puts back half the clip.
+            def remove_notes_by_id(self, ids): gone = set(ids) | {300}; self.notes = [note for note in self.notes if note.note_id not in gone]; raise RuntimeError("injected failure after the delete")
+            def add_new_notes(self, notes):
+                for note in notes: self.notes.append(Note(self.next_id, note["pitch"], note["start_time"])); self.next_id += 1
+        song = FakeSong(); clip = Clip(); song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        args = {"ref": ref, "noteIds": list(range(1, 301, 2)), **self.note_authority(mapper, ref)}
+        canonical = mapper._bounded_canonical; made = []
+        mapper._bounded_canonical = lambda value: made.append(True) or canonical(value)
+        with self.assertRaisesRegex(RuntimeError, "injected failure"): mapper.invoke("note.delete", args)
+        self.assertEqual(sorted((note.pitch, note.start_time) for note in clip.notes), sorted((36 + index % 24, index * 0.25) for index in range(300)))
+        self.assertLess(len(made), 2000, "each note's canonical text is made a few times, not once per note it's compared with")
+
+    def test_a_note_on_another_midi_channel_is_refused_before_anything_is_added(self):
+        song = FakeSong(); clip = FakeClip(4.0); song.tracks[0].clip_slots[0].clip = clip
+        mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        notes = [{"pitch": 36, "start": 0, "duration": 0.25, "velocity": 100, "channel": 1}, {"pitch": 38, "start": 1, "duration": 0.25, "velocity": 100, "channel": 10}]
+        with self.assertRaisesRegex(ValueError, "^Live's clip notes have no MIDI channel, so a note can't be on channel 10"):
+            mapper.invoke("note.add-batch", {"ref": ref, "notes": notes, **self.note_authority(mapper, ref)})
+        self.assertEqual(clip.notes, [], "nothing was added")
+        self.assertEqual(mapper.invoke("note.add-batch", {"ref": ref, "notes": notes[:1], **self.note_authority(mapper, ref)})["added"], 1)
+
+    def test_a_big_note_delete_makes_its_id_set_once(self):
+        song = FakeSong(); clip = FakeClip(64.0); song.tracks[0].clip_slots[0].clip = clip
+        clip.add_new_notes([{"pitch": 36 + index % 48, "start_time": (index % 256) * 0.25, "duration": 0.25, "velocity": 100, "mute": False} for index in range(2000)])
+        made = []; real = set
+        def counting(*args): made.append(True); return real(*args)
+        def remove(ids): gone = real(ids); clip.notes = [note for note in clip.notes if note["note_id"] not in gone]
+        clip.remove_notes_by_id = remove
+        mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
+        args = {"ref": ref, "noteIds": [note["note_id"] for note in clip.notes][::2], **self.note_authority(mapper, ref)}
+        with patch.object(remote_module, "set", counting, create=True): self.assertEqual(mapper.invoke("note.delete", args), {"deleted": 1000})
+        self.assertEqual(len(clip.notes), 1000)
+        self.assertLess(len(made), 100, "the ids to delete become a set once, not once a note")
 
     def test_clip_delete_requires_authoritative_absence(self):
         song = FakeSong(); slot = song.tracks[0].clip_slots[0]; slot.clip = FakeClip(4.0); slot.delete_clip = lambda: None; mapper = LiveObjectMapper(song); ref = mapper.snapshot()["tracks"][0]["clips"][0]["ref"]
@@ -3252,6 +3562,42 @@ class RealtimePlaneTests(unittest.TestCase):
         probe.close()
         return _RealtimePlane(_Bridge(), "127.0.0.1", port)
 
+    def test_an_oversized_datagram_on_windows_is_dropped_and_ingress_goes_on(self):
+        import socket as _socket
+        from ableton_mcp_remote_script import _RealtimePlane
+        plane = _RealtimePlane(types.SimpleNamespace(), "127.0.0.1", 0)
+
+        class TooBig(OSError):
+            winerror = 10040
+
+        class Socket:
+            def __init__(self): self.reads = 0
+            def recvfrom(self, size):
+                self.reads += 1
+                if self.reads == 1: raise TooBig(10040, "A message sent on a datagram socket was larger than the internal message buffer")
+                if self.reads == 2: return b"not a packet", ("127.0.0.1", 40000)
+                plane._stop.set(); raise _socket.timeout()
+
+        plane._socket = Socket(); plane._recv_loop()
+        self.assertEqual((plane._socket.reads, plane.dropped_invalid), (3, 2), "both dropped as invalid, and the datagram after the oversized one read")
+
+    def test_a_port_is_bound_alone_on_windows_too(self):
+        # Windows' SO_REUSEADDR lets a second socket take a bound port: there nothing is set, and a plain bind refuses one taken.
+        class Socket:
+            def __init__(self): self.options = []
+            def setsockopt(self, level, name, value): self.options.append(name)
+        for system, stream, expected in (("posix", True, [remote_module.socket.SO_REUSEADDR]), ("posix", False, []), ("nt", True, []), ("nt", False, [])):
+            sock = Socket()
+            with patch.object(remote_module.os, "name", system): remote_module._bind_alone(sock, stream)
+            self.assertEqual(sock.options, expected, (system, stream))
+
+    def test_other_socket_errors_still_end_the_ingress(self):
+        from ableton_mcp_remote_script import _RealtimePlane
+        plane = _RealtimePlane(types.SimpleNamespace(), "127.0.0.1", 0); reads = []
+        def broken(size): reads.append(size); raise OSError(9, "Bad file descriptor")
+        plane._socket = types.SimpleNamespace(recvfrom=broken); plane._recv_loop()
+        self.assertEqual((len(reads), plane.dropped_invalid), (1, 0))
+
     def _arm(self, plane, ttl_ms, channels, references, source_ports=None):
         authorities = [plane._bridge.mapper._realtime_parameter_authority(reference) for reference in references]
         return plane.arm(ttl_ms, channels, references, source_ports, authorities)
@@ -3487,6 +3833,21 @@ class RealtimePlaneTests(unittest.TestCase):
         stuck = Stuck(); del stuck.quantization; stuck.is_quantized = False; mapper.song.tracks[0].devices[0].parameters = [stuck]; row = mapper.snapshot()["tracks"][0]["devices"][0]["parameters"][0]
         with self.assertRaisesRegex(ValueError, "not confirmed"): mapper._set_parameter_value(row["ref"], 0.75)
 
+    def test_a_realtime_packet_reads_only_the_parameters_of_the_device_it_names(self):
+        # Up to 64 packets a second each check their target: the track's other devices aren't read past their place.
+        class CountedParameter(FakeParameter):
+            reads = 0
+            def __getattribute__(self, name):
+                if name == "value": CountedParameter.reads += 1
+                return object.__getattribute__(self, name)
+        song = FakeSong(); track = song.tracks[0]; track.devices = [FakeDevice() for _ in range(10)]
+        for device in track.devices: device.parameters = [CountedParameter() for _ in range(50)]
+        mapper = LiveObjectMapper(song); rows = mapper.snapshot()["tracks"][0]["devices"]; target = rows[9]["parameters"][3]
+        CountedParameter.reads = 0
+        authority = mapper._realtime_parameter_authority(target["ref"])
+        self.assertEqual((authority["ref"], authority["ownerRef"], len(authority["siblings"])), (target["ref"], rows[9]["ref"], 50))
+        self.assertLessEqual(CountedParameter.reads, 60, "the named device's parameters, not every device's")
+
     def test_real_mapper_authority_matches_filtered_bounded_snapshot_siblings(self):
         import socket as _socket
         tcp_probe = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM); tcp_probe.bind(("127.0.0.1", 0)); tcp_port = tcp_probe.getsockname()[1]; tcp_probe.close()
@@ -3526,7 +3887,12 @@ class RealtimePlaneTests(unittest.TestCase):
             self.assertEqual(macro_arm["parameterRefs"], [macro_ref]); bridge._realtime.disarm()
             oversized_rack = FakeDevice(); oversized_rack.can_have_chains = True; oversized_rack.macros = []; oversized_rack.chains = [type("Chain", (), {"devices": []})() for _ in range(257)]
             bridge.mapper.song.tracks[0].devices = [oversized_rack, FakeDevice()]; later_ref = bridge.mapper.snapshot()["tracks"][0]["devices"][1]["parameters"][0]["ref"]
-            with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256), self.assertRaises(ValueError): bridge.mapper._realtime_parameter_authority(later_ref)
+            inner = FakeDevice(); oversized_rack.chains[0].devices = [inner]; epoch = bridge.mapper.refs.epoch
+            inner_ref = bridge.mapper.refs.put("parameter", inner.parameters[0], f"{epoch}:device:0:0:0:0:0")
+            with patch.object(remote_module, "MAX_DISCOVERY_COLLECTION_LENGTH", 256):
+                # A rack beside the target isn't read, so its size can't refuse it; one on the way to the target is read, and does.
+                self.assertEqual(bridge.mapper._realtime_parameter_authority(later_ref)["ref"], later_ref)
+                with self.assertRaisesRegex(ValueError, "chain collection exceeds its bound"): bridge.mapper._realtime_parameter_authority(inner_ref)
         finally:
             bridge.disconnect()
 
@@ -3878,10 +4244,10 @@ class ViewLocatorClipExpansionTests(unittest.TestCase):
         self.assertEqual(result, {"view": "Arranger", "visible": True}); validate_operation_payload("view.set", "result", result)
         application.view.is_view_visible = lambda name: False
         with self.assertRaisesRegex(ValueError, "not confirmed"): mapper.invoke("view.set", {"view": "Session"})
-        self.assertEqual(mapper.invoke("view.control", {"action": "zoom-in"}), {"action": "zoom-in", "done": True})
-        self.assertEqual(application.view.zooms, [(1, "Arranger", False)])
-        self.assertEqual(mapper.invoke("view.control", {"action": "scroll-right"}), {"action": "scroll-right", "done": True})
-        self.assertEqual(application.view.scrolls, [(1, "Arranger", False)])
+        # Live's NavDirection: up 0, down 1, left 2, right 3; the Arrangement's time runs left to right.
+        for action in ("zoom-in", "zoom-out", "scroll-right", "scroll-left"): self.assertEqual(mapper.invoke("view.control", {"action": action}), {"action": action, "done": True})
+        self.assertEqual(application.view.zooms, [(3, "Arranger", False), (2, "Arranger", False)])
+        self.assertEqual(application.view.scrolls, [(3, "Arranger", False), (2, "Arranger", False)])
         mapper.invoke("view.control", {"action": "follow-on"}); self.assertTrue(song.view.follow_song)
         mapper.invoke("view.control", {"action": "follow-off"}); self.assertFalse(song.view.follow_song)
         track_ref = mapper.snapshot()["tracks"][0]["ref"]
@@ -4078,7 +4444,7 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
         clip.duplicate_loop = lambda: setattr(clip, "length", clip.length * 2)
         clip.duplicate_region = lambda start, end, dest: setattr(clip, "length", clip.length + (end - start))
         clip.playing_position = 0.5
-        clip.start_scrub = lambda position: setattr(clip, "playing_position", position)
+        clip.scrub = lambda position: setattr(clip, "playing_position", position)  # Live's Clip.scrub (it has no start_scrub)
         clip.stop_scrub = lambda: setattr(clip, "playing_position", 0.0)
         clip.move_playing_pos = lambda offset: setattr(clip, "playing_position", clip.playing_position + offset)
         song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["clips"][0]
@@ -4136,9 +4502,13 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
         clip.clear_all_envelopes = lambda: clip._envelopes.clear()
         song.tracks[0].clip_slots[0].clip = clip; parameter = song.tracks[0].devices[0].parameters[0]
         clip._envelopes[id(parameter)] = envelope
-        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["clips"][0]
+        mapper = LiveObjectMapper(song); track = mapper.snapshot()["tracks"][0]; row = track["clips"][0]
         revision = hashlib.sha256(mapper._bounded_canonical([True]).encode()).hexdigest()
-        result = mapper.invoke("automation.envelope.clear", {"clipRef": row["ref"], "expectedAuthorityDigest": mapper._clip_authority_digest(row["ref"]), "expectedEnvelopesRevision": revision})
+        # The host's fence comes from Live, over the same parameters the clear walks.
+        slot = next(item for item in track["clipSlots"] if item["clipRef"] == row["ref"])
+        found = mapper.discover("session_clip", parent=slot["ref"], filters={"ref": row["ref"]}, requested_fields=["envelopesRevision", "envelopesPresent"])["items"]
+        self.assertEqual([(item["envelopesRevision"], item["envelopesPresent"]) for item in found], [(revision, 1)])
+        result = mapper.invoke("automation.envelope.clear", {"clipRef": row["ref"], "expectedAuthorityDigest": mapper._clip_authority_digest(row["ref"]), "expectedEnvelopesRevision": found[0]["envelopesRevision"]})
         self.assertEqual(result["cleared"], 1); validate_operation_payload("automation.envelope.clear", "result", result)
         self.assertEqual(clip._envelopes, {})
         with self.assertRaisesRegex(ValueError, "collection changed since preview"):
@@ -4170,6 +4540,9 @@ class AudioWarpNoteExpansionTests(unittest.TestCase):
         self.assertEqual([note["pitch"] for note in read["notes"]], [60]); validate_operation_payload("note.read-by-id", "result", read)
         selected = mapper.invoke("note.read-selected", {"ref": row["ref"]})
         self.assertTrue(selected["available"]); self.assertEqual(len(selected["notes"]), 1)
+        # Live 11's call carries each note's id; the old one's tuples don't, so it's the second choice.
+        clip.get_selected_notes = lambda: [(60, 0.0, 0.25, 100, False)]; clip.get_selected_notes_extended = lambda: [clip.notes[0]]
+        self.assertEqual([note["id"] for note in mapper.invoke("note.read-selected", {"ref": row["ref"]})["notes"]], [clip.notes[0]["note_id"]])
         def note_fences():
             return {"ref": row["ref"], "expectedClipAuthority": mapper._session_clip_authority(row["ref"]), "expectedNotesRevision": hashlib.sha256(mapper._bounded_canonical(mapper._read_notes(clip)).encode()).hexdigest()}
         duplicated = mapper.invoke("note.duplicate", {**note_fences(), "noteIds": [1]})
@@ -4627,17 +5000,19 @@ class SceneSlotExpansionTests(unittest.TestCase):
     def test_scene_fire_selected_is_accepted_before_live_applies_it(self):
         song, scene, slot, mapper = self._mapper_with_scene()
         # Live 12.4 launches the scene on its next tick: nothing reads as queued or playing right after.
-        pending = []
-        def fire_as_selected():
+        pending = []; selected = []
+        def fire():
             pending.append(lambda: (setattr(scene, "is_triggered", True), setattr(song, "is_playing", True)))
-        scene.fire_as_selected = fire_as_selected
+        scene.fire = fire
+        # Live's fire_as_selected launches whichever scene is selected, whatever scene it's called on.
+        scene.fire_as_selected = lambda: selected.append("the selected scene")
         row = mapper.snapshot()["scenes"][0]
         self.assertTrue(mapper._operation_supported("scene.fire-selected"))
         playback = mapper._playback()
         state = hashlib.sha256(mapper._bounded_canonical({"isTriggered": False, "playing": playback["transport"]["playing"]}).encode()).hexdigest()
         result = mapper.invoke("scene.fire-selected", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedAuthorityRevision": mapper._scene_collection_revision(), "expectedStateRevision": state})
         self.assertEqual(result, {"fired": True}); validate_operation_payload("scene.fire-selected", "result", result)
-        self.assertEqual(len(pending), 1, "fired once"); pending[0]()
+        self.assertEqual((len(pending), selected), (1, []), "this scene fired, once"); pending[0]()
         self.assertTrue(scene.is_triggered); self.assertTrue(song.is_playing)
 
 
@@ -4752,6 +5127,20 @@ class SongTransportLinkTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unavailable on this song"):
             plain.invoke("song.set", {**authority(plain), "swingAmount": 0.5})
 
+    def test_a_nudge_lets_go_of_lives_nudge_button_after_a_click(self):
+        song, mapper = self._mapper_with_song_state(); song.nudge_up = False; song.nudge_down = False
+        set_row = mapper.snapshot()["set"]
+        request = {"setRef": set_row["ref"], "expectedObjectIdentity": set_row["objectIdentity"], "expectedRevision": str(mapper._playback()["revision"]), "action": "nudge-up"}
+        clock = lambda seconds: patch("ableton_mcp_remote_script.time.time", return_value=seconds)
+        with clock(1000.0): mapper.invoke("transport.action", request)
+        self.assertTrue(song.nudge_up, "pressed")
+        with clock(1000.0): mapper.fire_button_tick()
+        self.assertTrue(song.nudge_up, "held for a click's worth")
+        with clock(1001.0): mapper.fire_button_tick()
+        self.assertFalse(song.nudge_up, "then let go on a display tick, as a click on Live's button is")
+        mapper.invoke("transport.action", {**request, "action": "nudge-down", "expectedRevision": str(mapper._playback()["revision"])}); self.assertTrue(song.nudge_down)
+        mapper._release_fire_buttons(); self.assertFalse(song.nudge_down, "a reconnect or shutdown lets go of it too")
+
     def test_transport_action_dispatches_and_fences(self):
         song, mapper = self._mapper_with_song_state()
         calls = []
@@ -4781,9 +5170,38 @@ class SongTransportLinkTests(unittest.TestCase):
         result = mapper.invoke("transport.action", {**fences(), "action": "scrub", "beatTime": 0.5})
         self.assertTrue(result["done"]); self.assertEqual(calls[-1], ("scrub", 0.5))
         with self.assertRaisesRegex(ValueError, "distance is required"): mapper.invoke("transport.action", {**fences(), "action": "scrub"})
-        result = mapper.invoke("transport.action", {**fences(), "action": "force-link-beat-time", "beatTime": 8.0})
-        self.assertTrue(result["done"]); self.assertEqual(calls[-1], ("link", 8.0))
-        with self.assertRaisesRegex(ValueError, "beatTime is required"): mapper.invoke("transport.action", {**fences(), "action": "force-link-beat-time"})
+        # Live moves the playhead on its next tick (Live 12.4.15): a write waits for tick().
+        class NextTick(type(song)):
+            @property
+            def current_song_time(self): return self.__dict__.get("_at", 0.0)
+            @current_song_time.setter
+            def current_song_time(self, value): self.__dict__["_moving_to"] = float(value)
+            def tick(self): self.__dict__["_at"] = self.__dict__.pop("_moving_to", self.current_song_time)
+        song.__class__ = NextTick; song.is_playing = False
+        def link(**beat): return mapper.invoke("transport.action", {**fences(), "action": "force-link-beat-time", **beat})
+        def links(): return [call for call in calls if isinstance(call, tuple) and call[0] == "link"]
+        # Stopped: the playhead is moved and the call asks to be retried (the host does, once per tick). Called at once,
+        # Link would jump to where the playhead was.
+        with self.assertRaisesRegex(ValueError, "^playhead is moving; retry shortly$"): link(beatTime=8.0)
+        self.assertEqual(links(), [], "Link isn't forced before Live is at the beat")
+        song.tick()
+        self.assertTrue(link(beatTime=8.0)["done"]); self.assertEqual(calls[-1], ("link", 8.0), "a shape whose call takes the beat gets it")
+        # Live's Song.force_link_beat_time() takes nothing: it's called so, once Live is at the beat.
+        song.force_link_beat_time = lambda: calls.append(("link", song.current_song_time))
+        with self.assertRaisesRegex(ValueError, "retry shortly"): link(beatTime=16.0)
+        song.tick(); self.assertTrue(link(beatTime=16.0)["done"]); self.assertEqual(calls[-1], ("link", 16.0))
+        # Playing, the playhead goes on from the beat once it's there: up to half a second's worth past it is there (a
+        # beat at 120 BPM), and Link follows Live where it is. Further on, it's moved again.
+        song.is_playing = True; song.tempo = 120.0
+        with self.assertRaisesRegex(ValueError, "retry shortly"): link(beatTime=32.0)
+        song.tick(); song.__dict__["_at"] += 0.4
+        self.assertTrue(link(beatTime=32.0)["done"]); self.assertEqual(calls[-1], ("link", 32.4))
+        song.__dict__["_at"] = 33.5; count = len(links())
+        with self.assertRaisesRegex(ValueError, "retry shortly"): link(beatTime=32.0)
+        self.assertEqual(len(links()), count); song.tick(); self.assertEqual(song.current_song_time, 32.0)
+        song.is_playing = False
+        with self.assertRaisesRegex(ValueError, "before the start"): link(beatTime=-1.0)
+        with self.assertRaisesRegex(ValueError, "beatTime is required"): link()
         stale = fences(); stale["expectedRevision"] = "stale"
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("transport.action", {**stale, "action": "start"})
         with self.assertRaisesRegex(ValueError, "invalid"): mapper.invoke("transport.action", {**fences(), "action": "detonate"})
@@ -4840,6 +5258,11 @@ class SongTransportLinkTests(unittest.TestCase):
         self.assertEqual(captured["format"], "smpte_30")
         self.assertEqual(smpte_result["smpte"], {"hours": 0, "minutes": 1, "seconds": 2, "frames": 12, "subframes": 3})
         validate_operation_payload("song.time-convert", "result", smpte_result)
+        # Live answers these as BeatTime, not beats: the loop in beats is the Song's own.
+        class BeatTime:
+            bars, beats, sub_division, ticks = 3, 1, 1, 0
+        song.get_beats_loop_start = lambda: BeatTime(); song.get_beats_loop_length = lambda: BeatTime(); song.loop_start = 8.0; song.loop_length = 4.0
+        self.assertEqual(mapper.invoke("song.time-convert", {"setRef": set_ref, "query": "beats-loop"}), loop)
         del song.get_beats_loop_length
         unavailable = mapper.invoke("song.time-convert", {"setRef": set_ref, "query": "beats-loop"})
         self.assertEqual(unavailable["available"], False)
@@ -4974,6 +5397,23 @@ class TrackStructureExpansionTests(unittest.TestCase):
         result = mapper.invoke("scene.duplicate", {"ref": scene_row["ref"], "expectedObjectIdentity": scene_row["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()})
         self.assertEqual(result["index"], 1); validate_operation_payload("scene.duplicate", "result", result); self.assertEqual(len(song.scenes), 2)
 
+    def test_a_group_track_isnt_duplicated(self):
+        # Live copies a group with every track inside it, more than one change can confirm or take back.
+        song = FakeSong(); song.tracks = [FakeTrack(), FakeTrack(), FakeTrack()]; group = song.tracks[0]; group.is_foldable = True
+        song.tracks[1].group_track = group; song.tracks[2].group_track = group; calls = []
+        song.duplicate_track = lambda index: calls.append(index)
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]
+        with self.assertRaisesRegex(ValueError, "group track can't be duplicated"):
+            mapper.invoke("track.duplicate", {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStructureRevision": mapper._structure_revision()})
+        self.assertEqual((calls, len(song.tracks)), ([], 3), "Live was never asked")
+
+    def test_the_selected_track_is_known_through_a_fresh_proxy(self):
+        # Live hands out a new proxy for the same track on each read.
+        song = FakeSong(); song.tracks.append(FakeTrack()); song.tracks[0]._live_ptr = 101; song.tracks[1]._live_ptr = 102
+        song.view = types.SimpleNamespace(selected_track=types.SimpleNamespace(_live_ptr=102))
+        rows = LiveObjectMapper(song).snapshot()["tracks"]
+        self.assertEqual([row["isSelected"] for row in rows[:2]], [False, True])
+
     def test_track_view_set_and_select_instrument(self):
         song = FakeSong()
         track = song.tracks[0]
@@ -5084,21 +5524,29 @@ class SelectionViewExpansionTests(unittest.TestCase):
     def test_selection_set_assigns_song_view_selections(self):
         song = FakeSong()
         track = song.tracks[0]; scene = song.scenes[0]; slot = track.clip_slots[0]; device = track.devices[0]; parameter = device.parameters[0]
-        song.view = type("SongView", (), {"selected_track": None, "selected_scene": None, "highlighted_clip_slot": None, "detail_clip": None, "selected_device": None, "selected_parameter": None, "selected_chain": None})()
+        # As Live 12.4's Song.View: a device is selected through select_device, on its own track's view (the selected
+        # track stays as it is), and a parameter can't be.
+        class SongView:
+            selected_track = None; selected_scene = None; highlighted_clip_slot = None; detail_clip = None; selected_parameter = None; selected_chain = None
+            def select_device(self, chosen):
+                owner = next(candidate for candidate in song.tracks if chosen in candidate.devices); owner.view.selected_device = chosen
+        song.view = SongView(); track.view = type("TrackView", (), {"selected_device": None})()
         clip = FakeClip(4.0); slot.clip = clip
         mapper = LiveObjectMapper(song)
         self.assertTrue(mapper._operation_supported("selection.set"))
         snapshot = mapper.snapshot()
         track_ref = snapshot["tracks"][0]["ref"]; scene_ref = snapshot["scenes"][0]["ref"]; slot_ref = snapshot["tracks"][0]["clipSlots"][0]["ref"]; clip_ref = snapshot["tracks"][0]["clips"][0]["ref"]
         device_ref = snapshot["tracks"][0]["devices"][0]["ref"]; parameter_ref = snapshot["tracks"][0]["devices"][0]["parameters"][0]["ref"]
-        args = {"trackRef": track_ref, "sceneRef": scene_ref, "slotRef": slot_ref, "detailClipRef": clip_ref, "deviceRef": device_ref, "parameterRef": parameter_ref, "expectedStateRevision": mapper._selection_revision()}
+        with self.assertRaisesRegex(ValueError, "^Live doesn't let a script select a parameter.*; nothing changed$"):
+            mapper.invoke("selection.set", {"parameterRef": parameter_ref, "expectedStateRevision": mapper._selection_revision()})
+        args = {"trackRef": track_ref, "sceneRef": scene_ref, "slotRef": slot_ref, "detailClipRef": clip_ref, "deviceRef": device_ref, "expectedStateRevision": mapper._selection_revision()}
         result = mapper.invoke("selection.set", args)
         self.assertTrue(result["changed"]); validate_operation_payload("selection.set", "result", result)
         self.assertIs(song.view.selected_track, track); self.assertIs(song.view.selected_scene, scene)
         self.assertIs(song.view.highlighted_clip_slot, slot); self.assertIs(song.view.detail_clip, clip)
-        self.assertIs(song.view.selected_parameter, parameter)
-        # Live keeps the selected device on the selected track's view: that's what the snapshot and the focus feed name.
-        track.view = type("TrackView", (), {"selected_device": device})()
+        self.assertIsNone(song.view.selected_parameter)
+        # Live keeps the selected device on the selected track's view: that's what select_device set, and what the snapshot and the focus feed name.
+        self.assertIs(track.view.selected_device, device)
         self.assertEqual(mapper.snapshot()["selection"]["deviceRef"], device_ref, "read from the selected track")
         self.assertEqual(mapper.discover("selection")["items"][0]["selectedDeviceRef"], device_ref, "the focus feed names the selected device")
         # Live's device type goes on each device row.
@@ -5109,6 +5557,31 @@ class SelectionViewExpansionTests(unittest.TestCase):
         self.assertTrue(cleared["changed"]); self.assertIsNone(song.view.detail_clip)
         stale = dict(args, expectedStateRevision="0" * 64)
         with self.assertRaisesRegex(ValueError, "changed since preview"): mapper.invoke("selection.set", stale)
+
+    def test_a_device_on_another_track_is_selected_with_its_track(self):
+        # Live 12.4.15's select_device selects a device on its own track's view and leaves the selected track as it is,
+        # while the selected device is the selected track's: the device's track is selected first.
+        song = FakeSong(); first = song.tracks[0]; second = FakeTrack(); second.name = "Keys"; song.tracks.append(second)
+        for track in (first, second):
+            track.view = type("TrackView", (), {"selected_device": None})()
+            for device in track.devices: device.canonical_parent = track
+        class SongView:
+            selected_track = first; selected_scene = None; highlighted_clip_slot = None; detail_clip = None; selected_parameter = None; selected_chain = None
+            def select_device(self, chosen):
+                owner = next(candidate for candidate in song.tracks if chosen in candidate.devices); owner.view.selected_device = chosen
+        song.view = SongView()
+        mapper = LiveObjectMapper(song); snapshot = mapper.snapshot()
+        first_ref, second_ref = snapshot["tracks"][0]["ref"], snapshot["tracks"][1]["ref"]; device_ref = snapshot["tracks"][1]["devices"][0]["ref"]
+        self.assertTrue(mapper.invoke("selection.set", {"deviceRef": device_ref, "expectedStateRevision": mapper._selection_revision()})["changed"])
+        self.assertIs(song.view.selected_track, second); self.assertIs(second.view.selected_device, second.devices[0])
+        self.assertEqual((mapper.snapshot()["selection"]["trackRef"], mapper.snapshot()["selection"]["deviceRef"]), (second_ref, device_ref))
+        # The host's undo: the earlier track (no device was selected there, so no deviceRef goes back).
+        self.assertTrue(mapper.invoke("selection.set", {"trackRef": first_ref, "expectedStateRevision": mapper._selection_revision()})["changed"])
+        self.assertIs(song.view.selected_track, first)
+        # A trackRef naming another track than the device's can't be both: refused, nothing changed.
+        with self.assertRaisesRegex(ValueError, "deviceRef is on another track than trackRef"):
+            mapper.invoke("selection.set", {"trackRef": first_ref, "deviceRef": device_ref, "expectedStateRevision": mapper._selection_revision()})
+        self.assertIs(song.view.selected_track, first)
 
     def test_the_snapshot_names_the_selection_the_host_fences_selection_changes_on(self):
         # The host previews from the snapshot: its selectionRevision hashes snapshot.selection. The bridge
@@ -5149,7 +5622,9 @@ class SelectionViewExpansionTests(unittest.TestCase):
         device.view = type("DeviceView", (), {"is_collapsed": False})()
         mapper = LiveObjectMapper(song)
         self.assertTrue(mapper._operation_supported("song.view.set"))
-        draw_revision = hashlib.sha256(mapper._bounded_canonical({"drawMode": False}).encode()).hexdigest()
+        # The host fences on the draw mode the Set's row shows.
+        draw_mode = mapper.snapshot()["set"]["drawMode"]; self.assertIs(draw_mode, False)
+        draw_revision = hashlib.sha256(mapper._bounded_canonical({"drawMode": draw_mode}).encode()).hexdigest()
         result = mapper.invoke("song.view.set", {"drawMode": True, "expectedStateRevision": draw_revision})
         self.assertTrue(result["changed"]); validate_operation_payload("song.view.set", "result", result); self.assertTrue(song.view.draw_mode)
         self.assertTrue(mapper._operation_supported("clip.view.set"))
@@ -5164,7 +5639,9 @@ class SelectionViewExpansionTests(unittest.TestCase):
         self.assertEqual(row["clipView"], {"gridQuantization": 1, "gridIsTriplet": False})
         self.assertTrue(mapper._operation_supported("device.view.set"))
         device_row = mapper.snapshot()["tracks"][0]["devices"][0]
-        collapsed_revision = hashlib.sha256(mapper._bounded_canonical({"collapsed": False}).encode()).hexdigest()
+        # The host fences on the row's own view, as Live has it.
+        self.assertEqual(device_row["view"], {"isCollapsed": False})
+        collapsed_revision = hashlib.sha256(mapper._bounded_canonical({"collapsed": device_row["view"]["isCollapsed"]}).encode()).hexdigest()
         result = mapper.invoke("device.view.set", {"ref": device_row["ref"], "collapsed": True, "expectedObjectIdentity": device_row["objectIdentity"], "expectedStateRevision": collapsed_revision})
         self.assertTrue(result["changed"]); validate_operation_payload("device.view.set", "result", result)
         self.assertTrue(device.view.is_collapsed)
@@ -5237,8 +5714,12 @@ class PerformanceDiagnosticsTests(unittest.TestCase):
         track.input_meter_left = 0.5; track.input_meter_right = 0.4; track.input_meter_level = 0.45
         track.output_meter_left = 0.6; track.output_meter_right = 0.55; track.output_meter_level = 0.58
         mapper = LiveObjectMapper(song); mapper._application = lambda: FakeApp()
-        set_ref = mapper.snapshot()["set"]["ref"]
-        result = mapper.invoke("performance.read", {"setRef": set_ref})
+        snapshot = mapper.snapshot(); set_ref = snapshot["set"]["ref"]
+        # Read from the tracks themselves: no whole-Set snapshot, while the producer worries about load.
+        with patch.object(mapper, "snapshot", side_effect=AssertionError("performance.read built a whole-Set snapshot")):
+            result = mapper.invoke("performance.read", {"setRef": set_ref})
+        self.assertEqual([row["ref"] for row in result["tracks"]], [row["ref"] for row in snapshot["tracks"]])
+        self.assertEqual([[device["ref"] for device in row["devices"]] for row in result["tracks"]], [[device["ref"] for device in row["devices"]] for row in snapshot["tracks"]])
         self.assertEqual((result["averageProcessUsage"], result["peakProcessUsage"]), (0.42, 0.87))
         self.assertIsInstance(result["sampledAt"], int); self.assertEqual(len(result["revision"]), 64)
         row = result["tracks"][0]
@@ -5301,6 +5782,13 @@ class MixerRoutingExpansionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("mixer.extended.set", {**fences(), "crossfader": 2.0})
         with self.assertRaisesRegex(ValueError, "is invalid"): mapper.invoke("mixer.extended.set", {**fences(), "crossfadeAssign": 3})
 
+    def test_the_mixer_refs_a_track_row_publishes_resolve_to_their_controls(self):
+        song, mapper = self._mapper_with_mixer(); mixer = song.tracks[0].mixer_device
+        row = mapper.snapshot()["tracks"][0]["mixer"]
+        for field, control in (("trackActivatorRef", mixer.track_activator), ("crossfaderRef", mixer.crossfader), ("panningLeftRef", mixer.left_split_stereo), ("panningRightRef", mixer.right_split_stereo)):
+            self.assertIs(mapper._resolve_parameter(row[field]), control, field)
+            self.assertIs(mapper._parameter_at(row[field]), control, field)
+
     def test_the_snapshot_mixer_row_carries_the_extended_mixer_authority_the_host_previews(self):
         # The host previews from the snapshot alone: the track mixer row must name the mixer itself and
         # the values it edits (chain mixers already do), or the preview refuses as not authoritative.
@@ -5328,6 +5816,19 @@ class MixerRoutingExpansionTests(unittest.TestCase):
                       "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical({"crossfadeAssign": mixer.crossfade_assign, "panningMode": mixer.panning_mode}).encode()).hexdigest()}
             result = mapper.invoke("mixer.extended.set", {**fences, "crossfader": -0.5})
             self.assertTrue(result["changed"]); self.assertEqual(mixer.crossfader.value, -0.5)
+
+    def test_a_failed_chain_mixer_change_puts_back_what_it_wrote_before(self):
+        class Stuck(FakeParameter):
+            def __setattr__(self, name, value):
+                if name == "value" and getattr(self, "stuck", False): raise RuntimeError("Live refused the pan")
+                object.__setattr__(self, name, value)
+        song = FakeSong(); mixer = FakeMixerDevice(); mixer.panning = Stuck(); mixer.panning.value = 0.0; mixer.panning.min = -1.0; mixer.panning.stuck = True
+        chain = type("Chain", (), {"name": "Chain 1", "devices": [], "mute": False, "solo": False, "mixer_device": mixer})()
+        rack = FakeDevice(); rack.name = "Rack"; rack.can_have_chains = True; rack.chains = [chain]; song.tracks[0].devices = [rack]
+        mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["devices"][0]["chains"][0]; mixer.volume.value = 0.8
+        fences = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedMixerIdentity": mapper._capture_object_identity(mixer), "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical({"sends": [send.value for send in mixer.sends]}).encode()).hexdigest()}
+        with self.assertRaises(ValueError): mapper.invoke("chain-mixer.set", {**fences, "volume": 0.3, "pan": -0.5})
+        self.assertEqual((mixer.volume.value, mixer.panning.value), (0.8, 0.0), "the volume written before the pan failed is back too")
 
     def test_chain_mixer_fields_and_set(self):
         song = FakeSong()
@@ -5402,6 +5903,38 @@ class MixerRoutingExpansionTests(unittest.TestCase):
         self.assertEqual(device.input_routing_type["name"], "Ext. In")
         self.assertEqual(device_row["sidechainRoutingType"], "None")
         self.assertEqual(device_row["deviceIo"]["routingType"], "Ext. In")
+
+    def test_a_device_input_channel_is_looked_up_under_its_new_type_and_a_failed_change_is_checked_back(self):
+        channels = {"Ext. In": [{"name": "1"}, {"name": "1/2"}], "Bass": [{"name": "Post FX"}, {"name": "Pre FX"}]}
+        class TypedIo:
+            # Live offers a type's own channels, and putting a type in place gives it its first channel.
+            def __init__(self):
+                self.available_routing_types = [{"name": "Ext. In"}, {"name": "Bass"}]
+                self._type, self._channel = self.available_routing_types[0], channels["Ext. In"][1]
+                self.default_external_routing_channel_is_none = True; self.refused = set()
+            available_routing_channels = property(lambda self: channels[self._type["name"]])
+            def _set_type(self, value): self._type, self._channel = value, channels[value["name"]][0]
+            routing_type = property(lambda self: self._type, _set_type)
+            def _set_channel(self, value):
+                if value["name"] in self.refused: raise RuntimeError("Live refused the channel")
+                self._channel = value
+            routing_channel = property(lambda self: self._channel, _set_channel)
+        def change(refused):
+            song = FakeSong(); device = song.tracks[0].devices[0]; io = TypedIo(); io.refused = refused; device.audio_inputs = [io]
+            mapper = LiveObjectMapper(song); row = mapper.snapshot()["tracks"][0]["devices"][0]
+            revision = hashlib.sha256(mapper._bounded_canonical({"routingType": "Ext. In", "routingChannel": "1/2"}).encode()).hexdigest()
+            return io, lambda: mapper.invoke("device-io.set", {"ref": row["ref"], "routingType": "Bass", "routingChannel": "Pre FX", "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": revision})
+        # "Pre FX" is one of the new type's channels, not the old one's.
+        io, invoke = change(set())
+        self.assertTrue(invoke()["changed"])
+        self.assertEqual((io.routing_type["name"], io.routing_channel["name"]), ("Bass", "Pre FX"))
+        # Live refuses the channel: the type and then the channel go back, and that's checked.
+        io, invoke = change({"Pre FX"})
+        with self.assertRaisesRegex(RuntimeError, "Live refused the channel"): invoke()
+        self.assertEqual((io.routing_type["name"], io.routing_channel["name"]), ("Ext. In", "1/2"))
+        # The channel it had can't go back either: said so, not left as the type's default.
+        io, invoke = change({"Pre FX", "1/2"})
+        with self.assertRaisesRegex(ValueError, "exact rollback failed"): invoke()
 
 
 class DeviceParameterExpansionTests(unittest.TestCase):
@@ -6032,14 +6565,68 @@ class SpecializedDeviceTests(unittest.TestCase):
         self.assertTrue(mapper._operation_supported("hybrid-reverb.set"))
         row = mapper.snapshot()["tracks"][0]["devices"][0]
         self.assertEqual((row["hybridReverb"]["irCategory"], row["hybridReverb"]["irFile"], row["hybridReverb"]["attack"]), ("Halls", "Hall A", 10.0))
-        identity_args = {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"]}
-        result = mapper.invoke("hybrid-reverb.set", {**identity_args, "irCategory": "Plates", "irFile": "Hall B"})
+        result = mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irCategory": "Plates", "irFile": "Hall B"})
         self.assertTrue(result["changed"]); self.assertEqual((device.ir_category_index, device.ir_file_index), (1, 1))
-        with self.assertRaisesRegex(ValueError, "not an available choice"): mapper.invoke("hybrid-reverb.set", {**identity_args, "irCategory": "Bogus"})
-        state = mapper._specialized_state(device, [("attack", "ir_attack_time"), ("decay", "ir_decay_time"), ("size", "ir_size_factor")])
-        result = mapper.invoke("hybrid-reverb.set", {**identity_args, "attack": 25.0, "decay": 2400.0, "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()})
+        with self.assertRaisesRegex(ValueError, "not an available choice"): mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irCategory": "Bogus"})
+        result = mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "attack": 25.0, "decay": 2400.0})
         self.assertTrue(result["changed"]); self.assertEqual((device.ir_attack_time, device.ir_decay_time), (25.0, 2400.0))
-        with self.assertRaisesRegex(ValueError, "authority is invalid"): mapper.invoke("hybrid-reverb.set", {**identity_args, "time": 3000.0})
+        with self.assertRaisesRegex(ValueError, "authority is invalid"): mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "time": 3000.0})
+
+    def test_hybrid_reverb_takes_ir_names_live_lists_as_plain_strings(self):
+        song = FakeSong(); device = FakeDevice(); device.name = "Hybrid"; device.class_name = "HybridReverbDevice"
+        device.ir_category_list = ["Halls", "Plates"]; device.ir_category_index = 0
+        device.ir_file_list = ["Hall A", "Hall B"]; device.ir_file_index = 0
+        device.ir_attack_time = 10.0; device.ir_decay_time = 1200.0; device.ir_size_factor = 50.0
+        song.tracks[0].devices = [device]; mapper = LiveObjectMapper(song)
+        row = mapper.snapshot()["tracks"][0]["devices"][0]
+        self.assertEqual((row["hybridReverb"]["irCategoryList"], row["hybridReverb"]["irFile"]), (["Halls", "Plates"], "Hall A"))
+        result = mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irFile": "Hall B"})
+        self.assertTrue(result["changed"]); self.assertEqual(device.ir_file_index, 1)
+
+    def test_hybrid_reverb_refuses_a_name_more_than_one_ir_reads_as(self):
+        class Choice:
+            pass
+        song = FakeSong(); device = FakeDevice(); device.name = "Hybrid"; device.class_name = "HybridReverbDevice"
+        device.ir_category_list = ["Halls"]; device.ir_category_index = 0
+        device.ir_file_list = [Choice(), Choice()]; device.ir_file_index = 0
+        device.ir_attack_time = 10.0; device.ir_decay_time = 1200.0; device.ir_size_factor = 50.0
+        song.tracks[0].devices = [device]; mapper = LiveObjectMapper(song)
+        names = mapper.snapshot()["tracks"][0]["devices"][0]["hybridReverb"]["irFileList"]
+        self.assertEqual(len(set(names)), 1, "nameless choices read as their type, all alike")
+        with self.assertRaisesRegex(ValueError, "irFile names more than one choice"): mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irFile": names[1]})
+        self.assertEqual(device.ir_file_index, 0)
+
+    def test_hybrid_reverb_is_fenced_on_the_five_settings_its_row_shows(self):
+        song = FakeSong(); device = FakeDevice(); device.name = "Hybrid"; device.class_name = "HybridReverbDevice"
+        device.ir_category_list = [{"name": "Halls"}, {"name": "Plates"}]; device.ir_category_index = 0
+        device.ir_file_list = [{"name": "Hall A"}, {"name": "Hall B"}]; device.ir_file_index = 0
+        device.ir_attack_time = 10.0; device.ir_decay_time = 1200.0; device.ir_size_factor = 50.0
+        song.tracks[0].devices = [device]; mapper = LiveObjectMapper(song)
+        # The host's fence covers all five settings: a shaping change is taken with it.
+        self.assertTrue(mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "size": 80.0})["changed"]); self.assertEqual(device.ir_size_factor, 80.0)
+        # The producer picked another IR since the preview: shaping and IR changes alike are refused, and nothing is written.
+        stale = hybrid_reverb_fence(mapper); device.ir_file_index = 1
+        for change in ({"size": 20.0}, {"irCategory": "Plates"}):
+            with self.assertRaisesRegex(ValueError, "state changed since preview"): mapper.invoke("hybrid-reverb.set", {**stale, **change})
+        self.assertEqual((device.ir_category_index, device.ir_file_index, device.ir_size_factor), (0, 1, 80.0))
+
+    def test_hybrid_reverb_finds_a_file_in_the_category_it_sets(self):
+        class Reverb(FakeDevice):
+            FILES = {0: ["Hall A", "Hall B"], 1: ["Plate A", "Plate B"]}
+            ir_file_list = property(lambda self: self.FILES[self.ir_category_index])
+            def __setattr__(self, name, value):
+                super().__setattr__(name, value)
+                # Live starts a newly chosen category at its first file.
+                if name == "ir_category_index": super().__setattr__("ir_file_index", 0)
+        song = FakeSong(); device = Reverb(); device.name = "Hybrid"; device.class_name = "HybridReverbDevice"
+        device.ir_category_list = ["Halls", "Plates"]; device.ir_category_index = 0; device.ir_file_index = 1
+        device.ir_attack_time = 10.0; device.ir_decay_time = 1200.0; device.ir_size_factor = 50.0
+        song.tracks[0].devices = [device]; mapper = LiveObjectMapper(song)
+        with self.assertRaisesRegex(ValueError, "irFile is not an available choice"):
+            mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irCategory": "Plates", "irFile": "Hall B"})
+        self.assertEqual((device.ir_category_index, device.ir_file_index), (0, 1), "the category and its file are put back")
+        self.assertTrue(mapper.invoke("hybrid-reverb.set", {**hybrid_reverb_fence(mapper), "irCategory": "Plates", "irFile": "Plate B"})["changed"])
+        self.assertEqual((device.ir_category_index, device.ir_file_index), (1, 1))
 
     def test_hybrid_reverb_second_phase_failure_rolls_back_applied_ir_indices(self):
         class AttackRefusingDevice(FakeDevice):
@@ -6055,11 +6642,7 @@ class SpecializedDeviceTests(unittest.TestCase):
         device.ir_decay_time = 1200.0; device.ir_size_factor = 50.0
         song = FakeSong(); song.tracks[0].devices = [device]
         mapper = LiveObjectMapper(song)
-        row = mapper.snapshot()["tracks"][0]["devices"][0]
-        specs = [("attack", "ir_attack_time"), ("decay", "ir_decay_time"), ("size", "ir_size_factor")]
-        def fences():
-            state = mapper._specialized_state(device, specs)
-            return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+        fences = lambda: hybrid_reverb_fence(mapper)
         combined = mapper.invoke("hybrid-reverb.set", {**fences(), "irCategory": "Plates", "decay": 2400.0})
         self.assertTrue(combined["changed"]); validate_operation_payload("hybrid-reverb.set", "result", combined)
         self.assertEqual((device.ir_category_index, device.ir_decay_time), (1, 2400.0))
@@ -6893,6 +7476,13 @@ class SetScaleCapTests(unittest.TestCase):
         self.assertIn("ownershipToken", created)
 
 
+def hybrid_reverb_fence(mapper, track=0, index=0):
+    """What the host fences a Hybrid Reverb change on: the device, and the five settings its row shows."""
+    row = mapper.snapshot()["tracks"][track]["devices"][index]
+    state = {field: row["hybridReverb"][field] for field in ("irCategory", "irFile", "attack", "decay", "size")}
+    return {"ref": row["ref"], "expectedObjectIdentity": row["objectIdentity"], "expectedStateRevision": hashlib.sha256(mapper._bounded_canonical(state).encode()).hexdigest()}
+
+
 class _BridgeSocketFixture:
     """A bridge on a real loopback socket, ticked by hand as Live's display does. Lines are read from
     the raw socket while ticking: the bridge only writes during a tick."""
@@ -6937,6 +7527,15 @@ class _BridgeSocketFixture:
     def frame(self, channel, sequence, method="status", **fields):
         unsigned = channel.bound({"version": PROTOCOL, "id": f"{method}-{sequence}", "method": method, "nonce": f"{sequence:016d}", "sequence": sequence, **fields})
         return json.dumps({**unsigned, "mac": channel.sign(unsigned)}).encode("utf-8") + b"\n"
+
+
+class AbsoluteFilePathTests(unittest.TestCase):
+    def test_a_file_path_is_one_live_can_open_as_it_stands(self):
+        accepted = ["/Users/me/Kick.wav", "C:\\Users\\me\\Kick.wav", "c:/Users/me/Kick.wav", "\\\\nas\\home\\AppData\\Kumi\\staging\\Kick.wav"]
+        refused = ["C:Kick.wav", "Kick.wav", "\\\\?\\C:\\Kick.wav", "\\\\.\\pipe\\x", "\\\\", "", "/" * 1025, 7, None, "1:\\Kick.wav",
+                   "//./pipe/x", "//?/C:/Kick.wav", "/\\.\\pipe\\x", "\\/server/share", "\u00df:\\Kick.wav"]
+        self.assertEqual([remote_module._absolute_file_path(path) for path in accepted], [True] * len(accepted))
+        self.assertEqual([remote_module._absolute_file_path(path) for path in refused], [False] * len(refused))
 
 
 class RegistryLoadTests(unittest.TestCase):
@@ -7089,6 +7688,8 @@ class LingeringTickTests(_BridgeSocketFixture, unittest.TestCase):
 class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
     def test_a_big_frame_arriving_in_pieces_is_scanned_once_and_answered(self):
         client, channel = self.connect()
+        # Signed in first: before that, a connection gets no more than a first request's worth read.
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
         connection = self.bridge._connections[0]
         body = b"x" * (8 * 1024 * 1024)
         for offset in range(0, len(body), 256 * 1024):
@@ -7098,7 +7699,7 @@ class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
         while len(connection.inbound) < len(body) and time.time() < deadline: self.bridge.update_display()
         # Everything that came is searched once: the next piece is searched from where this one ended.
         self.assertEqual(len(connection.inbound), len(body)); self.assertEqual(connection.scanned, len(body))
-        client.sendall(b"\n" + self.frame(channel, 1))
+        client.sendall(b"\n" + self.frame(channel, 2))
         malformed, answered = self.read_lines(client, 2)
         self.assertEqual(malformed["error"], "malformed request"); self.assertTrue(answered["ok"])
         self.assertEqual((len(connection.inbound), connection.scanned), (0, 0))
@@ -7119,6 +7720,88 @@ class LargeFrameTransportTests(_BridgeSocketFixture, unittest.TestCase):
         self.assertTrue(response["ok"]); self.assertEqual(len(response["result"]["tracks"]), 300)
         connection = self.bridge._connections[0]
         self.assertEqual((connection.pending_outbound(), len(connection.outbound), connection.sent), (0, 0, 0))
+
+
+class HostileLineTests(_BridgeSocketFixture, unittest.TestCase):
+    """Any local process can write to the bridge's port, with no secret: nothing it sends stops the tick."""
+
+    def test_a_method_that_isnt_a_string_is_refused_and_the_tick_goes_on(self):
+        hostile, _ = self.connect(); client, channel = self.connect()
+        hostile.sendall(b'{"method":[]}\n{"method":{}}\n')
+        refused = self.read_lines(hostile, 2)
+        self.assertEqual([(line["ok"], line["error"]) for line in refused], [(False, "invalid request")] * 2)
+        # Others are still served, and so is Live's queued work.
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+        ran = []
+        worker = threading.Thread(target=lambda: ran.append(self.bridge.queue.submit(lambda: "ran", deadline_ms=int(time.time() * 1000) + 5000)))
+        worker.start(); deadline = time.monotonic() + 5
+        while not ran and time.monotonic() < deadline: self.bridge.update_display(); time.sleep(0.001)
+        worker.join(timeout=5); self.assertEqual(ran, ["ran"])
+
+    def test_an_unexpected_failure_closes_that_connection_alone(self):
+        failing, failing_channel = self.connect(); client, channel = self.connect()
+        def fail(request): raise RuntimeError("boom")
+        with patch.object(remote_module, "_changes_live", fail):
+            failing.sendall(self.frame(failing_channel, 1)); deadline = time.monotonic() + 5
+            while len(self.bridge._connections) > 1 and time.monotonic() < deadline: self.bridge.update_display()
+        self.assertEqual(len(self.bridge._connections), 1, "the connection that failed is closed")
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+
+    def test_blank_lines_count_toward_the_ticks_budget(self):
+        client, channel = self.connect(); connection = self.bridge._connections[0]
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+        client.sendall(b"\n" * 200_000 + self.frame(channel, 2)); time.sleep(0.05)
+        self.bridge._pump(0.0)
+        self.assertGreater(len(connection.inbound), 100_000, "a spent budget stops after the first line, blank or not")
+        self.assertTrue(self.read_lines(client, 1)[0]["ok"], "the request after them is answered over the next ticks")
+
+    def closed(self, client, seconds=5.0):
+        """Tick until the bridge closes client's connection (its socket reads end of file)."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            self.bridge.update_display()
+            if select_module.select([client], [], [], 0.001)[0]:
+                try:
+                    if not client.recv(1 << 20): return True
+                except ConnectionResetError: return True
+        return False
+
+    def test_before_it_signs_in_a_connection_gets_a_first_requests_worth_read(self):
+        hostile, _ = self.connect(); connection = self.bridge._connections[0]; client, channel = self.connect()
+        def flood():
+            try: hostile.sendall(b"x" * (4 * 1024 * 1024))
+            except OSError: pass
+        sender = threading.Thread(target=flood, daemon=True); sender.start()
+        most = 0; deadline = time.monotonic() + 5
+        while connection in self.bridge._connections and time.monotonic() < deadline:
+            self.bridge.update_display(); most = max(most, len(connection.inbound))
+        self.assertNotIn(connection, self.bridge._connections, "a first line past the cap is closed")
+        self.assertLessEqual(most, remote_module.MAX_UNAUTHENTICATED_BYTES + 1, "and no more than that was read")
+        hostile.close(); sender.join(timeout=5)
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+
+    def test_answers_an_unknown_connection_isnt_reading_close_it(self):
+        hostile, _ = self.connect()
+        hostile.sendall(b"{}\n" * 4000)
+        self.assertTrue(self.closed(hostile))
+
+    def test_a_connection_that_never_signs_in_is_closed_after_a_while(self):
+        idle, _ = self.connect(); client, channel = self.connect()
+        client.sendall(self.frame(channel, 1)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+        with patch.object(remote_module, "AUTHENTICATION_SECONDS", 0.05):
+            self.assertTrue(self.closed(idle))
+            for _ in range(20): self.bridge.update_display()
+        self.assertEqual(len(self.bridge._connections), 1, "the signed-in one stays, however quiet")
+        client.sendall(self.frame(channel, 2)); self.assertTrue(self.read_lines(client, 1)[0]["ok"])
+
+    def test_requests_sent_right_behind_the_first_are_read_once_it_signs_in(self):
+        # Kumi's first request is a status, but others may follow it before its answer comes.
+        client, channel = self.connect()
+        big = self.frame(channel, 2, method="invoke", operation="browser.search", args={"query": "x" * 300_000})
+        client.sendall(self.frame(channel, 1) + big + self.frame(channel, 3))
+        answers = self.read_lines(client, 3)
+        self.assertEqual([answer["id"] for answer in answers], ["status-1", "invoke-2", "status-3"])
+        self.assertTrue(answers[0]["ok"] and answers[2]["ok"])
 
 
 def rich_song(links=True, playing=True, tracks=6):
@@ -7703,6 +8386,28 @@ class PythonRunTests(unittest.TestCase):
                 self.assertIsNone(self.mapper._undo_step)
         syntax = self.run_python("result =")
         self.assertEqual(syntax["error"]["type"], "SyntaxError")
+
+    def test_a_failure_after_the_code_ran_says_it_ran(self):
+        # Live changed, so a result too big for the wire, or an undo step Live won't close, mustn't read as a refusal.
+        result = self.run_python("song.tempo = 127\nresult = 'x' * 1048577")
+        self.assertEqual((result["ok"], result["error"]["type"], self.song.tempo), (False, remote_module.PYTHON_RAN, 127))
+        self.assertTrue(result["error"]["message"].startswith("The code ran, so Live may have changed, but then "), result["error"]["message"])
+        end = self.mapper._undo_step_operation
+        def refusing_end(operation, args, *rest):
+            if operation == "undo.step.end": raise RuntimeError("Live kept the step open")
+            return end(operation, args, *rest)
+        with patch.object(self.mapper, "_undo_step_operation", refusing_end): kept = self.run_python("song.tempo = 128")
+        self.assertEqual((kept["ok"], kept["error"]["type"], self.song.tempo), (False, remote_module.PYTHON_RAN, 128))
+        # Refused before it ran: as before.
+        self.assertEqual(self.run_python("result =")["error"]["type"], "SyntaxError")
+
+    def test_printing_past_the_wire_limit_keeps_only_what_fits(self):
+        with patch.object(remote_module, "MAX_WIRE_STRING_LENGTH", 100):
+            result = self.run_python("for _ in range(1000): print('x' * 99)\nresult = 'done'")
+        self.assertEqual((result["ok"], result["result"], result["stdout"]), (True, "done", ("x" * 99 + "\n")[:100]))
+        output = remote_module._BoundedOutput(10)
+        for _ in range(1000): output.write("abcdef")
+        self.assertEqual((output.getvalue(), sum(len(part) for part in output._parts)), ("abcdefabcd", 10), "no more is held than is sent")
 
     def test_timeout_interrupts_a_loop_and_cleans_up(self):
         started = time.perf_counter()
@@ -8651,6 +9356,91 @@ class AutomationStepTests(unittest.TestCase):
         self.assertEqual(bridge.mapper.invoke("automation.step.insert", step(start=0.0, length=2.0, value=0.4)), {"inserted": 1}); self.assertEqual(clip.envelope.value_at_time(1.0), 0.4)
 
 
+    def curved_clip(self):
+        """A clip looping from beat 8 to 16 (its length 8, so the reads stop at 12), whose envelope holds a curved
+        event at 1, a plain one at 2 and one at 14, past the reads' range."""
+        clip = FakeAutomationClip(()); clip.length, clip.loop_start, clip.loop_end = 8.0, 8.0, 16.0
+        curved = FakeEnvelopeEvent(1.0, 0.3); curved.control_coefficients = types.SimpleNamespace(x1=0.1, y1=0.2, x2=0.3, y2=0.4)
+        clip.envelope.events = [curved, FakeEnvelopeEvent(2.0, 0.4), FakeEnvelopeEvent(14.0, 0.7)]
+        song = FakeSong(); song.tracks[0].clip_slots[0].clip = clip; mapper = LiveObjectMapper(song); snapshot = mapper.snapshot()
+        refs = {"clipRef": snapshot["tracks"][0]["clips"][0]["ref"], "parameterRef": snapshot["tracks"][0]["devices"][0]["parameters"][0]["ref"]}
+        def fence():
+            return {**refs, "expectedAuthorityDigest": mapper._envelope_authority_digest(refs["clipRef"], refs["parameterRef"]), "expectedEnvelopeRevision": mapper.invoke("automation.envelope.read", refs)["revision"]}
+        return clip, mapper, fence, list(clip.envelope.events)
+
+    @staticmethod
+    def held(clip):
+        curve = lambda event: (lambda c: (c.x1, c.y1, c.x2, c.y2) if c is not None else None)(getattr(event, "control_coefficients", None))
+        return [(event.time, event.value, curve(event)) for event in sorted(clip.envelope.events, key=lambda event: event.time)]
+
+    def test_a_failed_insert_takes_back_only_its_own_points(self):
+        clip, mapper, fence, before = self.curved_clip(); held = self.held(clip)
+        create = clip.envelope.create_event
+        def refusing(event):
+            create(event)
+            if event.value == 0.75: raise RuntimeError("injected event failure")
+        clip.envelope.create_event = refusing
+        with self.assertRaisesRegex(RuntimeError, "injected event failure"): mapper.invoke("automation.point.insert", {**fence(), "points": [{"time": 3.0, "value": 0.5}, {"time": 4.0, "value": 0.75}]})
+        self.assertEqual(self.held(clip), held, "the curve and the event past the reads' range are as they were")
+        self.assertEqual([id(event) for event in sorted(clip.envelope.events, key=lambda event: event.time)], [id(event) for event in before], "and untouched: only the inserted points went")
+
+    def test_a_failed_range_delete_puts_back_its_range_whole(self):
+        clip, mapper, fence, before = self.curved_clip(); held = self.held(clip)
+        delete = clip.envelope.delete_events_in_range
+        def deleting_too_much(start, end): delete(start, end + 1.0)  # Live took the curved one's neighbour and the next beat too
+        clip.envelope.delete_events_in_range = deleting_too_much
+        with self.assertRaisesRegex(ValueError, "changed unexpected points"): mapper.invoke("automation.point.delete", {**fence(), "from": 0.5, "to": 1.5})
+        self.assertEqual(self.held(clip), held)
+
+    def test_a_failed_envelope_delete_brings_every_event_back_with_its_curve(self):
+        clip, mapper, fence, before = self.curved_clip(); held = self.held(clip)
+        def failing_clear(_parameter): clip.envelope.events = clip.envelope.events[:1]; raise RuntimeError("injected clear failure")
+        clip.clear_envelope = failing_clear
+        with self.assertRaisesRegex(RuntimeError, "injected clear failure"): mapper.invoke("automation.envelope.delete", fence())
+        self.assertEqual(self.held(clip), held)
+
+    def test_a_rollback_makes_events_in_the_parameters_own_terms(self):
+        # Like Track Volume on Live 12.4: events read as linear gain (here the square), but a new event takes the fader's value.
+        class GainEnvelope(FakeStepEnvelope):
+            def create_event(self, event):
+                made = FakeEnvelopeEvent(event.time, event.value ** 2)
+                if getattr(event, "control_coefficients", None) is not None: made.control_coefficients = event.control_coefficients
+                self.events.append(made)
+            def value_at_time(self, time): return FakeStepEnvelope.value_at_time(self, time) ** 0.5
+        clip, mapper, fence, before = self.curved_clip()
+        clip.envelope = GainEnvelope(clip, [FakeEnvelopeEvent(event.time, event.value ** 2) for event in before]); clip.envelope.events[0].control_coefficients = before[0].control_coefficients
+        clip.create_automation_envelope = lambda _parameter: setattr(clip, "envelope", GainEnvelope(clip)) or clip.envelope
+        held = self.held(clip); delete = clip.envelope.delete_events_in_range
+        clip.envelope.delete_events_in_range = lambda start, end: delete(start, end + 1.0)
+        with self.assertRaisesRegex(ValueError, "changed unexpected points"): mapper.invoke("automation.point.delete", {**fence(), "from": 0.5, "to": 1.5})
+        self.assertEqual(self.held(clip), held, "read back as they were, curve included")
+
+    def test_a_step_beside_a_ramp_comes_back_exact(self):
+        # A ramp runs into a step and on from it: each of the step's values is that side's limit, not a reading beside it.
+        class RampEnvelope(FakeStepEnvelope):
+            def create_event(self, event):
+                made = FakeEnvelopeEvent(event.time, struct.unpack("f", struct.pack("f", event.value))[0])  # Live keeps 32-bit floats
+                if getattr(event, "control_coefficients", None) is not None: made.control_coefficients = event.control_coefficients
+                self.events.append(made)
+            def value_at_time(self, time):
+                ordered = sorted(self.events, key=lambda event: event.time); before = [event for event in ordered if event.time <= time]; after = [event for event in ordered if event.time > time]
+                if not before or not after: return (before or ordered)[-1 if before else 0].value
+                return before[-1].value + (after[0].value - before[-1].value) * (time - before[-1].time) / (after[0].time - before[-1].time)
+        clip, mapper, fence, _ = self.curved_clip()
+        clip.envelope = RampEnvelope(clip, [FakeEnvelopeEvent(time, value) for time, value in ((2.0, 0.0), (3.0, 1.0), (3.0, 0.25), (4.0, 0.75))])
+        clip.create_automation_envelope = lambda _parameter: setattr(clip, "envelope", RampEnvelope(clip)) or clip.envelope
+        held = self.held(clip); delete = clip.envelope.delete_events_in_range
+        clip.envelope.delete_events_in_range = lambda start, end: delete(start, end + 1.0)
+        with self.assertRaisesRegex(ValueError, "changed unexpected points"): mapper.invoke("automation.point.delete", {**fence(), "from": 2.5, "to": 3.5})
+        self.assertEqual(self.held(clip), held, "the step's two values exactly, with the ramps either side")
+
+    def test_a_step_live_holds_wrong_puts_back_its_span_and_nothing_else(self):
+        clip, mapper, fence, before = self.curved_clip(); held = self.held(clip); clip.envelope.halve_steps = True
+        with self.assertRaisesRegex(ValueError, "^automation step was not confirmed$"): mapper.invoke("automation.step.insert", {**fence(), "start": 4.0, "length": 2.0, "value": 0.8})
+        self.assertEqual(self.held(clip), held)
+        self.assertEqual([id(event) for event in sorted(clip.envelope.events, key=lambda event: event.time)], [id(event) for event in before])
+
+
 def state_revision(state):
     """A fence as the host computes it: sha-256 of the canonical state."""
     return hashlib.sha256(LiveObjectMapper._bounded_canonical(state).encode()).hexdigest()
@@ -9328,6 +10118,47 @@ class ReadBudgetTests(unittest.TestCase):
             spent = remote_module._ReadBudget(0); roomy = remote_module._ReadBudget(10)
             self.assertEqual([spent.room(), spent.room()], [True, False])
             self.assertEqual([roomy.room(), roomy.room(), roomy.room()], [True, True, True])
+
+    def test_a_filter_only_whole_rows_have_builds_a_pages_worth_of_them(self):
+        song, mapper = self.set(tracks=12)
+        for index, track in enumerate(song.tracks): track.is_grouped = index % 3 == 0
+        fields = ["name", "isGrouped"]; unbudgeted = mapper.discover("track", 100, None, None, {"isGrouped": True}, fields)["items"]
+        mapper.read_budget_seconds = 0; built = []; whole = mapper._whole_track_row
+        mapper._whole_track_row = lambda index: built.append(index) or whole(index)
+        first = mapper.discover("track", 100, None, None, {"isGrouped": True}, fields, budgeted=True)
+        self.assertEqual((len(built), first["truncated"]), (1, True), "a spent budget builds one whole row a page")
+        items, pages = read_all(mapper, "track", fields=fields, filters={"isGrouped": True})
+        self.assertEqual(items, unbudgeted); self.assertEqual([item["name"] for item in items], ["Track 1", "Track 4", "Track 7", "Track 10"])
+        self.assertEqual(pages, 12)
+
+    def test_a_whole_row_filter_under_a_parent_lists_only_the_sets_tracks(self):
+        # A track's parent is the Set: under another parent the list is empty, paged by the budget or not.
+        song, mapper = self.set(tracks=6)
+        for index, track in enumerate(song.tracks): track.is_grouped = index % 2 == 0
+        snapshot = mapper.snapshot(); set_ref, scene_ref = snapshot["set"]["ref"], snapshot["scenes"][0]["ref"]; fields = ["name", "isGrouped"]
+        for parent in (set_ref, scene_ref):
+            unpaged = mapper.discover("track", 100, None, parent, {"isGrouped": True}, fields)["items"]
+            paged, _ = read_all(mapper, "track", parent=parent, fields=fields, filters={"isGrouped": True})
+            self.assertEqual(paged, unpaged, parent)
+        self.assertEqual(len(unpaged), 0, "nothing under a scene"); self.assertEqual(len(paged), 0)
+        self.assertEqual([item["parentRef"] for item in read_all(mapper, "track", parent=set_ref, fields=fields, filters={"isGrouped": True})[0]], [set_ref] * 3)
+
+    def test_arrangement_clips_under_a_parent_that_isnt_a_track_are_none_without_building_any(self):
+        song, mapper = self.set(); snapshot = mapper.snapshot(); built = []; row = mapper._arrangement_clip_row
+        mapper._arrangement_clip_row = lambda *args: built.append(True) or row(*args)
+        for parent in (snapshot["set"]["ref"], snapshot["scenes"][0]["ref"]):
+            self.assertEqual(mapper.discover("arrangement_clip", 10, None, parent)["items"], [])
+        self.assertEqual(built, [], "no clip row is built to be thrown away")
+        # Where Live lists the Arrangement's clips on the Song, the Set is their parent, and they're listed under it.
+        clip = song.tracks[0].arrangement_clips[0]; song.tracks[0].arrangement_clips = []; song.arrangement_clips = [clip]
+        listed = mapper.discover("arrangement_clip", 10, None, snapshot["set"]["ref"])["items"]
+        self.assertEqual([(item["parentRef"], item["objectIdentity"]) for item in listed], [(snapshot["set"]["ref"], mapper._capture_object_identity(clip))])
+
+    def test_a_budgeted_snapshot_without_a_track_window_or_focus_is_whole(self):
+        song, mapper = self.set(); mapper.read_budget_seconds = 0
+        for args in ({"parts": ["tracks", "playback"]}, {"scenes": {"from": 0, "count": 1}}):
+            rows = mapper.snapshot(args, budgeted=True)["tracks"]
+            self.assertEqual([row.get("light") for row in rows], [None, None, None], args)
 
     def test_a_snapshot_window_ends_and_a_focus_goes_light_when_the_budget_is_spent(self):
         song, mapper = self.set(); mapper.read_budget_seconds = 0

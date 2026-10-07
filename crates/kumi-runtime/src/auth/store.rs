@@ -61,7 +61,10 @@ pub trait CredentialStore {
     /// Read-modify-write under an exclusive cross-process lock; None removes the entry.
     async fn update(&self, provider: &str, change: CredentialChange) -> Result<Option<Credential>, RuntimeError>;
 }
-const LOCK_STALE_MS: i64 = 30_000;
+/// How old a lock is before it's taken for one a stopped Kumi left: longer than any hold, a token refresh (it gives up
+/// at 30 s) and on Windows the new file's owner-only step (30 s at most) together. At 30 s a slow refresh's lock was
+/// broken, and two processes posted one rotating token.
+const LOCK_STALE_MS: i64 = 90_000;
 const LOCK_WAIT_MS: i64 = 10_000;
 #[derive(Clone)]
 pub struct FileCredentialStore {
@@ -78,10 +81,145 @@ fn auth(message: impl Into<String>) -> RuntimeError {
     KumiError::new(FailureKind::Auth, message).into()
 }
 
+// On Windows the credential file is made owner-only as the bridge makes its own files: a protected DACL whose one rule
+// gives the current user full control, then checked. These are the twins of delivery_acl.rs's WINDOWS_ACL_TARGET,
+// WINDOWS_ACL_CHECKS and SECURE_FILE (in ableton-mcp-server): keep them in step. KUMI_HOME or KUMI_AUTH_FILE can put
+// auth.json where other accounts read (D:\kumi), and login says it's owner-only.
+const ACL_TARGET: &str = "$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:KUMI_ACL_PATH));$sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User;";
+const ACL_CHECKS: &str = "$c=[System.IO.File]::GetAccessControl($p);if ($c.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { exit 2 }if (-not $c.AreAccessRulesProtected) { exit 3 }$rules=@($c.Access); if ($rules.Count -ne 1) { exit 4 }$rule=$rules[0];if ($rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { exit 5 }if ($rule.IsInherited) { exit 6 }if ($rule.AccessControlType.ToString() -ne 'Allow') { exit 7 }if (($rule.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::FullControl) -ne [System.Security.AccessControl.FileSystemRights]::FullControl) { exit 8 }exit 0";
+const SECURE_FILE: &str = "$a=New-Object System.Security.AccessControl.FileSecurity;$a.SetAccessRuleProtection($true,$false);$rule=New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($sid,[System.Security.AccessControl.FileSystemRights]::FullControl,[System.Security.AccessControl.AccessControlType]::Allow);[void]$a.AddAccessRule($rule);[System.IO.File]::SetAccessControl($p,$a);if ([System.IO.File]::GetAccessControl($p).GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { $o=New-Object System.Security.AccessControl.FileSecurity;$o.SetOwner($sid);[System.IO.File]::SetAccessControl($p,$o) };";
+/// What a check that failed found, by its exit code (as delivery_acl.rs says them).
+fn acl_reason(code: i32) -> Option<&'static str> {
+    match code {
+        2 => Some("its owner isn't you"),
+        3 => Some("it inherits its folder's permissions"),
+        4 => Some("it has more than one access rule"),
+        5 => Some("an access rule is for another account"),
+        6 => Some("an access rule is inherited"),
+        7 => Some("an access rule isn't an allow rule"),
+        8 => Some("an access rule doesn't give full control"),
+        _ => None,
+    }
+}
+/// Runs an ACL script on `path` in Windows PowerShell, with no window, nothing on stdin and at most `timeout_ms`:
+/// Ok when it exits 0, else why not.
+fn run_acl(path: &Path, script: &str, timeout_ms: u64) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::{io::Read, process::Stdio};
+    let mut command = std::process::Command::new(crate::system::system_program_default(crate::system::SystemProgram::Powershell));
+    command
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .env("KUMI_ACL_PATH", STANDARD.encode(path.to_string_lossy().as_bytes()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn().map_err(|error| format!("PowerShell didn't start ({error})"))?;
+    let stderr = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut said = vec![];
+        if let Some(stderr) = stderr {
+            let _ = stderr.take(64 * 1024).read_to_end(&mut said);
+        }
+        said
+    });
+    let start = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status.code()),
+            Ok(None) if start.elapsed() < Duration::from_millis(timeout_ms) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break Err("PowerShell didn't finish in time".to_string());
+            }
+            Err(error) => break Err(error.to_string()),
+        }
+    };
+    let said = String::from_utf8_lossy(&reader.join().unwrap_or_default()).replace(path.to_string_lossy().as_ref(), "<the file>");
+    match status? {
+        Some(0) => Ok(()),
+        Some(code) => Err(acl_reason(code)
+            .map(str::to_string)
+            .unwrap_or_else(|| kumi_common::js::string::head(kumi_common::js::string::trim(&said), 300))),
+        None => Err("PowerShell stopped".to_string()),
+    }
+}
+/// Gives the file a protected DACL with one rule, full control for you, and checks it took (Windows).
+fn make_owner_only(path: &Path) -> Result<(), String> {
+    run_acl(path, &format!("$ErrorActionPreference='Stop';{ACL_TARGET}{SECURE_FILE}{ACL_CHECKS}"), 30_000)
+}
+/// Whether the file is owner-only as Kumi makes it on Windows: you own it, and one rule, not inherited, gives you full
+/// control.
+pub fn windows_owner_only(path: &Path) -> bool {
+    run_acl(path, &format!("{ACL_TARGET}{ACL_CHECKS}"), 15_000).is_ok()
+}
+/// A new, empty credential file, readable and writable by you alone before anything is written to it, open for
+/// writing. On unix it's made with mode 0600. On Windows it's made, given the owner-only DACL and checked, then opened
+/// again sharing nothing: a handle another program opened before the DACL took would keep its access (Windows checks
+/// at open), so while one is open the file is refused.
+pub fn owner_only_new_file(path: &Path) -> Result<std::fs::File, RuntimeError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let created = options.open(path).map_err(io)?;
+    if !cfg!(windows) {
+        return Ok(created);
+    }
+    drop(created);
+    let folder = path.parent().unwrap_or(Path::new("."));
+    let refused = |why: String| {
+        auth(format!(
+            "Kumi couldn't keep credentials readable only by you in {} ({why}); keep them in your user folder (unset KUMI_HOME or KUMI_AUTH_FILE), or give that folder's permissions to you alone.",
+            folder.display()
+        ))
+    };
+    make_owner_only(path).map_err(refused)?;
+    let mut again = std::fs::OpenOptions::new();
+    again.write(true).truncate(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        again.share_mode(0);
+    }
+    // A scanner may hold a new file for a moment: tried a few times before it's refused.
+    let mut tries = 0;
+    loop {
+        match again.open(path) {
+            Ok(file) => return Ok(file),
+            Err(_) if tries < 5 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(error) => return Err(refused(format!("another program has it open: {error}"))),
+        }
+    }
+}
+/// Why a credential file written before Kumi made them owner-only couldn't be made so, said once (`secure_once`).
+static UNPROTECTED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// What the producer should hear, once, when an older credential file couldn't be made readable only by them.
+pub fn unprotected_notice() -> Option<String> {
+    UNPROTECTED.lock().ok().and_then(|mut said| said.take())
+}
+/// Whether this process looks at the credential file at `path` for the first time (`secure_once`).
+fn first_look(path: &Path) -> bool {
+    static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> = std::sync::LazyLock::new(Default::default);
+    SEEN.lock().map(|mut seen| seen.insert(path.to_path_buf())).unwrap_or(false)
+}
+
 impl FileCredentialStore {
     async fn read(&self) -> Result<Value, RuntimeError> {
         let text: Result<Result<String, RuntimeError>, std::io::Error> = async {
-            // Windows profile folders supply the privacy guarantee; POSIX mode bits are checked.
+            // The mode bits are checked here. On Windows each write makes the file owner-only, and one written before
+            // Kumi did is made so where it is, once a process (`secure_once`).
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -125,22 +263,54 @@ impl FileCredentialStore {
         let mut random = [0u8; 6];
         rand::rng().fill_bytes(&mut random);
         let temporary = PathBuf::from(format!("{}.{}.{}.tmp", self.path.display(), std::process::id(), hex::encode(random)));
-        let result = async {
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            options.mode(0o600);
-            let mut handle = options.open(&temporary).await?;
-            handle.write_all(file_text(data).as_bytes()).await?;
-            handle.sync_all().await?;
-            drop(handle);
-            fs::rename(&temporary, &self.path).await
-        }
-        .await;
+        let (staged, text) = (temporary.clone(), file_text(data));
+        // Owner-only before any credential goes in (on Windows a PowerShell run, about a second): on a blocking thread.
+        let written = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            let mut file = owner_only_new_file(&staged)?;
+            file.write_all(text.as_bytes()).map_err(io)?;
+            file.sync_all().map_err(io)
+        })
+        .await
+        .unwrap_or_else(|error| Err(RuntimeError::plain(error.to_string())));
+        // A rename keeps the file's DACL, so auth.json is owner-only from the moment it's there.
+        let result = match written {
+            Ok(()) => fs::rename(&temporary, &self.path).await.map_err(io),
+            Err(error) => Err(error),
+        };
         if result.is_err() {
             let _ = fs::remove_file(&temporary).await;
         }
-        result.map_err(io)
+        result
+    }
+    /// Once a process, on Windows: a credential file written before Kumi made them owner-only is given the owner-only
+    /// DACL where it is (an API key isn't rewritten otherwise until the next sign-in). Its bytes stay as they are, and
+    /// no lock is needed: a writer's next file is owner-only already, so whichever file this reaches ends up so.
+    async fn secure_once(&self) {
+        if !cfg!(windows) || !first_look(&self.path) || fs::metadata(&self.path).await.is_err() {
+            return;
+        }
+        let path = self.path.clone();
+        let failed = tokio::task::spawn_blocking(move || {
+            if windows_owner_only(&path) {
+                return None;
+            }
+            make_owner_only(&path).err().map(|why| {
+                let folder = path.parent().unwrap_or(Path::new(".")).display().to_string();
+                format!(
+                    "Kumi couldn't make {} readable only by you ({why}); keep it in your user folder (unset KUMI_HOME or KUMI_AUTH_FILE), or give {folder}'s permissions to you alone.",
+                    path.display()
+                )
+            })
+        })
+        .await
+        .ok()
+        .flatten();
+        // Told once, at the next start notice: refusing the read would only lock the producer out of credentials that
+        // are readable already.
+        if let (Some(said), Ok(mut unprotected)) = (failed, UNPROTECTED.lock()) {
+            *unprotected = Some(said);
+        }
     }
     pub async fn update_with<F, Fut>(&self, provider: &str, change: F) -> Result<Option<Credential>, RuntimeError>
     where
@@ -149,6 +319,10 @@ impl FileCredentialStore {
     {
         let lock = PathBuf::from(format!("{}.lock", self.path.display()));
         self.mkdir().await?;
+        // Written in the lock, it says whose the lock is: a release removes only its own.
+        let mut nonce = [0u8; 16];
+        rand::rng().fill_bytes(&mut nonce);
+        let nonce = hex::encode(nonce);
         let deadline = now_ms() + LOCK_WAIT_MS;
         loop {
             let mut options = fs::OpenOptions::new();
@@ -156,8 +330,17 @@ impl FileCredentialStore {
             #[cfg(unix)]
             options.mode(0o600);
             match options.open(&lock).await {
-                Ok(handle) => {
+                Ok(mut handle) => {
+                    let written = async {
+                        handle.write_all(nonce.as_bytes()).await?;
+                        handle.flush().await
+                    }
+                    .await;
                     drop(handle);
+                    if let Err(error) = written {
+                        let _ = fs::remove_file(&lock).await;
+                        return Err(io(error));
+                    }
                     break;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -184,7 +367,7 @@ impl FileCredentialStore {
                 Err(error) => return Err(io(error)),
             }
         }
-        let mut guard = LockGuard(Some(lock));
+        let mut guard = LockGuard(Some((lock, nonce)));
         let result = async {
             let mut data = self.read().await?;
             let current = data["credentials"]
@@ -207,9 +390,15 @@ impl FileCredentialStore {
             Ok(next)
         }
         .await;
-        if let Some(lock) = guard.0.take() {
-            match fs::remove_file(lock).await {
-                Ok(()) => {}
+        if let Some((lock, nonce)) = guard.0.take() {
+            // Broken as stale while this held it, the lock is another's now: it stays.
+            match fs::read(&lock).await {
+                Ok(held) if held == nonce.as_bytes() => match fs::remove_file(&lock).await {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(io(error)),
+                },
+                Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(io(error)),
             }
@@ -217,11 +406,14 @@ impl FileCredentialStore {
         result
     }
 }
-struct LockGuard(Option<PathBuf>);
+/// The lock this holds, and its nonce, removed if it's still this one's when the hold ends early.
+struct LockGuard(Option<(PathBuf, String)>);
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        if let Some(lock) = &self.0 {
-            let _ = std::fs::remove_file(lock);
+        if let Some((lock, nonce)) = &self.0 {
+            if std::fs::read(lock).is_ok_and(|held| held == nonce.as_bytes()) {
+                let _ = std::fs::remove_file(lock);
+            }
         }
     }
 }
@@ -231,6 +423,7 @@ impl CredentialStore for FileCredentialStore {
         &self.path
     }
     async fn get(&self, provider: &str) -> Result<Option<Credential>, RuntimeError> {
+        self.secure_once().await;
         self.read().await?["credentials"]
             .get(provider)
             .cloned()
@@ -239,6 +432,7 @@ impl CredentialStore for FileCredentialStore {
             .map_err(|_| auth("Refusing to store a malformed credential."))
     }
     async fn list(&self) -> Result<IndexMap<String, Credential>, RuntimeError> {
+        self.secure_once().await;
         self.read().await?["credentials"]
             .as_object()
             .expect("validated credentials")

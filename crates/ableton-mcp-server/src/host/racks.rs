@@ -22,8 +22,17 @@ fn strict(a: Option<&Value>, b: Option<&Value>) -> bool {
         _ => a == b,
     }
 }
+/// A rack's view state as its row has it: the Remote Script sends it as the device's `view` (Live's
+/// `RackDevice.View`), the simulator as `rackView`.
+fn rack_view(device: &Value) -> &Value {
+    if device["rackView"].is_object() {
+        &device["rackView"]
+    } else {
+        &device["view"]
+    }
+}
 fn view_state(device: &Value) -> Value {
-    json!({"padScrollPosition":device["rackView"]["padScrollPosition"],"showChainDevices":device["rackView"]["showChainDevices"]})
+    json!({"padScrollPosition":rack_view(device)["padScrollPosition"],"showChainDevices":rack_view(device)["showChainDevices"]})
 }
 fn title(view: bool) -> &'static str {
     if view {
@@ -116,7 +125,7 @@ impl McpHost {
     if let Some(value)=p.get("selectedChainRef"){if !value.is_null(){if !is_non_empty_string(value,256){return Ok(error(id,-32602,"selectedChainRef is invalid",None))}self.chain_row(&snapshot,value.as_str().unwrap())?;}proposed["selectedChainRef"]=value.clone()}
     for(field,low)in [("selectedPadIndex",-1.),("padScrollPosition",0.)]{if let Some(value)=p.get(field){if !is_integer_in_range(value,low,127.){return Ok(error(id,-32602,&format!("{field} is invalid"),None))}proposed[field]=value.clone()}}
     if let Some(value)=p.get("showChainDevices"){if !value.is_boolean(){return Ok(error(id,-32602,"showChainDevices must be boolean",None))}proposed["showChainDevices"]=value.clone()}
-    prior=json!({"selectedChainRef":row.device["rackView"]["selectedChainRef"],"selectedPadIndex":row.device["rackView"]["selectedPadIndex"],"padScrollPosition":row.device["rackView"]["padScrollPosition"],"showChainDevices":row.device["rackView"]["showChainDevices"]});payload=json!({"ref":p["rackRef"]});extend(&mut payload,&proposed);
+    let rack=rack_view(&row.device);prior=json!({"selectedChainRef":rack["selectedChainRef"],"selectedPadIndex":rack["selectedPadIndex"],"padScrollPosition":rack["padScrollPosition"],"showChainDevices":rack["showChainDevices"]});payload=json!({"ref":p["rackRef"]});extend(&mut payload,&proposed);
    }else{
     let _revision=self.rack_state_revision(&row.device)?;
     payload=json!({"action":p["action"],"ref":p["rackRef"]});if p["action"]=="set"{
@@ -163,8 +172,7 @@ impl McpHost {
    {let mut row=record.borrow_mut();row["applyKey"]=p["idempotencyKey"].clone();row["state"]=json!("applied")}let mut response=json!({"transactionId":t["id"],"state":"applied"});if let Some(v)=result.get("revision"){response["revision"]=v.clone()}if !view{if is_non_empty_string(&result["chainRef"],256){response["chainRef"]=result["chainRef"].clone()}let latest=record.borrow();if latest["created"]["placement"].is_object(){response["placement"]=latest["created"]["placement"].clone()}if let Some(v)=latest["created"].get("visibleMacroCount"){response["visibleMacroCount"]=v.clone()}}response["idempotent"]=json!(false);Ok(success_text(id,&response))
   }.await;
         Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, &format!("{} state is uncertain; perform fresh discovery before retrying.", title(view)))
+            self.apply_failed(id, &record, &e, &format!("{} state is uncertain; perform fresh discovery before retrying.", title(view)))
         }))
     }
     pub async fn undo_rack_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {
@@ -213,7 +221,7 @@ impl McpHost {
             if !reconcile {
                 if view {
                     for field in ["padScrollPosition", "showChainDevices"] {
-                        if t["payload"].get(field).is_some_and(|v| !strict(row.device["rackView"].get(field), Some(v))) {
+                        if t["payload"].get(field).is_some_and(|v| !strict(rack_view(&row.device).get(field), Some(v))) {
                             return Ok(transaction_error(id, "rack view changed after apply; undo refused"));
                         }
                     }

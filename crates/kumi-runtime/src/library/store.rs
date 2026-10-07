@@ -4,6 +4,7 @@
 //! saying so; now and then the log is written afresh with only what stands. A reader keeps its place
 //! and reads only what was added since.
 
+use std::collections::HashMap;
 use std::io::{self, SeekFrom};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
@@ -122,6 +123,11 @@ async fn write_private(path: &Path, text: &str) -> io::Result<()> {
     file.flush().await
 }
 
+/// A log's bytes as text, in place when they're UTF-8 (a copy, with U+FFFD, only when they aren't).
+fn text_of(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+}
+
 fn as_io(error: serde_json::Error) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
 }
@@ -174,7 +180,7 @@ impl<T: LogEntry> Log<T> {
         if !self.is_mine(&header) {
             return IndexMap::new();
         }
-        let text = tokio::fs::read(&self.file).await.map(|bytes| String::from_utf8_lossy(&bytes).into_owned()).unwrap_or_default();
+        let text = tokio::fs::read(&self.file).await.map(text_of).unwrap_or_default();
         let mut entries = IndexMap::new();
         let body = match text.find('\n') {
             Some(at) => &text[at + 1..],
@@ -217,13 +223,18 @@ impl<T: LogEntry> Log<T> {
             generation: uuid::Uuid::new_v4().to_string(),
             created: kumi_common::time::now_ms(),
         };
-        let mut lines = vec![stringify(&serde_json::to_value(&header).map_err(as_io)?)];
-        for entry in entries {
-            lines.push(stringify(&serde_json::to_value(entry).map_err(as_io)?));
-        }
         let temporary = folder.join(format!(".{}-{}", self.kind, uuid::Uuid::new_v4()));
         let written = async {
-            write_private(&temporary, &format!("{}\n", lines.join("\n"))).await?;
+            // A line at a time through a buffer: the log is never held whole in memory (nor its lines, nor their join).
+            // A megabyte of it: a 100 MB log is a hundred writes, not tokio's default's 12,800.
+            let mut file = tokio::io::BufWriter::with_capacity(1 << 20, open_private(&temporary, false).await?);
+            file.write_all(stringify(&serde_json::to_value(&header).map_err(as_io)?).as_bytes()).await?;
+            file.write_all(b"\n").await?;
+            for entry in entries {
+                file.write_all(stringify(&serde_json::to_value(entry).map_err(as_io)?).as_bytes()).await?;
+                file.write_all(b"\n").await?;
+            }
+            file.flush().await?;
             replace(&temporary, &self.file).await
         }
         .await;
@@ -246,22 +257,36 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-/// Apply a log's lines to `entries`; a line cut off by a crash is left out.
+/// Apply a log's lines to `entries`; a line cut off by a crash is left out. A path's last line decides: gone, it
+/// leaves; learned, it goes to the end, so the entries come out as applying the lines one by one leaves them. The map
+/// is gone through once for all the lines (removing one entry at a time moves every entry after it).
 fn apply_lines<T: LogEntry>(text: &str, entries: &mut IndexMap<String, T>) {
-    for line in text.split('\n') {
+    // Each path's last line, numbered; None is gone.
+    let mut last: HashMap<String, (usize, Option<T>)> = HashMap::new();
+    for (number, line) in text.split('\n').enumerate() {
         if line.is_empty() {
             continue;
         }
         let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
         let Some(path) = value.get("path").and_then(Value::as_str).map(str::to_string) else { continue };
-        if value.get("gone").is_some_and(truthy) {
-            entries.shift_remove(&path);
+        let entry = if value.get("gone").is_some_and(truthy) {
+            None
         } else {
             // TS: kept a line as parsed; one that isn't an entry of this kind is left out here.
             let Ok(entry) = serde_json::from_value::<T>(value) else { continue };
-            entries.shift_remove(&path);
-            entries.insert(path, entry);
-        }
+            Some(entry)
+        };
+        last.insert(path, (number, entry));
+    }
+    if last.keys().any(|path| entries.contains_key(path)) {
+        entries.retain(|path, _| !last.contains_key(path));
+    }
+    let mut learned: Vec<(usize, String, T)> =
+        last.into_iter().filter_map(|(path, (number, entry))| entry.map(|entry| (number, path, entry))).collect();
+    learned.sort_unstable_by_key(|(number, _, _)| *number);
+    entries.reserve(learned.len());
+    for (_, path, entry) in learned {
+        entries.insert(path, entry);
     }
 }
 
@@ -323,12 +348,12 @@ impl<T: LogEntry> LogReader<T> {
         let Some(end) = buffer[..filled].iter().rposition(|byte| *byte == b'\n') else {
             return Ok(Refreshed { changed: reloaded, reloaded });
         };
-        let mut text = String::from_utf8_lossy(&buffer[..=end]).into_owned();
-        if self.offset == 0 {
-            text = text[text.find('\n').map(|at| at + 1).unwrap_or(0)..].to_string();
-        }
+        buffer.truncate(end + 1);
+        let text = text_of(buffer);
+        // The header, skipped where it is.
+        let from = if self.offset == 0 { text.find('\n').map(|at| at + 1).unwrap_or(0) } else { 0 };
         self.offset += end as u64 + 1;
-        apply_chunked(&text, &mut self.entries).await;
+        apply_chunked(&text[from..], &mut self.entries).await;
         Ok(Refreshed { changed: true, reloaded })
     }
 }
@@ -470,6 +495,96 @@ mod tests {
         assert_eq!(newer.load().await.len(), 1);
         assert_eq!(reader.refresh().await.unwrap(), Refreshed { changed: true, reloaded: true });
         assert!(reader.entries.is_empty());
+    }
+
+    /// What applying a log's lines one at a time leaves.
+    fn apply_one_by_one(text: &str, entries: &mut IndexMap<String, Sound>) {
+        for line in text.split('\n') {
+            let Ok(value) = serde_json::from_str::<Value>(line) else { continue };
+            let Some(path) = value.get("path").and_then(Value::as_str).map(str::to_string) else { continue };
+            if value.get("gone").is_some_and(truthy) {
+                entries.shift_remove(&path);
+            } else if let Ok(entry) = serde_json::from_value::<Sound>(value) {
+                entries.shift_remove(&path);
+                entries.insert(path, entry);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lines_applied_together_leave_what_applying_them_one_by_one_does() {
+        use rand::{Rng, SeedableRng};
+        let mut random = rand::rngs::StdRng::seed_from_u64(245);
+        for round in 0..200 {
+            let paths = random.random_range(1..40);
+            let mut text = String::new();
+            for number in 0..random.random_range(0..120) {
+                let path = format!("/s/{}.wav", random.random_range(0..paths));
+                let line = match random.random_range(0..10) {
+                    0..=4 => stringify(&serde_json::to_value(sound(&path, &format!("c{number}"))).unwrap()),
+                    5..=7 => stringify(&serde_json::to_value(Entry::gone(&path)).unwrap()),
+                    // Not a sound: left out, so it neither replaces nor removes.
+                    8 => format!("{{\"path\":\"{path}\",\"size\":\"big\"}}"),
+                    _ => format!("{{\"path\":\"{path}\",\"size\":1"),
+                };
+                text.push_str(&line);
+                text.push('\n');
+            }
+            let mut before = IndexMap::new();
+            for index in 0..random.random_range(0..20) {
+                before.insert(format!("/s/{index}.wav"), sound(&format!("/s/{index}.wav"), "old"));
+            }
+            let mut expected = before.clone();
+            apply_one_by_one(&text, &mut expected);
+            let mut whole = before.clone();
+            apply_lines(&text, &mut whole);
+            assert_eq!(whole.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>(), "round {round}");
+            // A reader's chunks, split anywhere between lines, leave the same.
+            let mut chunked = before.clone();
+            let mut at = 0;
+            while at < text.len() {
+                let from = (at + random.random_range(1..400)).min(text.len() - 1);
+                let end = text[from..].find('\n').map(|found| from + found).unwrap_or(text.len() - 1);
+                apply_lines(&text[at..=end], &mut chunked);
+                at = end + 1;
+            }
+            assert_eq!(chunked.iter().collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>(), "round {round}, chunked");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_log_written_afresh_is_its_header_then_a_line_per_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sounds.jsonl");
+        let log: Log<Sound> = Log::new(&file, "sounds", 1);
+        log.write([sound("/a.wav", "kick"), sound("/b.wav", "hat")].iter()).await.unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        let (header, rest) = text.split_once('\n').unwrap();
+        let header: Value = serde_json::from_str(header).unwrap();
+        assert_eq!((header["kumiLibrary"].as_str(), header["version"].as_u64()), (Some("sounds"), Some(1)));
+        assert_eq!(
+            rest,
+            "{\"path\":\"/a.wav\",\"size\":10,\"mtime\":20,\"class\":\"kick\"}\n{\"path\":\"/b.wav\",\"size\":10,\"mtime\":20,\"class\":\"hat\"}\n"
+        );
+        log.write(std::iter::empty()).await.unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.ends_with("}\n") && text.matches('\n').count() == 1, "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_line_that_isnt_utf8_reads_lossily_and_its_neighbours_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("sounds.jsonl");
+        let log: Log<Sound> = Log::new(&file, "sounds", 1);
+        log.append(&[sound("/a.wav", "kick")]).await.unwrap();
+        let mut bytes = std::fs::read(&file).unwrap();
+        bytes.extend_from_slice(b"{\"path\":\"/b\xff.wav\",\"size\":10,\"mtime\":20}\n");
+        bytes.extend_from_slice(b"{\"path\":\"/c.wav\",\"size\":10,\"mtime\":20,\"class\":\"hat\"}\n");
+        std::fs::write(&file, bytes).unwrap();
+        let mut reader: LogReader<Sound> = LogReader::new(&file, "sounds", 1);
+        reader.refresh().await.unwrap();
+        assert_eq!(reader.entries.keys().collect::<Vec<_>>(), ["/a.wav", "/b\u{fffd}.wav", "/c.wav"]);
+        assert_eq!(log.load().await.keys().cloned().collect::<Vec<_>>(), ["/a.wav", "/b\u{fffd}.wav", "/c.wav"]);
     }
 
     #[tokio::test]

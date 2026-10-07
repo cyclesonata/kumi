@@ -10,10 +10,24 @@ fn embedded_helpers_keep_their_hashes() {
     assert_eq!(HANDS_VERSION, 2);
     for (source, expected) in [
         (mac::MAC_SOURCE, "16045380d38220f9dfd1a6dd318dac9b655fc41758f2531efc46ab97f82a7ba3"),
-        (windows::WINDOWS_SOURCE, "355ee9c9143d57eb6fe0b3bbf2b792b0de168a9aa52fb2489fc8139fc84b2c9f"),
+        (windows::WINDOWS_SOURCE, "799ce14a0e66fadf1d34fd7c355a826525b9b647c63170a2c233ec07e35441ab"),
     ] {
         assert_eq!(hex::encode(Sha256::digest(source)), expected);
     }
+    // Windows PowerShell reads a script without a BOM in the console's code page: anything past ASCII is misread.
+    assert!(windows::WINDOWS_SOURCE.is_ascii());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn the_windows_script_is_written_whole_and_a_cut_off_one_is_written_again() {
+    let folder = tempfile::tempdir().unwrap();
+    let hands = folder.path().join("hands");
+    let script = windows_script(&hands).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), windows::WINDOWS_SOURCE);
+    // What a write cut short left under its name.
+    std::fs::write(&script, &windows::WINDOWS_SOURCE[..100]).unwrap();
+    assert_eq!(windows_script(&hands).await.unwrap(), script);
+    assert_eq!(std::fs::read_to_string(&script).unwrap(), windows::WINDOWS_SOURCE);
+    assert_eq!(std::fs::read_dir(&hands).unwrap().count(), 1, "no temporary file left");
 }
 #[cfg(unix)]
 fn script(folder: &Path, name: &str, text: &str) -> String {
@@ -40,6 +54,7 @@ while IFS= read -r line; do
  *'"button":"untrusted"'*) printf '{"id":%s,"ok":false,"error":"untrusted"}\n' "$id";;
  *'"button":"no-live"'*) printf '{"id":%s,"ok":false,"error":"no-live"}\n' "$id";;
  *'"button":"disabled"'*) printf '{"id":%s,"ok":false,"error":"disabled"}\n' "$id";;
+ *'"button":"latin1"'*) printf 'Caf\351 menu\n{"id":%s,"ok":true,"after":true}\n' "$id";;
  *'"button":"exit"'*) exit 0;;
  *'"op":"dialog"'*) printf '{"id":%s,"ok":true,"open":true,"title":"Export","words":["Choose a file"],"buttons":["Cancel","Export"]}\n' "$id";;
  *'"op":"windows"'*) printf '{"id":%s,"ok":true,"windows":[{"title":"Live","subrole":"AXStandardWindow"}]}\n' "$id";;
@@ -122,6 +137,29 @@ async fn requests_correlate_out_of_order_and_errors_timeout_and_cancellation_do_
 }
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn names_past_ascii_go_to_the_helper_as_escapes() {
+    let folder = tempfile::tempdir().unwrap();
+    let hands = persistent(helper(folder.path()), vec![], Some(1000));
+    // As the helper reads them, whatever its code page: ASCII.
+    let tracks = hands.tracks(&[Track { name: "Caf\u{e9} \u{65e5}\u{672c} \u{1f3b9}".into(), nth: None }], None).await.unwrap();
+    assert_eq!(tracks.fields["request"]["tracks"][0]["name"], "Caf\u{e9} \u{65e5}\u{672c} \u{1f3b9}");
+    let sent = std::fs::read(folder.path().join("requests")).unwrap();
+    assert!(sent.is_ascii(), "{}", String::from_utf8_lossy(&sent));
+    assert!(String::from_utf8_lossy(&sent).contains(r"Caf\u00e9 \u65e5\u672c \ud83c\udfb9"));
+    hands.close();
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_line_that_isnt_utf8_doesnt_stop_the_answers() {
+    let folder = tempfile::tempdir().unwrap();
+    let hands = persistent(helper(folder.path()), vec![], Some(1000));
+    // A line in a console's code page (Latin-1) before the answer: the answer still comes, and so do the next ones.
+    assert_eq!(hands.answer("latin1", None).await.unwrap().fields["after"], true);
+    assert!(hands.trusted(false).await.unwrap());
+    hands.close();
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn exited_helpers_restart_and_missing_helpers_report_failure() {
     let folder = tempfile::tempdir().unwrap();
     let hands = persistent(helper(folder.path()), vec![], Some(1000));
@@ -185,9 +223,23 @@ $group.Shortcut = [System.Windows.Forms.Shortcut]::CtrlG
 $group.add_Click({ Say 'group' })
 $freeze = $edit.MenuItems.Add('Freeze Track')
 $freeze.Enabled = $false
+# Titles past ASCII, made from ASCII: like Kumi's script, this file has no BOM.
+$cafe = 'Caf' + [char]0x00E9 + ' ' + [char]0x65E5 + [char]0x672C + ' ' + [char]::ConvertFromUtf32(0x1F3B9)
+$edit.MenuItems.Add($cafe) | Out-Null
 $create = $menu.MenuItems.Add('&Create')
 $create.MenuItems.Add('Insert &MIDI Track') | Out-Null
 $form.Menu = $menu
+# Live's track headers as UI Automation reads them, with two tracks whose names differ only in case. A WPF list, whose
+# automation name is its own: a WinForms ListBox is a native list box, and UI Automation names those its own way.
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, WindowsFormsIntegration
+$headers = New-Object System.Windows.Controls.ListBox
+[System.Windows.Automation.AutomationProperties]::SetName($headers, 'Track Headers')
+$headers.SelectionMode = [System.Windows.Controls.SelectionMode]::Extended
+foreach ($name in @('BASS', 'Bass', $cafe)) { [void]$headers.Items.Add($name) }
+$wpf = New-Object System.Windows.Forms.Integration.ElementHost
+$wpf.Dock = [System.Windows.Forms.DockStyle]::Fill
+$wpf.Child = $headers
+$form.Controls.Add($wpf)
 $form.add_Shown({ Say "ready $PID" })
 [System.Windows.Forms.Application]::Run($form)
 "#;
@@ -233,6 +285,8 @@ async fn on_windows_the_helper_uses_the_win32_menu_finds_the_owned_dialog_and_fi
     assert!(!find(&["Edit", "Freeze Track"]).unwrap().enabled);
     assert!(find(&["Create", "Insert MIDI Track"]).is_some());
     assert!(!menus.iter().any(|item| item.path.last().is_some_and(|title| title.is_empty() || title == "-")), "no separators");
+    // Past ASCII, whole: the script writes it as \u escapes, whatever the console's code page.
+    assert!(find(&["Edit", "Caf\u{e9} \u{65e5}\u{672c} \u{1f3b9}"]).is_some(), "{menus:?}");
 
     // Chosen without bringing the window to the front.
     let group = hands.menu(&["Edit".into(), "Group".into()], MenuOptions::default()).await.unwrap();
@@ -240,6 +294,17 @@ async fn on_windows_the_helper_uses_the_win32_menu_finds_the_owned_dialog_and_fi
     assert_eq!(next(&mut said).await.as_deref(), Some("group"));
     let freeze = hands.menu(&["Edit".into(), "Freeze Track".into()], MenuOptions::default()).await.unwrap();
     assert_eq!(freeze.error.as_deref(), Some("disabled"));
+
+    // A track is picked by its name exactly, as Kumi counts nth: "Bass" isn't "BASS", and "bass" is neither.
+    let picked = hands.tracks(&[Track { name: "Bass".into(), nth: Some(0.0) }], None).await.unwrap();
+    assert!(picked.ok, "{picked:?}");
+    assert_eq!(picked.fields["selected"], json!(["Bass"]));
+    let picked = hands.tracks(&[Track { name: "bass".into(), nth: Some(0.0) }], None).await.unwrap();
+    assert_eq!((picked.ok, &picked.fields["missing"]), (false, &json!(["bass"])), "{picked:?}");
+    // A name past ASCII goes to the script as escapes and comes back whole.
+    let picked = hands.tracks(&[Track { name: "Caf\u{e9} \u{65e5}\u{672c} \u{1f3b9}".into(), nth: Some(0.0) }], None).await.unwrap();
+    assert!(picked.ok, "{picked:?}");
+    assert_eq!(picked.fields["selected"], json!(["Caf\u{e9} \u{65e5}\u{672c} \u{1f3b9}"]));
     assert!(hands.dialog(None).await.unwrap() == Dialog { open: false, title: None, words: None, buttons: None, file: None });
 
     // An item that opens a modal prompt answers at once, and the prompt is the dialog: its own words and

@@ -164,6 +164,14 @@ local_test!(timeouts_and_signal_cancellation_reach_the_mcp_request_and_leave_the
     assert!(tools.call("server_status", object(json!({"action":"delay"})), abort::timeout(20), CallOptions::default()).await.is_err());
     sleep(Duration::from_millis(20)).await;
     assert_eq!(data(&call(&tools, "server_status", json!({})).await.unwrap())["cancelled"], 2);
+    // Dropped before it's answered (an outer timeout), a request is cancelled as at its own deadline.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(20),
+        tools.call("server_status", object(json!({"action":"delay"})), signal(), CallOptions::default()),
+    );
+    assert!(dropped.await.is_err());
+    sleep(Duration::from_millis(20)).await;
+    assert_eq!(data(&call(&tools, "server_status", json!({})).await.unwrap())["cancelled"], 3);
     tools.close().await.unwrap();
 });
 
@@ -265,6 +273,33 @@ local_test!(missing_capabilities_cannot_be_called_even_under_the_allowlist, {
     assert!(call(&tools, "live_status", json!({})).await.unwrap_err().to_string().contains("available"));
     tools.close().await.unwrap();
 });
+
+local_test!(a_bridge_that_exits_while_a_child_holds_its_pipes_is_seen_closed, {
+    // A host a bridge launched can keep the bridge's stdout and stderr open after the bridge is gone: its requests
+    // fail once it's gone, not at their timeouts.
+    let (_, tools) = open("normal", 20_000).await;
+    tools.refresh(signal()).await.unwrap();
+    let started = Instant::now();
+    assert!(call(&tools, "server_status", json!({"action":"exit-held"})).await.is_err());
+    assert!(started.elapsed() < Duration::from_secs(10), "{:?}", started.elapsed());
+    tools.close().await.unwrap();
+});
+
+#[test]
+fn a_closed_bridge_leaves_no_task_running_for_kumis_exit_to_wait_on() {
+    // Kumi's exit waits two seconds for its tasks: once the bridge has gone and its pipes have ended, nothing the
+    // transport started is left waiting (its exit watcher used to sleep a whole second after every exit).
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let _case = runtime.block_on(MCP_CASE.lock());
+    let local = tokio::task::LocalSet::new();
+    local.block_on(&runtime, async {
+        let (_, tools) = open("normal", 2000).await;
+        tools.refresh(signal()).await.unwrap();
+        tools.close().await.unwrap();
+    });
+    let drained = runtime.block_on(async { tokio::time::timeout(Duration::from_millis(900), local).await.is_ok() });
+    assert!(drained, "a task outlived the bridge");
+}
 
 local_test!(oversized_protocol_frame_closes_transport_and_invalidates_old_descriptors, {
     let (_, tools) = open("normal", 2000).await;
@@ -383,6 +418,16 @@ local_test!(reads_sent_together_share_one_reading_of_the_catalog_and_a_change_an
     }
     assert!(tools.has("live_status"));
     assert_eq!(endpoint.lists.get(), 2);
+    tools.close().await.unwrap();
+});
+local_test!(a_caller_that_gives_up_leaves_the_shared_reading_to_the_others_that_joined_it, {
+    // The first caller's short deadline (a status probe's) ended the reading for everyone who joined it.
+    let endpoint = Rc::new(ChangingEndpoint::default());
+    let tools = AllowedTools::new(endpoint.clone(), HashSet::new());
+    let (hasty, patient) = tokio::join!(tools.refresh(abort::timeout(5)), tools.refresh(signal()));
+    assert!(matches!(hasty, Err(RuntimeError::Aborted)), "{hasty:?}");
+    patient.unwrap();
+    assert!(tools.has("live_status"));
     tools.close().await.unwrap();
 });
 local_test!(a_discovery_page_the_remote_script_refuses_as_too_big_is_asked_again_at_100_rows_and_from_then_on, {

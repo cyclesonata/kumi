@@ -1,7 +1,7 @@
 //! One pass measures loudness, balance, stereo, dynamics, tempo, key, pitch, harmonics and movement.
 
 use super::{
-    decode::{open_audio, AudioError, AudioSource},
+    decode::{open_audio_to, AudioError, AudioSource},
     dsp::*,
 };
 use kumi_common::abort::{Signal, SignalExt};
@@ -109,8 +109,12 @@ pub struct AnalyzeOptions {
     pub signal: Option<Signal>,
     pub transcribe: bool,
 }
+/// How far into a file an analysis reads, in seconds (and a second more): no further is converted.
+pub fn reach(options: &AnalyzeOptions) -> f64 {
+    options.start.unwrap_or(0.0).max(0.0) + options.seconds.unwrap_or(720.0).clamp(0.0, 720.0) + 1.0
+}
 pub async fn analyze_file(path: &str, options: AnalyzeOptions) -> Result<Analysis, AudioError> {
-    let mut source = open_audio(path, options.signal.clone()).await?;
+    let mut source = open_audio_to(path, options.signal.clone(), Some(reach(&options))).await?;
     let result = analyze_source(&mut source, path, options).await;
     source.close().await?;
     result
@@ -803,7 +807,9 @@ fn amplitude_envelope(mono: &[f32], rate: f64) -> (Envelope, usize) {
     let attack_end = levels.iter().enumerate().position(|(i, v)| i as i64 >= start && *v >= peak * 0.9).map_or(-1, |i| i as i64);
     let end = levels.len() as i64 - 1 - levels.iter().rev().position(|v| *v > peak * 0.01).map_or(-1, |i| i as i64);
     let from = if peak_at < 0 { (levels.len() as i64 + peak_at).max(0) as usize } else { peak_at as usize };
-    let after = &levels[from.min(levels.len())..((end + 1).max(0) as usize).min(levels.len())];
+    // As JavaScript's slice: a start past the end is nothing (near-silent audio, all of it under the 1e-9 floor).
+    let to = ((end + 1).max(0) as usize).min(levels.len());
+    let after = &levels[from.min(to)..to];
     let sustain = if after.len() > 8 {
         percentile(&after[(after.len() as f64 * 0.4).floor() as usize..(after.len() as f64 * 0.8).floor() as usize], 0.5)
     } else {

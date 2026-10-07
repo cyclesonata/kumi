@@ -7,6 +7,7 @@ mod events;
 mod input;
 mod live;
 mod panels;
+mod records;
 mod setup;
 pub use setup::{waveform, LiveSetup, WAVE_WIDTH};
 
@@ -17,7 +18,7 @@ use super::{
     picker::{Picker, PickerItem},
     render::Renderer,
     scheduler::FrameScheduler,
-    screen::Rect,
+    screen::{Rect, Screen},
     style::{ColorDepth, StyleTable},
     tabs::{Hit, Tab, TabPanel, TabRow},
     transcript::{AnswerStatus, Entry, EntryRef, MemoryKind, NoticeTone, StepState, Transcript},
@@ -122,7 +123,7 @@ type Action = Rc<dyn Fn() -> LocalBoxFuture<'static, Result<(), RuntimeError>>>;
 type Choice = Rc<dyn Fn(PickerItem) -> LocalBoxFuture<'static, Result<(), RuntimeError>>>;
 type PanelRef = Rc<RefCell<Panel>>;
 enum Panel {
-    Pick { picker: Rc<RefCell<Picker>>, choose: Choice },
+    Pick { picker: Rc<RefCell<Picker>>, choose: Choice, choosing: Rc<Cell<bool>> },
     Key { provider: ProviderId, secret: String, checking: bool, status: Option<(String, NoticeTone)>, then: Option<Action> },
     ChatGpt { url: Option<String>, abort: Signal, then: Option<Action> },
     Btw { at: usize, scroll: i32 },
@@ -191,12 +192,14 @@ struct State {
     news: Option<EntryRef>,
     /// The version that news is since, where /changelog starts.
     news_since: Option<String>,
-    changes: Vec<ChangeRecord>,
+    /// Kumi's changes and what it kept, which HISTORY shows: changed only through its methods, which say so.
+    records: records::Records,
+    /// HISTORY's rows, made again when the records change or at another width.
+    history_rows: Option<(u64, i32, Rc<[TabRow]>)>,
     last_change: Option<(String, f64)>,
     last_action: Option<LastAction>,
     goal: Option<Value>,
     matching: Option<Value>,
-    kept: Vec<Rc<RefCell<Kept>>>,
     watching: bool,
     undoing: bool,
     hits: Vec<Hit>,
@@ -230,6 +233,9 @@ struct State {
     recall: Option<(usize, String)>,
     last_sent: Option<String>,
     tree: Option<DeviceTree>,
+    /// Bumped whenever `tree` is read again: its rows are made again only then, or for another focus.
+    tree_revision: u64,
+    tree_rows: Option<(u64, [Option<String>; 3], Rc<[TreeRow]>)>,
     tree_key: Option<String>,
     tree_reading: bool,
     tree_again: bool,
@@ -273,12 +279,12 @@ impl State {
             willington_off: false,
             news: None,
             news_since: None,
-            changes: vec![],
+            records: Default::default(),
+            history_rows: None,
             last_change: None,
             last_action: None,
             goal: None,
             matching: None,
-            kept: vec![],
             watching: false,
             undoing: false,
             hits: vec![],
@@ -310,6 +316,8 @@ impl State {
             recall: None,
             last_sent: None,
             tree: None,
+            tree_revision: 0,
+            tree_rows: None,
             tree_key: None,
             tree_reading: false,
             tree_again: false,
@@ -338,6 +346,8 @@ struct Inner {
     state: RefCell<State>,
     tty: Tty,
     renderer: RefCell<Renderer>,
+    /// The last frame's screen, drawn over again when the window keeps its size: no new cells each frame.
+    screen: RefCell<Option<Screen>>,
     scheduler: FrameScheduler,
     table: Rc<StyleTable>,
     icons: IconStyle,
@@ -370,11 +380,11 @@ impl Tab for AppTab {
     }
     fn badge(&self) -> Option<i64> {
         self.app.upgrade().and_then(|a| {
-            let n = a.state.borrow().changes.len();
+            let n = a.state.borrow().records.changes().len();
             (self.id == "history" && n > 0).then_some(n as i64)
         })
     }
-    fn rows(&self, width: i32) -> Vec<TabRow> {
+    fn rows(&self, width: i32) -> Rc<[TabRow]> {
         self.app
             .upgrade()
             .map(|a| {
@@ -382,7 +392,7 @@ impl Tab for AppTab {
                 if self.id == "history" {
                     app.history_rows(width)
                 } else {
-                    app.goal_rows(width)
+                    app.goal_rows(width).into()
                 }
             })
             .unwrap_or_default()
@@ -472,6 +482,7 @@ impl TuiApp {
                 options,
                 tty,
                 renderer: RefCell::new(Renderer::new(depth)),
+                screen: RefCell::new(None),
                 scheduler,
                 table: Rc::new(StyleTable::new()),
                 icons,

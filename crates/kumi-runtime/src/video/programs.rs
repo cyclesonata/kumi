@@ -476,6 +476,21 @@ fn mtime_ms(path: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+/// What a fetch that never finished left in `folder` (Kumi stopped dead midway, 70 to 180 MB each): names starting
+/// with `prefix`, untouched for an hour. A fetch under way keeps writing its own, so it's left alone.
+async fn remove_left_pieces(folder: &str, prefix: &str) {
+    let Ok(mut entries) = tokio::fs::read_dir(folder).await else { return };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else { continue };
+        if meta.modified().ok().and_then(|time| time.elapsed().ok()).is_some_and(|age| age > Duration::from_secs(3600)) {
+            let _ = if meta.is_dir() { tokio::fs::remove_dir_all(entry.path()).await } else { tokio::fs::remove_file(entry.path()).await };
+        }
+    }
+}
+
 /// Where the yt-dlp fetch leaves its pieces; `None` for a download the release doesn't list.
 async fn fetch_yt_dlp(asset: &str, folder: &str, options: &ProgramOptions) -> Result<String, VideoFailure> {
     let sums = fetch_bytes(&options.download, &format!("{RELEASES}/SHA2-256SUMS"), &options.signal).await?;
@@ -484,6 +499,7 @@ async fn fetch_yt_dlp(asset: &str, folder: &str, options: &ProgramOptions) -> Re
         (parts.get(1) == Some(&asset)).then(|| parts.first().map(|sum| sum.to_string())).flatten()
     });
     mkdir_700(&options.tools_dir).await?;
+    remove_left_pieces(&options.tools_dir, ".yt-dlp").await;
     let fetched = join(&options.tools_dir, &[&format!(".{asset}-{}", uuid::Uuid::new_v4())]);
     let unpacked = join(&options.tools_dir, &[&format!(".yt-dlp-{}", uuid::Uuid::new_v4())]);
     let result = async {
@@ -587,35 +603,48 @@ pub async fn find_yt_dlp(options: &ProgramOptions) -> Result<String, VideoFailur
 
 mod node_runtime;
 
-type Extras = Shared<BoxFuture<'static, Vec<String>>>;
+type Extras = Shared<BoxFuture<'static, Option<Vec<String>>>>;
 static RUNTIMES: LazyLock<Mutex<HashMap<String, Extras>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-async fn probe_runtimes(ytdlp: String, signal: Option<Signal>) -> Vec<String> {
-    let Ok(output) = run(&ytdlp, &["--version"], RunOptions { timeout_ms: Some(60_000), signal, max_buffer: None }).await else {
-        return Vec::new();
-    };
+/// None when yt-dlp couldn't be asked its version (it didn't start, failed or took too long).
+async fn probe_runtimes(ytdlp: String) -> Option<Vec<String>> {
+    let output = run(&ytdlp, &["--version"], RunOptions { timeout_ms: Some(60_000), signal: None, max_buffer: None }).await.ok()?;
     let text = output.stdout_text();
     let mut parts = trim(&text).split('.').map(|part| parse(part).unwrap_or(f64::NAN));
     let year = parts.next().unwrap_or(0.0);
     let month = parts.next().unwrap_or(0.0);
     if !(year > 2025.0 || (year == 2025.0 && month >= 11.0)) {
-        return Vec::new();
+        return Some(Vec::new());
     }
     // Preserve the old installed app’s process.execPath before considering a system runtime.
-    match node_runtime::find_node(&process_env(), &home::home_dir().unwrap_or_default(), platform()) {
+    Some(match node_runtime::find_node(&process_env(), &home::home_dir().unwrap_or_default(), platform()) {
         Some(node) => vec!["--js-runtimes".to_string(), format!("node:{node}")],
         None => Vec::new(),
-    }
+    })
 }
 
 /// What yt-dlp is told besides: YouTube's pages need JavaScript run to give their streams, and
-/// yt-dlp (from 2025.11) can run it with Node.
+/// yt-dlp (from 2025.11) can run it with Node. As with ffmpeg_reads_in_pieces, the asking is a task
+/// of its own, which a stopped watch leaves running for the next one, and only an answer is kept.
 pub async fn yt_dlp_extras(ytdlp: &str, signal: Option<Signal>) -> Vec<String> {
-    let extras = {
+    let probe = {
         let mut runtimes = RUNTIMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        runtimes.entry(ytdlp.to_string()).or_insert_with(|| probe_runtimes(ytdlp.to_string(), signal).boxed().shared()).clone()
+        runtimes
+            .entry(ytdlp.to_string())
+            .or_insert_with(|| tokio::spawn(probe_runtimes(ytdlp.to_string())).map(|probed| probed.ok().flatten()).boxed().shared())
+            .clone()
     };
-    extras.await
+    match with_signal(&signal, probe.clone()).await {
+        Ok(Some(extras)) => extras,
+        Ok(None) => {
+            let mut runtimes = RUNTIMES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if runtimes.get(ytdlp).is_some_and(|kept| kept.ptr_eq(&probe)) {
+                runtimes.remove(ytdlp);
+            }
+            Vec::new()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 type Pieces = Shared<BoxFuture<'static, Option<bool>>>;
@@ -866,6 +895,7 @@ pub async fn find_ffmpeg(options: FfmpegOptions) -> Result<Option<String>, Video
     if ffmpeg_target(&platform_name, arch).is_none() {
         return Ok(None);
     }
+    remove_left_pieces(&tools_dir, ".ffmpeg-").await;
     let Some(FfmpegBuild { name: asset, url, size, sha256: expected }) = ffmpeg_release_build(&options, &platform_name, arch).await? else {
         return Ok(None);
     };
@@ -1069,6 +1099,7 @@ pub async fn find_whisper(options: &ProgramOptions) -> Result<Option<String>, Vi
     if options.installed_only {
         return Ok(None);
     }
+    remove_left_pieces(&options.tools_dir, ".whisper-").await;
     let releases: Value = serde_json::from_str(&decode_text(&fetch_bytes(&options.download, WHISPER_RELEASES, &options.signal).await?))
         .map_err(|error| VideoFailure::other(error.to_string()))?;
     let published = releases
@@ -1169,6 +1200,7 @@ async fn published_model(repo: &str, name: &str, options: &ProgramOptions) -> Re
     if exists(&path) && std::fs::metadata(&path).map(|meta| meta.len() > 0).unwrap_or(false) {
         return Ok(path);
     }
+    remove_left_pieces(&dirname(&path).to_string_lossy(), &format!(".{name}-")).await;
     let files: Value = serde_json::from_str(&decode_text(
         &fetch_bytes(&options.download, &format!("https://huggingface.co/api/models/{repo}/tree/main"), &options.signal).await?,
     ))

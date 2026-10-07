@@ -22,6 +22,12 @@ impl TuiApp {
         let action = self.click(f);
         self.0.state.borrow_mut().hits.push(Hit { x, y, width, action });
     }
+    /// A panel or menu drawn over `area` hides what's under it: what was there can't be clicked through it.
+    pub(super) fn cover(&self, area: Rect) {
+        let under =
+            |hit: &Hit| hit.y >= area.y && hit.y < area.y + area.height && hit.x < area.x + area.width && hit.x + hit.width > area.x;
+        self.0.state.borrow_mut().hits.retain(|hit| !under(hit));
+    }
     fn draw_focus_path(&self, screen: &mut Screen, x: i32, y: i32, width: i32, with_context: bool) -> bool {
         let state = self.0.state.borrow();
         let Some(focus) = state.focus.as_ref().filter(|_| state.connection == ConnectionState::Connected) else {
@@ -412,7 +418,7 @@ impl TuiApp {
             screen.put(at, area.y, "●", &dot);
             screen.put(at + 1, area.y, &right, &st::DIM);
         }
-        let last = self.0.state.borrow().changes.last().cloned();
+        let last = self.0.state.borrow().records.changes().last().cloned();
         if area.height > 1 {
             if let Some(last) = last.filter(|c| !self.busy() && c.state == ChangeState::Applied) {
                 let at = area.width - 6;
@@ -434,11 +440,21 @@ impl TuiApp {
             }
         }
     }
-    pub(super) fn history_rows(&self, width: i32) -> Vec<TabRow> {
+    pub(super) fn history_rows(&self, width: i32) -> Rc<[TabRow]> {
+        // Made again only when the changes or what's kept change, or at another width: not every frame.
+        let revision = {
+            let state = self.0.state.borrow();
+            if let Some((made, at, rows)) = &state.history_rows {
+                if *made == state.records.revision() && *at == width {
+                    return rows.clone();
+                }
+            }
+            state.records.revision()
+        };
         let mut rows = vec![];
         let (state_kept, changes) = {
             let state = self.0.state.borrow();
-            (state.kept.clone(), state.changes.clone())
+            (state.records.kept().to_vec(), state.records.changes().to_vec())
         };
         let kept = state_kept.iter().rev().take(3);
         for entry in kept {
@@ -451,9 +467,10 @@ impl TuiApp {
                     let entry = entry.clone();
                     app.task(move |app| async move {
                         let forget = entry.borrow().forget.clone();
-                        let gone = forget().await.unwrap_or(false);
+                        // A forget that failed is said as it failed (by the task), and the row still offers it.
+                        let gone = forget().await?;
                         if !gone && !entry.borrow().forgotten {
-                            entry.borrow_mut().forgotten = true;
+                            app.0.state.borrow_mut().records.set_forgotten(&entry);
                             app.notice("That was already gone.", NoticeTone::Info);
                         }
                         app.0.scheduler.request();
@@ -551,6 +568,8 @@ impl TuiApp {
                 });
             }
         }
+        let rows: Rc<[TabRow]> = rows.into();
+        self.0.state.borrow_mut().history_rows = Some((revision, width, rows.clone()));
         rows
     }
     pub(super) fn goal_rows(&self, width: i32) -> Vec<TabRow> {

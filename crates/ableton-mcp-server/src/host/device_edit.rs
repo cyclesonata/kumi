@@ -358,10 +358,7 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|e| {
-            if record.borrow()["state"] == "applying" {
-                record.borrow_mut()["state"] = json!("uncertain");
-            }
-            adapter_tool_error(id, &e, "Whether the device changed is uncertain: look at it before trying again.")
+            self.apply_failed(id, &record, &e, "Whether the device changed is uncertain: look at it before trying again.")
         }))
     }
     pub async fn undo_device_edit_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {

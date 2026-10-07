@@ -131,12 +131,36 @@ fn a_midi_effects_patch_midiin_the_code_midiout_and_each_control_a_live_paramete
     assert_eq!(patcher["patcher"]["openinpresentation"], 1);
     assert_eq!(patcher["patcher"]["project"]["amxdtype"], 0x6d6d6d6d);
     assert_eq!(patcher["patcher"]["description"], lowest()["about"]);
+    // Options that read like the frame's placeholders are options: each placeholder is filled once, from the frame.
+    let tricky = spec(
+        json!({ "controls": [{ "name": "Mode", "type": "choice", "options": ["__CODE__", "__DEFAULTS__"], "default": "__CODE__" }], "code": "function midi(event) { pass(event); }", "tests": [] }),
+    );
+    let frame = midi_device_code(&tricky.controls, &tricky.code);
+    assert!(frame.contains(r#"const CONTROLS = [{"id":"c1","name":"Mode","options":["__CODE__","__DEFAULTS__"]}];"#), "{frame}");
+    assert!(frame.contains(r#"const params = {"Mode":"__CODE__"};"#), "{frame}");
+    assert_eq!(check_midi_device(&tricky).problems, Vec::<String>::new());
 }
 
 #[test]
 fn the_devices_code_cant_reach_files_the_network_or_max_and_live_the_frame_hides_them_and_the_check_refuses_them() {
-    // Hidden at run time: Max's objects are undefined inside the device's own code.
-    let code = midi_device_code(&[], "function midi(event) { send({ type: 'cc', controller: 1, value: [typeof File, typeof Dict, typeof LiveAPI, typeof outlet, typeof max].every((kind) => kind === 'undefined') ? 1 : 0 }); }");
+    // Hidden at run time: Max's objects are undefined inside the device's own code, and the frame itself (in Live as
+    // here) refuses every way of making code from a string and of reading the frame's functions off a stack.
+    let code = midi_device_code(
+        &[],
+        "function midi(event) {
+          const refused = (attempt) => { try { attempt(); return false; } catch (error) { return true; } };
+          const blocked = [
+            () => (0, eval)('1'),
+            () => Reflect.construct(Function, ['return 1']),
+            () => (function* () {}).constructor('yield 1'),
+            () => (async function () {}).constructor(''),
+            () => post['constr' + 'uctor']('return 1'),
+            () => { Error.prepareStackTrace = () => 1; },
+          ].every(refused);
+          const hidden = [typeof File, typeof Dict, typeof LiveAPI, typeof outlet, typeof max, typeof box, typeof include].every((kind) => kind === 'undefined');
+          send({ type: 'cc', controller: 1, value: blocked && hidden ? 1 : 0 });
+        }",
+    );
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
     let sent: Vec<f64> = context.with(|ctx| {
@@ -153,7 +177,8 @@ fn the_devices_code_cant_reach_files_the_network_or_max_and_live_the_frame_hides
             )
             .unwrap();
         globals.set("post", Function::new(ctx.clone(), |_args: Rest<JsValue>| {}).unwrap()).unwrap();
-        ctx.eval::<(), _>("class Task {}; class File {}; class Dict {}; class LiveAPI {}; var max = {}; var inlet = 0;").unwrap();
+        ctx.eval::<(), _>("class Task {}; class File {}; class Dict {}; class LiveAPI {}; var max = {}; var box = { patcher: {} }; function include() {} var inlet = 0;")
+            .unwrap();
         let mut options = EvalOptions::default();
         options.strict = false;
         ctx.eval_with_options::<(), _>(code, options).unwrap();
@@ -174,6 +199,22 @@ fn the_devices_code_cant_reach_files_the_network_or_max_and_live_the_frame_hides
     assert!(matches(&refused.join(" "), "can't make code"));
     // Ordinary names are fine: Math.max, a helper called parse, a class.
     assert!(check_spec(&with(lowest(), json!({ "code": "class Voice { constructor(p) { this.p = p; } }\nconst parse = (x) => Math.max(0, x);\nfunction midi(event) { pass(event); }" }))).is_ok());
+    // The code is one function's body, as the frame needs: code that closes the device's function early, or leaves a
+    // brace open, is refused whatever names it uses, and so are HTML-like comments, which Live reads as comments.
+    let refused = |code: &str| problems_of(check_spec(&with(lowest(), json!({ "code": code })))).join(" ");
+    assert!(matches(
+        &refused("function midi(event) { pass(event); }\n})();\nconst outside = 1;\n(function () {"),
+        "closes the device's function early"
+    ));
+    assert!(matches(&refused("function midi(event) { pass(event);"), "doesn't read as one function's body"));
+    assert!(matches(&refused("function midi(event) { pass(event); }\n<!-- a note -->"), "Live reads them as comments"));
+    // A brace in a string or a comment is only text.
+    assert!(check_spec(&with(lowest(), json!({ "code": "const close = \"})();\"; // }\nfunction midi(event) { pass(event); }" }))).is_ok());
+    // A "//" in a string doesn't hide the rest of its line from the check: an import there is refused all the same.
+    assert!(matches(
+        &refused("const url = \"https://x.y/\"; import(\"data:text/javascript,0\");\nfunction midi(event) { pass(event); }"),
+        "isn't allowed, even in a comment or a string: modules aren't available"
+    ));
 }
 
 #[test]
@@ -236,8 +277,18 @@ fn kumi_runs_the_devices_tests_and_its_own_checks_a_working_device_passes_a_brok
         "expect": [{ "type": "noteon", "pitch": 60, "at": 15 }, { "type": "noteoff", "pitch": 60, "at": 90 }] }] }),
     ));
     assert_eq!(zero.problems, Vec::<String>::new());
-    let broken = check_midi_device(&spec(json!({ "code": "function midi(event) { pass(event) ", "tests": [] })));
-    assert!(matches(&broken.problems.join(" "), "the code doesn't run"), "{:?}", broken.problems);
+    // Code that doesn't read is refused before it's run: it isn't one function's body.
+    let broken = problems_of(check_spec(&with(lowest(), json!({ "code": "function midi(event) { pass(event) ", "tests": [] }))));
+    assert!(matches(&broken.join(" "), "doesn't read as one function's body"), "{broken:?}");
+    // In Kumi's own process too, where nothing else would end it.
+    let flooded = check_midi_device(&spec(
+        json!({ "code": "function midi(event) { for (;;) send({ type: 'cc', controller: 1, value: 1 }); }", "tests": [] }),
+    ));
+    assert!(matches(&flooded.problems.join(" "), "and was stopped there; something sends without end"), "{:?}", flooded.problems);
+    // The time a device reads is today's, as in Live: code that acts on the date is checked as it will run there.
+    let dated = check_midi_device(&spec(json!({ "code": "function midi(event) { if (Date.now() > 1e12) pass(event); }", "tests": [
+        { "name": "passes", "input": [{ "type": "noteon", "pitch": 60, "at": 0 }, { "type": "noteoff", "pitch": 60, "at": 100 }], "expect": [{ "type": "noteon", "pitch": 60 }, { "type": "noteoff", "pitch": 60 }] }] })));
+    assert_eq!(dated.problems, Vec::<String>::new());
 }
 
 // ported with devices/tool.rs: "make_device reads its guide on demand, makes a device where Live's Browser sees it, and waits for the Browser"
@@ -266,6 +317,25 @@ async fn a_devices_code_is_checked_in_a_process_of_its_own_it_cant_reach_kumi_ca
     .await;
     assert!(matches(&endless.problems.join(" "), "didn't finish within 2 s; something loops forever"), "{:?}", endless.problems);
     assert!(started.elapsed().as_millis() < 5_000);
+    // A loop that sends or says without end is stopped once a run has kept enough, and said so: before, what it sent
+    // and said grew the check's process toward a gigabyte until the deadline.
+    let sending = check_midi_device_isolated(
+        &spec(json!({ "code": "function midi(event) { for (;;) send({ type: 'cc', controller: 1, value: 1 }); }", "tests": [] })),
+        IsolatedOptions::default(),
+    )
+    .await;
+    assert!(
+        matches(&sending.problems.join(" "), r"it sent more than \d+ events for 11 in, and was stopped there; something sends without end"),
+        "{:?}",
+        sending.problems
+    );
+    let saying = check_midi_device_isolated(
+        &spec(json!({ "code": "function midi(event) { for (;;) post('Kumi device: again\\n'); pass(event); }", "tests": [] })),
+        IsolatedOptions::default(),
+    )
+    .await;
+    assert!(matches(&saying.problems.join(" "), "Kumi's check: it threw: again"), "{:?}", saying.problems);
+    assert!(!matches(&saying.problems.join(" "), "didn't finish"), "{:?}", saying.problems);
 }
 
 /// An audio effect a producer might ask for: a saturator with a tone control, its own function first.

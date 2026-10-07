@@ -38,6 +38,9 @@ _DIAGNOSTICS_LEGACY_MAX_BYTES = 256 * 1024
 _DIAGNOSTICS_ACCEPTED_MAX_BYTES = frozenset({_DIAGNOSTICS_MAX_BYTES, _DIAGNOSTICS_LEGACY_MAX_BYTES})
 _DIAGNOSTICS_QUEUE_LIMIT = 64
 _DIAGNOSTICS_RECORD_LIMIT = 512
+# How often a diagnostics file's security is checked again once it's open (on Windows two PowerShell runs): every
+# record still checks it's the same file in the same folder, and a change to its ACL is caught within this.
+_DIAGNOSTICS_REVALIDATE_SECONDS = 60.0
 _DIAGNOSTIC_EVENTS = {"dispatch-failure", "result-contract-failure", "capture-tick-failure", "realtime-packet-failure", "bridge-accept-failure"}
 
 
@@ -124,6 +127,7 @@ class _DiagnosticsSink:
         self._max_bytes = max_bytes
         self._security_validator = security_validator
         self._parent_identity: os.stat_result | None = None
+        self._validated_at = float("-inf")
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=_DIAGNOSTICS_QUEUE_LIMIT)
         self._stop = threading.Event()
         self._dropped = 0
@@ -173,6 +177,7 @@ class _DiagnosticsSink:
                 raise ValueError("diagnostics path contains a linked ancestor")
         if self._security_validator is not None and not self._security_validator(self._path):
             raise ValueError("diagnostics security validation failed")
+        self._validated_at = time.monotonic()
         before = os.lstat(self._path)
         if stat.S_ISLNK(before.st_mode) or not self._safe_descriptor(before):
             raise ValueError("unsafe diagnostics destination")
@@ -225,9 +230,12 @@ class _DiagnosticsSink:
             parent_safe = stat.S_ISDIR(parent.st_mode) and not stat.S_ISLNK(parent.st_mode) and not self._reparse_point(parent)
             if os.name != "nt":
                 parent_safe = parent_safe and not (stat.S_IMODE(parent.st_mode) & 0o077) and (not hasattr(os, "getuid") or parent.st_uid == os.getuid())
-            if self._security_validator is not None:
-                parent_safe = parent_safe and self._security_validator(self._path)
-            return parent_safe and os.path.samestat(self._parent_identity, parent) and self._safe_descriptor(opened) and self._safe_descriptor(current) and os.path.samestat(opened, current)
+            same = parent_safe and os.path.samestat(self._parent_identity, parent) and self._safe_descriptor(opened) and self._safe_descriptor(current) and os.path.samestat(opened, current)
+            # The validator ran when the file was opened; it runs again at most once a minute, not for every record.
+            if same and self._security_validator is not None and time.monotonic() - self._validated_at >= _DIAGNOSTICS_REVALIDATE_SECONDS:
+                same = bool(self._security_validator(self._path))
+                if same: self._validated_at = time.monotonic()
+            return same
         except (OSError, ValueError):
             return False
 
@@ -345,6 +353,20 @@ _CRASHING_INPUTS = frozenset({"Main", "Master"})
 INPUT_FROM_MAIN = ("Live crashes when a track's input is set to Main (Live 12.4: unsaved work is lost), so nothing ran. "
                    "To record the mix, set the input to \"Resampling\", which is what Main plays. A script that sets an output to Main "
                    "and an input to something else can do them in two scripts; a track named Main or Master needs another name to be an input.")
+# python.run's error type for a failure after the code ran (its result, the deadline after it, its undo step):
+# Live may have changed, which Kumi records as unconfirmed rather than "nothing changed".
+PYTHON_RAN = "RanResultUnavailable"
+
+
+def _absolute_file_path(path: Any) -> bool:
+    r"""A file path Live can open as it stands (1 to 1024 characters): POSIX-absolute (/...), from a Windows drive's
+    root (X:\... or X:/...), or on a share (\\server\share\..., where a redirected AppData keeps the bridge's staged
+    files). Not drive-relative (C:foo, from the drive's current folder) nor a device namespace (\\?\, \\.\)."""
+    if not isinstance(path, str) or not 1 <= len(path) <= 1024: return False
+    # Two separators, in any spelling, are a share only as \\server: //./pipe, //?/C: and /\.\ are device namespaces.
+    if len(path) > 1 and path[0] in "\\/" and path[1] in "\\/": return path[:2] == "\\\\" and len(path) > 2 and path[2] not in "\\/?."
+    if path.startswith("/"): return True
+    return len(path) > 2 and path[0].isascii() and path[0].isalpha() and path[1] == ":" and path[2] in "\\/"
 
 
 def _sets_input_from_main(code: Any) -> bool:
@@ -775,6 +797,27 @@ def _failure_summary(error: BaseException) -> str:
     return f"request failed: {type(error).__name__}" + (f": {text[:200]}" if text.strip() else "")
 
 
+class _BoundedOutput(io.TextIOBase):
+    """python.run's stdout: what fits on the wire is kept, the rest dropped as it's written, so a printing loop
+    can't fill Live's memory before its timeout. Characters, as the slice it replaces counted them."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self._parts: list[str] = []; self._kept = 0; self._limit = limit
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text: str) -> int:
+        text = str(text)
+        if self._kept < self._limit:
+            piece = text[:self._limit - self._kept]; self._parts.append(piece); self._kept += len(piece)
+        return len(text)
+
+    def getvalue(self) -> str:
+        return "".join(self._parts)
+
+
 class AuthenticatedRemoteScript:
     def __init__(self, secret: str, operation: Callable[[str, dict[str, Any]], Any], bridge_epoch: str | None = None, connection_challenge: str | None = None):
         if len(secret) < 32:
@@ -947,6 +990,11 @@ class AuthenticatedRemoteScript:
             self.invalid = True
             return self._error(request["id"], "response contract failed")
         return self._response(request["id"], True, result=result)
+
+    @property
+    def authenticated(self) -> bool:
+        """Whether a request on this channel has passed its MAC check: who's on it is known."""
+        return self._last_sequence > 0
 
     def new_nonce(self) -> str:
         return secrets.token_urlsafe(18)
@@ -1408,13 +1456,13 @@ class LiveObjectMapper:
             if self._probe_classes("slot"): return self._offers("slot", "create_audio_clip")
             return any(not bool(getattr(track, "has_midi_input", False)) and any(callable(getattr(slot, "create_audio_clip", None)) for slot in self._items(getattr(track, "clip_slots", []))[:self._PROBE_SAMPLE]) for track in self._shape_probe()["track"])
         if operation == "clip.action":
-            return self._offers_any("clip", "crop", "duplicate_loop", "start_scrub")
+            return self._offers_any("clip", "crop", "duplicate_loop", "scrub")
         if operation == "automation.envelope.clear":
             return self._offers("clip", "clear_all_envelopes")
         if operation == "note.read-by-id":
             return self._offers("clip", "get_notes_by_id")
         if operation == "note.read-selected":
-            return self._offers("clip", "get_selected_notes")
+            return self._offers_any("clip", "get_selected_notes_extended", "get_selected_notes")
         if operation == "note.duplicate":
             return self._offers("clip", "duplicate_notes_by_id")
         if operation == "note.quantize":
@@ -1451,7 +1499,7 @@ class LiveObjectMapper:
         if operation == "scene.set":
             return self._offers_any("scene", "color_index", "tempo", method=False)
         if operation == "scene.fire-selected":
-            return self._offers("scene", "fire_as_selected")
+            return self._offers("scene", "fire")
         if operation == "transport.action":
             return any(callable(getattr(song, name, None)) for name in ("start_playing", "continue_playing", "stop_playing", "play_selection", "tap_tempo", "nudge_up", "nudge_down", "re_enable_automation", "force_link_beat_time", "jump_by"))
         if operation == "locator.jump-to":
@@ -1996,8 +2044,7 @@ class LiveObjectMapper:
             "enabled": bool(enabled) if isinstance(enabled, bool) else None,
             "canHaveChains": self._read_attr(device, "can_have_chains") if isinstance(self._read_attr(device, "can_have_chains"), bool) else None,
             "canHaveDrumPads": self._read_attr(device, "can_have_drum_pads") if isinstance(self._read_attr(device, "can_have_drum_pads"), bool) else None,
-            "latencySamples": int(self._read_attr(device, "latency_in_samples")) if isinstance(self._read_attr(device, "latency_in_samples"), int) and not isinstance(self._read_attr(device, "latency_in_samples"), bool) else None,
-            "latencyMs": float(self._read_attr(device, "latency_in_ms")) if isinstance(self._read_attr(device, "latency_in_ms"), (int, float)) and not isinstance(self._read_attr(device, "latency_in_ms"), bool) and math.isfinite(float(self._read_attr(device, "latency_in_ms"))) else None,
+            **self._device_latency(device),
             "parameterBank": int(parameter_bank) if isinstance(parameter_bank, int) and not isinstance(parameter_bank, bool) else None,
             **self._specialized_rows(device, device_ref),
             "comparison": {
@@ -2008,6 +2055,10 @@ class LiveObjectMapper:
             "sidechainRoutingType": self._choice_name(self._read_attr(device, "input_routing_type")),
             "parameters": parameters,
         }
+        # Collapsed in its chain or not: what device.view.set fences on. A device's view is never content
+        # (_owned_device_row leaves it out of ownership checks).
+        device_view = getattr(device, "view", None); collapsed = self._read_attr(device_view, "is_collapsed") if device_view is not None else None
+        row["view"] = {"isCollapsed": collapsed if isinstance(collapsed, bool) else None}
         if row["canHaveChains"] is True:
             row["chains"] = self._chain_rows(device, device_ref, track_index, path, traversal, depth)
             chain_selector = self._read_attr(device, "chain_selector")
@@ -2035,6 +2086,7 @@ class LiveObjectMapper:
             pad_scroll = self._read_attr(rack_view, "drum_pads_scroll_position") if rack_view is not None else None
             show_devices = self._read_attr(rack_view, "is_showing_chain_devices") if rack_view is not None else None
             row["view"] = {
+                **row["view"],
                 "selectedChainRef": self.refs.put("chain", selected_chain, f"{device_ref}:selected") if selected_chain is not None else None,
                 "selectedPadIndex": int(self._read_attr(selected_pad, "index")) if selected_pad is not None and isinstance(self._read_attr(selected_pad, "index"), int) and not isinstance(self._read_attr(selected_pad, "index"), bool) else None,
                 "padScrollPosition": int(pad_scroll) if isinstance(pad_scroll, int) and not isinstance(pad_scroll, bool) else None,
@@ -2415,6 +2467,10 @@ class LiveObjectMapper:
         if isinstance(root, int) and not isinstance(root, bool) and 0 <= root <= 11 and isinstance(scale_name, str) and scale_name:
             set_row["scale"] = {"rootNote": int(root), "scaleName": scale_name[:64], "scaleMode": scale_mode if isinstance(scale_mode, bool) else None}
         view = getattr(self.song, "view", None)
+        # Song.View.draw_mode: what a draw-mode change (song.view.set) fences on.
+        draw_mode = self._read_attr(view, "draw_mode") if view is not None else None
+        if isinstance(draw_mode, bool):
+            set_row["drawMode"] = draw_mode
         if view is not None and (hasattr(view, "mod_mapping_device") or hasattr(view, "mod_mapping_parameter")):
             set_row.update(self._mod_mapping_refs(view))
         return set_row
@@ -2487,15 +2543,19 @@ class LiveObjectMapper:
         """Re-register the objects at these refs' positions, as a snapshot would, reading only their
         tracks: a ref names a position, and the object there now is what a mutation fences and acts on."""
         scenes: list[Any] | None = None
+        # Each track's row once, however many of the refs sit on it (and its Arrangement clips once; all of them cover any).
+        built: set[int] = set(); arranged: set[int | None] = set()
         for reference in references:
             index = self._ref_track_index(reference)
             parts = reference.split(":") if isinstance(reference, str) else []
             if len(parts) >= 3 and parts[1] == "arrangement_clip":
                 # A track's row doesn't list its Arrangement clips; they're read (and registered) apart.
+                if index in arranged or None in arranged: continue
+                arranged.add(index)
                 self._arrangement_clip_items() if index is None else self._arrangement_clip_items([index])
                 continue
             if index is not None:
-                self._whole_track_row(index)
+                if index not in built: built.add(index); self._whole_track_row(index)
                 continue
             if len(parts) == 3 and parts[0] == str(self.refs.epoch) and parts[1] == "scene" and parts[2].isdigit():
                 scenes = scenes if scenes is not None else self._items(getattr(self.song, "scenes", []))
@@ -2587,7 +2647,8 @@ class LiveObjectMapper:
             for index in track_indices:
                 track, track_kind = track_entries[index]
                 if focus is None or index in focus:
-                    if budget is not None and not budget.room():
+                    # Only a track window or a focus can end on the budget: without either, every row is whole.
+                    if budget is not None and (track_window is not None or focus is not None) and not budget.room():
                         # The budget is spent: a window ends here; a focus goes on with light rows.
                         if focus is None: window_cut = True; break
                         focus_cut = True; track_rows.append(self._light_track_row(track, track_kind, index)); continue
@@ -2812,6 +2873,9 @@ class LiveObjectMapper:
             except KeyError: found = None
         return self._capture_object_identity(found) if found is not None else None
 
+    # The mixer refs whose key isn't Live's own name for the control (a track row publishes them; both resolvers read them).
+    _MIXER_REF_ATTRIBUTES = {"activator": "track_activator", "panning_left": "left_split_stereo", "panning_right": "right_split_stereo"}
+
     def _parameter_at(self, reference: str) -> Any:
         """The parameter at a parameter ref's place now: a device's (by index), a rack's macro or chain
         selector, or a track's mixer control."""
@@ -2822,7 +2886,7 @@ class LiveObjectMapper:
             if mixer is None: return None
             if parts[2] == "sends" and len(parts) == 4 and parts[3].isdigit():
                 sends = self._items(self._read_attr(mixer, "sends") or []); return sends[int(parts[3])] if int(parts[3]) < len(sends) else None
-            return self._read_attr(mixer, parts[2]) if len(parts) == 3 else None
+            return self._read_attr(mixer, self._MIXER_REF_ATTRIBUTES.get(parts[2], parts[2])) if len(parts) == 3 else None
         device_ref, _, position = key.rpartition(":")
         if device_ref.endswith(":macro"): device_ref, selector = device_ref[:-6], "macro"
         elif position == "chain-selector": selector = "chain-selector"
@@ -3033,7 +3097,8 @@ class LiveObjectMapper:
                 members = [(index, track, track_kind) for index, (track, track_kind) in enumerate(self._track_entries()) if track_kind in wanted]
             identity_fields = ("ref", "objectIdentity", "name", "kind")
             if filters and any(key not in self._LIGHT_TRACK_FIELDS for key in filters):
-                # A filter on what only a whole row has: whole rows it is.
+                # A filter on what only a whole row has: whole rows it is, a page's worth at a time when budgeted.
+                if budgeted: return self._filtered_track_page(kind, members, parent, limit, cursor, filters, requested_fields, traversal_budget, deadline)
                 items = [row for index, _, _ in members for row in [self._whole_track_row(index)] if row is not None]
             else:
                 items = [self._light_track_row(track, track_kind, index) for index, track, track_kind in members]; light = True
@@ -3067,6 +3132,14 @@ class LiveObjectMapper:
             # holds); a clip's notes only when the requested fields or filters name them.
             wanted = set(requested_fields or []) | set(filters or {})
             items = self._slot_discovery(kind, parent, requested_fields is None or bool({"notes", "notesRevision"} & wanted))
+            if {"envelopesRevision", "envelopesPresent"} & wanted:
+                # Only when asked: a clear's fence, over every parameter its track's clear would clear.
+                for row in items:
+                    if f":clip:" not in row["ref"]: continue
+                    _, slot, track_index, _ = self._clip_location(row["ref"])
+                    presence = self._envelope_presence(getattr(slot, "clip", None), self._items(getattr(self.song, "tracks", []))[track_index])
+                    row["envelopesRevision"] = hashlib.sha256(self._bounded_canonical(presence).encode("utf-8")).hexdigest()
+                    row["envelopesPresent"] = sum(1 for present in presence if present)
             if self._follow_action_ready() and set(self._FOLLOW_FIELDS) & wanted:
                 for row in items:
                     clip = self._note_parent(row["ref"])
@@ -3092,7 +3165,10 @@ class LiveObjectMapper:
         elif kind == "arrangement_clip":
             track_index = self._ref_track_index(parent)
             with_notes = bool({"notes", "notesRevision"} & (set(requested_fields or []) | set(filters or {})))
-            items = self._arrangement_clip_items([track_index], with_notes) if track_index is not None else self._arrangement_clip_items(None, with_notes)
+            if track_index is not None: items = self._arrangement_clip_items([track_index], with_notes)
+            # Off a track only the Song's own Arrangement clips (where Live lists them there) have a parent, the Set.
+            elif parent == self.refs.put("set", self.song, "song") and self._items(getattr(self.song, "arrangement_clips", [])): items = self._arrangement_clip_items(None, with_notes)
+            else: items = []
         elif kind == "locator": items = self._locator_items()
         elif kind == "session_playback": items = [self._playback()]
         elif kind == "selection": items = [self._selection_item()]
@@ -3216,6 +3292,26 @@ class LiveObjectMapper:
             if not full: track_index += 1; offset = 0
         more = track_index < len(entries) and emitted < traversal_budget
         return self._page_result("device", page, revision, self._walk_cursor(revision, track_index, offset, emitted) if more else None, requested_fields)
+
+    def _filtered_track_page(self, kind: str, members: list[tuple[int, Any, Any]], parent: str | None, limit: int, cursor: str | None, filters: dict[str, Any], requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
+        """Tracks filtered on what only a whole row has, a page at a time: a page builds whole rows from where
+        the last stopped until `limit` match or the budget runs out (at least one row each page), reading only
+        the tracks it looks at. The cursor, and the list's revision, are bound to the tracks listed (their
+        identities, in order) and the filters, as a Set-wide device page's are. A track's parent is the Set, so
+        under any other parent the list is empty, as the unpaged list's parent filter leaves it."""
+        if parent is not None and parent != self.refs.put("set", self.song, "song"): members = []
+        basis = {"tracks": [self._capture_object_identity(track) for _, track, _ in members], "filters": filters}
+        revision = f"{self.refs.epoch}:{kind}:tracks:{len(members)}:{hashlib.sha256(json.dumps(basis, sort_keys=True, default=str, separators=(',', ':')).encode('utf-8')).hexdigest()[:16]}"
+        position, emitted = self._walk_position(cursor, revision, 2) if cursor is not None else (0, 0)
+        if not 0 <= position <= len(members): raise ValueError("invalid discovery cursor")
+        page: list[dict[str, Any]] = []
+        while position < len(members) and len(page) < limit and emitted < traversal_budget:
+            if deadline is not None and not deadline.room(): break
+            index = members[position][0]; position += 1
+            row = self._whole_track_row(index)
+            if row is not None and all(row.get(key) == value for key, value in filters.items()): page.append(row); emitted += 1
+        more = position < len(members) and emitted < traversal_budget
+        return self._page_result(kind, page, revision, self._walk_cursor(revision, position, emitted) if more else None, requested_fields)
 
     def _indexed_page(self, kind: str, parent: str, owner: Any, limit: int, cursor: str | None, filters: dict[str, Any] | None, requested_fields: list[str] | None, traversal_budget: int, deadline: "_ReadBudget | None") -> dict[str, Any]:
         """A clip's notes or a device's parameters, a page at a time by their index: a page reads the
@@ -3649,7 +3745,7 @@ class LiveObjectMapper:
             raise ValueError("note deletion is unavailable on this Live shape")
         before_rows = self._read_notes(clip); existing = {int(row["id"]) for row in before_rows if isinstance(row.get("id"), int)}
         if len(existing) != len(before_rows) or any(note_id not in existing for note_id in note_ids): raise ValueError("complete stable note identity is required for deletion")
-        expected_rows = [row for row in before_rows if row["id"] not in set(note_ids)]; canonical_rows = lambda rows: self._bounded_canonical(sorted(rows, key=lambda row: int(row["id"]))); operation_error: BaseException | None = None
+        deleting = set(note_ids); expected_rows = [row for row in before_rows if row["id"] not in deleting]; canonical_rows = lambda rows: self._bounded_canonical(sorted(rows, key=lambda row: int(row["id"]))); operation_error: BaseException | None = None
         try: clip.remove_notes_by_id(note_ids)
         except BaseException as error: operation_error = error
         try: after_rows = self._read_notes(clip)
@@ -3668,13 +3764,16 @@ class LiveObjectMapper:
         new ids). Whether the clip then holds exactly before_rows' content, nothing more."""
         try:
             content = lambda row: {key: row.get(key) for key in self._NOTE_CONTENT_FIELDS}
-            remaining = [content(row) for row in self._read_notes(clip)]; missing: list[dict[str, Any]] = []
+            # What's left, as a multiset of canonical texts: each note's text is made once, not once per prior note.
+            remaining: dict[str, int] = {}; missing: list[dict[str, Any]] = []
+            for row in self._read_notes(clip):
+                text = self._bounded_canonical(content(row)); remaining[text] = remaining.get(text, 0) + 1
             for prior in before_rows:
-                prior_content = content(prior); match = next((index for index, candidate in enumerate(remaining) if self._bounded_canonical(candidate) == self._bounded_canonical(prior_content)), None)
-                if match is None: missing.append(prior)
-                else: remaining.pop(match)
+                text = self._bounded_canonical(content(prior))
+                if remaining.get(text, 0) > 0: remaining[text] -= 1
+                else: missing.append(prior)
             # Content the removal changed rather than took can't be put back by adding notes.
-            if remaining: return False
+            if any(remaining.values()): return False
             if missing:
                 try: spec_class = getattr(__import__("Live.Clip", fromlist=["MidiNoteSpecification"]), "MidiNoteSpecification", None)
                 except Exception: spec_class = None
@@ -3941,10 +4040,29 @@ class LiveObjectMapper:
     def _capture_authority_revision(self) -> str:
         """Byte for byte the host's captureAuthorityRevision (and the simulator's): the host previews a
         capture with it, so any other formula refused every capture as changed since preview. Clips are
-        bound by identity and note content, not playback state, so it holds while Live plays."""
-        snapshot = self.snapshot()
-        authority = {"tracks": [{"ref": track.get("ref"), "objectIdentity": track.get("objectIdentity"), "clips": [{"ref": clip.get("ref"), "objectIdentity": clip.get("objectIdentity"), "notesRevision": clip.get("notesRevision")} for clip in track.get("clips", [])]} for track in snapshot.get("tracks", [])],
-                     "scenes": [{"ref": scene.get("ref"), "objectIdentity": scene.get("objectIdentity"), "index": scene.get("index")} for scene in snapshot.get("scenes", [])], "playbackRevision": snapshot.get("playback", {}).get("revision")}
+        bound by identity and note content, not playback state, so it holds while Live plays.
+
+        The fields are read directly (each track's and Session clip's identity, each clip's notes, the
+        scenes, the playback revision), as a whole-Set snapshot's rows give them, without building the rest
+        of it; a snapshot the shared read already holds is used as it is."""
+        cache = self._read_cache
+        snapshot = cache.get("snapshot") if cache is not None else None
+        if snapshot is not None:
+            tracks = [{"ref": track.get("ref"), "objectIdentity": track.get("objectIdentity"), "clips": [{"ref": clip.get("ref"), "objectIdentity": clip.get("objectIdentity"), "notesRevision": clip.get("notesRevision")} for clip in track.get("clips", [])]} for track in snapshot.get("tracks", [])]
+            scenes = [{"ref": scene.get("ref"), "objectIdentity": scene.get("objectIdentity"), "index": scene.get("index")} for scene in snapshot.get("scenes", [])]
+            playback = snapshot.get("playback", {}).get("revision")
+        else:
+            tracks = []
+            for index, (track, _) in enumerate(self._track_entries(kinds=False)):
+                clips = []
+                for slot_index, slot in enumerate(self._items(getattr(track, "clip_slots", []))):
+                    clip = getattr(slot, "clip", None)
+                    if clip is None: continue
+                    clips.append({"ref": self.refs.put("clip", clip, f"{index}:{slot_index}"), "objectIdentity": self._capture_object_identity(clip), "notesRevision": hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()})
+                tracks.append({"ref": self.refs.put("track", track, str(index)), "objectIdentity": self._capture_object_identity(track), "clips": clips})
+            scenes = [{"ref": self.refs.put("scene", scene, str(index)), "objectIdentity": self._capture_object_identity(scene), "index": index} for index, scene in enumerate(self._items(getattr(self.song, "scenes", [])))]
+            playback = self._playback()["revision"]
+        authority = {"tracks": tracks, "scenes": scenes, "playbackRevision": playback}
         return hashlib.sha256(self._bounded_canonical(authority).encode("utf-8")).hexdigest()
 
     def _capture_midi(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -4047,7 +4165,10 @@ class LiveObjectMapper:
                 if (ownership_token is not None and ownership_token != token) or not hmac.compare_digest(self._ownership_fingerprint(args["ref"]), row["fingerprint"]): raise ValueError("transaction-owned move lacks exact cleanup-authority consumption")
                 consumed_move_ownership = token
         creation_rollback: tuple[str, tuple[dict[str, Any], dict[str, int]], dict[str, dict[str, Any]]] | None = None
-        if enforce_ownership and operation in _TRANSACTION_CREATIONS: creation_rollback = (self._creation_topology(self._creation_scope(operation, args)), self.refs.checkpoint(), {token: dict(row) for token, row in self._owned_cleanup_tokens.items()})
+        # What a creation puts back if its ownership can't be attached. The topology is the state before it (its cleanup is
+        # checked against that), scoped to the tracks it names. The ledger is copied shallow: during a creation rows are only
+        # added (attachment) or taken out (retired as moved), never changed in place, so its rows can be shared.
+        if enforce_ownership and operation in _TRANSACTION_CREATIONS: creation_rollback = (self._creation_topology(self._creation_scope(operation, args)), self.refs.checkpoint(), dict(self._owned_cleanup_tokens))
         owned_content = None
         if enforce_ownership and operation in _OWNED_CONTENT_MUTATIONS and isinstance(args.get("ref"), str):
             matches = [row for row in self._owned_cleanup_tokens.values() if row.get("transactionId") == transaction_id and row.get("ref") == args["ref"] and row.get("deleted") is not True]
@@ -4464,6 +4585,8 @@ class LiveObjectMapper:
 
     # How long a fire button stays pressed unless its connection presses it again.
     FIRE_BUTTON_HOLD_MS = 30000
+    # How long a nudge holds Live's Nudge button: a click's worth, let go on the display tick after it.
+    NUDGE_HOLD_MS = 100
 
     def _fire_button_target(self, reference: Any) -> Any:
         """The clip, slot or scene a fire-button ref names at its place now, reading only that."""
@@ -4518,9 +4641,13 @@ class LiveObjectMapper:
             if owner is not None and hold.get("owner") is not owner: continue
             if expired_only and now < hold["expiresAt"]: continue
             held.pop(reference, None); released += 1
-            setter = getattr(hold["target"], "set_fire_button_state", None)
-            if callable(setter):
-                try: setter(False)
+            # A hold says how it's let go (a Nudge button); a fire button by its state.
+            release = hold.get("release")
+            if release is None:
+                setter = getattr(hold["target"], "set_fire_button_state", None)
+                release = (lambda setter=setter: setter(False)) if callable(setter) else None
+            if callable(release):
+                try: release()
                 except BaseException: pass
         return released
 
@@ -4755,7 +4882,9 @@ class LiveObjectMapper:
     def _rename(self, operation: str, args: dict[str, Any]) -> dict[str, Any]:
         reference, name, expected_name, expected_identity = args.get("ref"), args.get("name"), args.get("expectedName"), args.get("expectedObjectIdentity")
         kind = operation.split(".", 1)[0]
-        if not isinstance(reference, str) or f":{kind}:" not in reference or not isinstance(name, str) or not 1 <= len(name) <= 256 or not isinstance(expected_name, str) or not isinstance(expected_identity, str):
+        # clip.rename names a Session clip (…:clip:T:S) or an Arrangement clip (…:arrangement_clip:T:C).
+        markers = (":clip:", ":arrangement_clip:") if kind == "clip" else (f":{kind}:",)
+        if not isinstance(reference, str) or not any(marker in reference for marker in markers) or not isinstance(name, str) or not 1 <= len(name) <= 256 or not isinstance(expected_name, str) or not isinstance(expected_identity, str):
             raise ValueError("rename authority is invalid")
         current_identity = self._positional_identity(reference)
         if current_identity is None or not hmac.compare_digest(current_identity, expected_identity):
@@ -4894,45 +5023,58 @@ class LiveObjectMapper:
         """A display tick passed: a kept structure revision ages (see STRUCTURE_HOLD_TICKS)."""
         self._display_ticks = getattr(self, "_display_ticks", 0) + 1
 
-    def _owned_row_exists(self, row: dict[str, Any]) -> bool:
-        """Whether a transaction-owned object is still in the Set, wherever it is now. One that's
-        gone (the producer deleted it by hand, Live replaced it) holds no position: its own cleanup
-        would be refused anyway, and it mustn't block every later track or scene until Live restarts."""
-        kind = str(row.get("ref", "")).split(":")[1:2]; identity = str(row.get("objectIdentity"))
-        same = lambda value: value is not None and hmac.compare_digest(self._capture_object_identity(value), identity)
-        try:
-            tracks = self._all_track_objects()
-            if kind == ["track"]: return any(same(track) for track in tracks)
-            if kind == ["scene"]: return any(same(scene) for scene in self._items(getattr(self.song, "scenes", [])))
-            if kind == ["clip"]: return any(same(self._read_attr(slot, "clip")) for track in tracks for slot in self._items(self._read_attr(track, "clip_slots") or []))
-            if kind == ["device"]:
-                pending = [device for track in tracks for device in self._items(self._read_attr(track, "devices") or [])]
-                for at, device in enumerate(pending):
-                    if at > MAX_TRAVERSAL: return True
-                    if same(device): return True
-                    for chain in self._items(self._read_attr(device, "chains") or []): pending.extend(self._items(self._read_attr(chain, "devices") or []))
-                    for pad in self._items(self._read_attr(device, "drum_pads") or []):
-                        for chain in self._items(self._read_attr(pad, "chains") or []): pending.extend(self._items(self._read_attr(chain, "devices") or []))
-                return False
-            return True
-        except BaseException:
-            return True
+    def _owned_presence(self) -> Callable[[dict[str, Any]], bool]:
+        """Whether a transaction-owned object is still in the Set, wherever it is now. One that's gone (the
+        producer deleted it by hand, Live replaced it) holds no position: its own cleanup would be refused
+        anyway, and it mustn't block every later track or scene until Live restarts. Each kind's identities
+        are read once, for every row asked about; what can't be read, or lies past the traversal bound, counts
+        as there."""
+        read: dict[str, tuple[set[str], bool] | None] = {}
+        def identities(kind: str) -> tuple[set[str], bool] | None:
+            """(identities, complete), None when they can't be read."""
+            if kind in read: return read[kind]
+            try:
+                tracks = self._all_track_objects(); complete = True
+                if kind == "track": objects = list(tracks)
+                elif kind == "scene": objects = self._items(getattr(self.song, "scenes", []))
+                elif kind == "clip": objects = [self._read_attr(slot, "clip") for track in tracks for slot in self._items(self._read_attr(track, "clip_slots") or [])]
+                else:
+                    # Every device tree, breadth first, up to the traversal bound.
+                    objects = [device for track in tracks for device in self._items(self._read_attr(track, "devices") or [])]; at = 0
+                    while at < len(objects):
+                        if at > MAX_TRAVERSAL: del objects[at:]; complete = False; break
+                        device = objects[at]; at += 1
+                        for chain in self._items(self._read_attr(device, "chains") or []): objects.extend(self._items(self._read_attr(chain, "devices") or []))
+                        for pad in self._items(self._read_attr(device, "drum_pads") or []):
+                            for chain in self._items(self._read_attr(pad, "chains") or []): objects.extend(self._items(self._read_attr(chain, "devices") or []))
+                read[kind] = ({self._capture_object_identity(item) for item in objects if item is not None}, complete)
+            except BaseException:
+                read[kind] = None
+            return read[kind]
+        def present(row: dict[str, Any]) -> bool:
+            kind = str(row.get("ref", "")).split(":")[1:2]
+            if kind not in (["track"], ["scene"], ["clip"], ["device"]): return True
+            known = identities(kind[0])
+            return known is None or not known[1] or str(row.get("objectIdentity")) in known[0]
+        return present
 
     def _owned_positions(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> list[tuple[str, dict[str, Any]]]:
         """The transaction-owned objects whose positional reference sits at or after (strict: after)
-        index on the track or scene axis, so a change there moves them."""
+        index on the track or scene axis, so a change there moves them: by their refs first, and only
+        those are looked for in the Set."""
         found = []
         for token, row in self._owned_cleanup_tokens.items():
             if token == exclude_token or row.get("deleted") is True: continue
             reference = str(row.get("ref", "")); parts = reference.split(":")
             if len(parts) < 3 or parts[0] != str(self.refs.epoch): continue
-            if not self._owned_row_exists(row): continue
             kind, path = parts[1], parts[2:]; position: int | None = None
             if axis == "track" and kind in {"track", "clip", "arrangement_clip", "device"} and path and path[0].isdigit(): position = int(path[0])
             if axis == "scene" and kind == "scene" and path and path[0].isdigit(): position = int(path[0])
             if axis == "scene" and kind == "clip" and len(path) >= 2 and path[1].isdigit(): position = int(path[1])
             if position is not None and (position > index if strict else position >= index): found.append((token, row))
-        return found
+        if not found: return []
+        present = self._owned_presence()
+        return [(token, row) for token, row in found if present(row)]
 
     def _owned_positional_conflict(self, axis: str, index: int, strict: bool = False, exclude_token: str | None = None) -> bool:
         return bool(self._owned_positions(axis, index, strict, exclude_token))
@@ -6280,6 +6422,12 @@ class LiveObjectMapper:
             raise ValueError("view change was not confirmed")
         return {"view": view_name, "visible": True}
 
+    @staticmethod
+    def _nav_direction(name: str) -> Any:
+        """Live's Application.View.NavDirection by its name, else the number Live documents for it."""
+        try: return getattr(__import__("Live.Application", fromlist=["Application"]).Application.View.NavDirection, name)
+        except Exception: return {"up": 0, "down": 1, "left": 2, "right": 3}[name]
+
     def _view_control(self, args: dict[str, Any]) -> dict[str, Any]:
         action = args.get("action")
         if action not in self._VIEW_CONTROL_ACTIONS or set(args) - {"action", "trackRef", "view"}:
@@ -6287,15 +6435,17 @@ class LiveObjectMapper:
         view = getattr(self._application(), "view", None)
         if view is None:
             raise ValueError("view control is unavailable")
+        # Live's NavDirection: up 0, down 1, left 2, right 3. The Arrangement's time runs left to right: a scroll goes
+        # left or right, and a zoom is in time (right in, left out), not the tracks' height (up and down).
         if action in {"zoom-in", "zoom-out"}:
             zoom = getattr(view, "zoom_view", None)
             if not callable(zoom): raise ValueError("arrangement zoom is unavailable")
-            zoom(1 if action == "zoom-in" else 0, "Arranger", False)
+            zoom(self._nav_direction("right" if action == "zoom-in" else "left"), "Arranger", False)
             return {"action": action, "done": True}
         if action in {"scroll-left", "scroll-right"}:
             scroll = getattr(view, "scroll_view", None)
             if not callable(scroll): raise ValueError("arrangement scroll is unavailable")
-            scroll(1 if action == "scroll-right" else 0, "Arranger", False)
+            scroll(self._nav_direction("right" if action == "scroll-right" else "left"), "Arranger", False)
             return {"action": action, "done": True}
         if action in {"follow-on", "follow-off"}:
             song_view = getattr(self.song, "view", None)
@@ -6508,7 +6658,7 @@ class LiveObjectMapper:
 
     def _session_audio_clip_create(self, args: dict[str, Any]) -> dict[str, Any]:
         file_path = args.get("filePath")
-        if not isinstance(file_path, str) or not 1 <= len(file_path) <= 1024 or not (file_path.startswith("/") or (len(file_path) > 2 and file_path[1] == ":" and file_path[0].isalpha())): raise ValueError("filePath must be an absolute path")
+        if not _absolute_file_path(file_path): raise ValueError("filePath must be an absolute path")
         name = args.get("name")
         if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("name is invalid")
         track_ref = args.get("trackRef")
@@ -6593,7 +6743,8 @@ class LiveObjectMapper:
             if float(region_end) <= float(region_start): raise ValueError("duplicate-region end must exceed start")
             call = lambda: method(float(region_start), float(region_end), float(destination))
         elif action == "scrub-start":
-            method = getattr(clip, "start_scrub", None)
+            # Live's Clip.scrub(position) (it has no start_scrub); stop_scrub ends it.
+            method = getattr(clip, "scrub", None) or getattr(clip, "start_scrub", None)
             if not callable(method): raise ValueError("clip scrub is unavailable")
             position = args.get("offset")
             if not isinstance(position, (int, float)) or isinstance(position, bool) or not math.isfinite(float(position)): raise ValueError("scrub position is invalid")
@@ -6628,19 +6779,12 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
-    def _automation_envelope_clear(self, args: dict[str, Any]) -> dict[str, Any]:
-        reference = args.get("clipRef")
-        if not isinstance(reference, str) or set(args) - {"clipRef", "expectedAuthorityDigest", "expectedEnvelopesRevision"}:
-            raise ValueError("envelope clear arguments are invalid")
-        if not hmac.compare_digest(self._clip_authority_digest(reference), str(args.get("expectedAuthorityDigest"))):
-            raise ValueError("clip hierarchy changed since preview")
-        _, slot, track_index, _ = self._clip_location(reference)
-        clip = getattr(slot, "clip", None)
-        if clip is None: raise ValueError("envelope clear requires a Session clip")
-        clearer = getattr(clip, "clear_all_envelopes", None)
+    def _envelope_presence(self, clip: Any, track: Any) -> list[bool]:
+        """Whether the Session clip has an envelope for each parameter clear_all_envelopes clears, in a fixed order:
+        every device's on its track (in racks' chains and every drum pad's, shown or not), then the mixer's volume,
+        pan, cue and sends. A clear fences on its digest, and discovery reports that digest when asked for it."""
         reader = getattr(clip, "automation_envelope", None)
-        if not callable(clearer) or not callable(reader): raise ValueError("envelope clear is unavailable")
-        track = self._items(getattr(self.song, "tracks", []))[track_index]
+        if not callable(reader): raise ValueError("envelope clear is unavailable")
         def walk(device: Any) -> list[Any]:
             collected = list(self._items(getattr(device, "parameters", [])))
             for chain in self._items(self._read_attr(device, "chains") or []):
@@ -6654,12 +6798,25 @@ class LiveObjectMapper:
         if mixer is not None:
             parameters.extend(param for param in (self._read_attr(mixer, "volume"), self._read_attr(mixer, "panning"), self._read_attr(mixer, "cue_volume")) if param is not None)
             parameters.extend(self._items(self._read_attr(mixer, "sends") or []))
-        def presence() -> list[bool]:
-            rows = []
-            for parameter in parameters:
-                try: rows.append(reader(parameter) is not None)
-                except BaseException: rows.append(False)
-            return rows
+        rows = []
+        for parameter in parameters:
+            try: rows.append(reader(parameter) is not None)
+            except BaseException: rows.append(False)
+        return rows
+
+    def _automation_envelope_clear(self, args: dict[str, Any]) -> dict[str, Any]:
+        reference = args.get("clipRef")
+        if not isinstance(reference, str) or set(args) - {"clipRef", "expectedAuthorityDigest", "expectedEnvelopesRevision"}:
+            raise ValueError("envelope clear arguments are invalid")
+        if not hmac.compare_digest(self._clip_authority_digest(reference), str(args.get("expectedAuthorityDigest"))):
+            raise ValueError("clip hierarchy changed since preview")
+        _, slot, track_index, _ = self._clip_location(reference)
+        clip = getattr(slot, "clip", None)
+        if clip is None: raise ValueError("envelope clear requires a Session clip")
+        clearer = getattr(clip, "clear_all_envelopes", None)
+        if not callable(clearer) or not callable(getattr(clip, "automation_envelope", None)): raise ValueError("envelope clear is unavailable")
+        track = self._items(getattr(self.song, "tracks", []))[track_index]
+        presence = lambda: self._envelope_presence(clip, track)
         before = presence()
         if not hmac.compare_digest(hashlib.sha256(self._bounded_canonical(before).encode("utf-8")).hexdigest(), str(args.get("expectedEnvelopesRevision"))):
             raise ValueError("clip envelope collection changed since preview")
@@ -6686,7 +6843,9 @@ class LiveObjectMapper:
         reference = args.get("ref")
         if not isinstance(reference, str) or set(args) - {"ref"}: raise ValueError("note read arguments are invalid")
         clip = self.refs.get(reference)
-        reader = getattr(clip, "get_selected_notes", None)
+        # Live 11's call gives each note its id; the old one gives tuples without ids, which nothing can act on.
+        reader = getattr(clip, "get_selected_notes_extended", None)
+        if not callable(reader): reader = getattr(clip, "get_selected_notes", None)
         if not callable(reader): return {"available": False, "notes": [], "notesRevision": hashlib.sha256(self._bounded_canonical(self._read_notes(clip)).encode("utf-8")).hexdigest()}
         try: raw = list(reader())
         except BaseException as error: raise ValueError("selected note read failed") from error
@@ -6869,7 +7028,7 @@ class LiveObjectMapper:
         file_path = None; length = None
         if audio:
             file_path = args.get("filePath")
-            if not isinstance(file_path, str) or not 1 <= len(file_path) <= 1024 or not (file_path.startswith("/") or (len(file_path) > 2 and file_path[1] == ":" and file_path[0].isalpha())): raise ValueError("filePath must be an absolute path")
+            if not _absolute_file_path(file_path): raise ValueError("filePath must be an absolute path")
             if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("name is invalid")
         else:
             length = args.get("length")
@@ -7235,8 +7394,10 @@ class LiveObjectMapper:
         playback = self._playback()
         state_revision = hashlib.sha256(self._bounded_canonical({"isTriggered": self._read_attr(scene, "is_triggered"), "playing": playback["transport"]["playing"]}).encode("utf-8")).hexdigest()
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("scene fire state changed since preview")
-        fire = getattr(scene, "fire_as_selected", None)
-        if not callable(fire): raise ValueError("scene fire-as-selected is unavailable")
+        # Scene.fire launches this scene. fire_as_selected launches whichever scene is selected (then selects the
+        # next), whatever scene it's called on.
+        fire = getattr(scene, "fire", None)
+        if not callable(fire): raise ValueError("scene fire is unavailable")
         fire()
         # Live 12.4 launches a scene on its next tick, so right after the call it
         # isn't queued or playing yet: that is pending, not refused. The host
@@ -7364,11 +7525,15 @@ class LiveObjectMapper:
             method, call_args = getattr(song, "scrub_by", None), (float(beat),)
         elif action == "tap-tempo": method, call_args = getattr(song, "tap_tempo", None), ()
         elif action == "nudge-up" or action == "nudge-down":
-            # nudge_up/nudge_down are momentary settable properties, not callables.
+            # nudge_up/nudge_down are Live's Nudge buttons, momentary states rather than callables: pressed, then let
+            # go after a click's worth by the fire buttons' hold, or Live plays nudged until someone clicks.
             attribute = "nudge_up" if action == "nudge-up" else "nudge_down"
             if self._read_attr(song, attribute) is None: raise ValueError(f"transport action {action} is unavailable on this Live shape")
             try: setattr(song, attribute, True)
             except BaseException as error: raise ValueError(f"transport action {action} is unavailable on this Live shape") from error
+            held = getattr(self, "_held_fire_buttons", None)
+            if held is None: held = self._held_fire_buttons = {}
+            held[f"song:{attribute}"] = {"target": song, "owner": None, "expiresAt": int(time.time() * 1000) + self.NUDGE_HOLD_MS, "release": lambda: setattr(song, attribute, False)}
             return {"done": True, "revision": str(self._playback()["revision"])}
         elif action == "stop-all-clips": method, call_args = getattr(song, "stop_all_clips", None), ()
         elif action == "back-to-arrangement":
@@ -7389,7 +7554,30 @@ class LiveObjectMapper:
             method = getattr(song, "force_link_beat_time", None)
             beat = args.get("beatTime")
             if not isinstance(beat, (int, float)) or isinstance(beat, bool) or not math.isfinite(float(beat)): raise ValueError("beatTime is required for force-link-beat-time")
-            call_args = (float(beat),)
+            if not callable(method): raise ValueError(f"transport action {action} is unavailable on this Live shape")
+            # Live's Song.force_link_beat_time() takes nothing: it moves Link's timeline to Live's own beat time. So Live
+            # goes to the beat first (the host's contract, and the simulator's), and Link follows. Live moves the
+            # playhead only on its next tick, so called at once Link would jump to where the playhead was: when it's
+            # elsewhere, it's moved and the call asks to be retried (the host does, once per tick). Playing, the
+            # playhead goes on from the beat once it's there, so up to half a second's worth past it counts (a retry
+            # comes about a tick after the move), and Link follows Live where it is. A beat before the start is
+            # refused: Live's playhead can't go there. A shape whose call wants the beat (Boost refuses a call it
+            # can't match with a TypeError, before it runs) is given it too.
+            if float(beat) < 0: raise ValueError("beatTime is before the start of the Set, where Live's playhead can't go")
+            current = self._read_attr(song, "current_song_time"); tempo = self._read_attr(song, "tempo")
+            playing = self._read_attr(song, "is_playing") is True
+            late = float(tempo) / 120.0 if playing and isinstance(tempo, (int, float)) and not isinstance(tempo, bool) and math.isfinite(float(tempo)) and tempo > 0 else 0.0
+            there = isinstance(current, (int, float)) and not isinstance(current, bool) and math.isfinite(float(current)) and (_same_number(current, beat) or float(beat) <= float(current) < float(beat) + late)
+            if not there:
+                try: song.current_song_time = float(beat)
+                except RuntimeError as error:
+                    past = self._past_end(float(beat))
+                    if past is not None: raise past from error
+                    raise
+                raise ValueError(PLAYHEAD_PENDING)
+            try: method()
+            except TypeError: method(float(beat))
+            return {"done": True, "revision": str(self._playback()["revision"])}
         if not callable(method): raise ValueError(f"transport action {action} is unavailable on this Live shape")
         method(*call_args)
         return {"done": True, "revision": str(self._playback()["revision"])}
@@ -7440,7 +7628,10 @@ class LiveObjectMapper:
             if not callable(start_method) or not callable(length_method):
                 return {"available": False, "loopStart": None, "loopLength": None, "smpte": None}
             start = start_method(); length = length_method()
-            if not all(isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) for value in (start, length)):
+            number = lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+            # Live answers these as BeatTime (bars, beats, sixteenths, ticks), not beats: the loop in beats is the Song's own.
+            if not (number(start) and number(length)): start, length = self._read_attr(song, "loop_start"), self._read_attr(song, "loop_length")
+            if not (number(start) and number(length)):
                 raise ValueError("beats loop time shape is unreadable")
             return {"available": True, "loopStart": float(start), "loopLength": float(length), "smpte": None}
         format_key = args.get("smpteFormat", "smpte-25")
@@ -7457,6 +7648,30 @@ class LiveObjectMapper:
             if isinstance(value, int) and 0 <= value <= 10**6: fields[name] = int(value)
         if not fields: raise ValueError("SMPTE time shape is unreadable")
         return {"available": True, "loopStart": None, "loopLength": None, "smpte": fields}
+
+    def _track_load(self, track: Any) -> dict[str, Any]:
+        """A track's meters and performance impact, as its row and performance.read give them."""
+        def optional_float(name: str) -> float | None:
+            value = self._read_attr(track, name)
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
+        impact = self._read_attr(track, "performance_impact")
+        return {
+            "inputMeterLeft": optional_float("input_meter_left"),
+            "inputMeterRight": optional_float("input_meter_right"),
+            "inputMeterLevel": optional_float("input_meter_level"),
+            "outputMeterLeft": optional_float("output_meter_left"),
+            "outputMeterRight": optional_float("output_meter_right"),
+            "outputMeterLevel": optional_float("output_meter_level"),
+            "performanceImpact": int(impact) if isinstance(impact, int) and not isinstance(impact, bool) else None,
+        }
+
+    def _device_latency(self, device: Any) -> dict[str, Any]:
+        """A device's latency, as its row and performance.read give it."""
+        samples = self._read_attr(device, "latency_in_samples"); ms = self._read_attr(device, "latency_in_ms")
+        return {
+            "latencySamples": int(samples) if isinstance(samples, int) and not isinstance(samples, bool) else None,
+            "latencyMs": float(ms) if isinstance(ms, (int, float)) and not isinstance(ms, bool) and math.isfinite(float(ms)) else None,
+        }
 
     def _track_state_fields(self, track: Any, track_index: int) -> dict[str, Any]:
         def optional_bool(obj: Any, name: str) -> bool | None:
@@ -7478,7 +7693,8 @@ class LiveObjectMapper:
             "colorIndex": int(color_index) if isinstance(color_index, int) and not isinstance(color_index, bool) and 0 <= color_index <= 69 else None,
             "color": int(color_rgb) if isinstance(color_rgb, int) and not isinstance(color_rgb, bool) and 0 <= color_rgb <= 0xFFFFFF else None,
             "isVisible": optional_bool(track, "is_visible"),
-            "isSelected": (selected_track is track) if selected_track is not None else None,
+            # Live hands out a fresh proxy each read: the selected track is this one when it's the same Live object.
+            "isSelected": (selected_track is track or self._capture_object_identity(selected_track) == self._capture_object_identity(track)) if selected_track is not None else None,
             "isFrozen": optional_bool(track, "is_frozen"),
             "foldState": optional_bool(track, "fold_state") if optional_bool(track, "fold_state") is not None else optional_bool(track, "is_folded"),
             "implicitArm": optional_bool(track, "implicit_arm"),
@@ -7486,13 +7702,7 @@ class LiveObjectMapper:
             "isGrouped": optional_bool(track, "is_grouped"),
             "backToArranger": optional_bool(track, "back_to_arranger"),
             "mutedViaSolo": optional_bool(track, "muted_via_solo"),
-            "inputMeterLeft": optional_float(track, "input_meter_left"),
-            "inputMeterRight": optional_float(track, "input_meter_right"),
-            "inputMeterLevel": optional_float(track, "input_meter_level"),
-            "outputMeterLeft": optional_float(track, "output_meter_left"),
-            "outputMeterRight": optional_float(track, "output_meter_right"),
-            "outputMeterLevel": optional_float(track, "output_meter_level"),
-            "performanceImpact": int(self._read_attr(track, "performance_impact")) if isinstance(self._read_attr(track, "performance_impact"), int) and not isinstance(self._read_attr(track, "performance_impact"), bool) else None,
+            **self._track_load(track),
             "view": {
                 "selectedDeviceRef": self.refs.put("device", selected_device, f"view:{track_index}") if selected_device is not None else None,
                 "deviceInsertMode": int(device_insert_mode) if isinstance(device_insert_mode, int) and not isinstance(device_insert_mode, bool) else None,
@@ -7593,6 +7803,8 @@ class LiveObjectMapper:
         if not 0 <= index < len(tracks): raise ValueError("track hierarchy changed")
         track = tracks[index]
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(track), args["expectedObjectIdentity"]): raise ValueError("track identity changed since preview")
+        # Live copies a group with every track inside it: more than this change can confirm or take back as one.
+        if self._track_kind(track) == "group": raise ValueError(f"a group track can't be duplicated: Live copies every track inside it too{UNRUN_SUFFIX}")
         duplicator = getattr(self.song, "duplicate_track", None)
         if not callable(duplicator): raise ValueError("track duplication is unavailable")
         before = len(tracks)
@@ -7955,23 +8167,54 @@ class LiveObjectMapper:
                 if key == "detailClipRef": proposals.append((attribute, None))
                 continue
             if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:{kind}:"): raise ValueError(f"{key} is stale or invalid")
+            # Song.View's selected_parameter can only be read: Live selects a parameter only when the producer clicks one.
+            if key == "parameterRef": raise ValueError(f"Live doesn't let a script select a parameter (Song.View.selected_parameter can only be read){UNRUN_SUFFIX}")
             proposals.append((attribute, self.refs.get(reference)))
         if not proposals: raise ValueError("selection mutation has no fields")
         def identity_of(value: Any) -> str | None:
             return None if value is None else self._capture_object_identity(value)
+        # Live's select_device selects a device on its own track's view and leaves the selected track as it is (Live
+        # 12.4.15), while the selected device is the selected track's: so a device on another track brings its track
+        # along, selected first (and put back first on a rollback). A trackRef naming another track can't be both.
+        device = next((value for attribute, value in proposals if attribute == "selected_device"), None)
+        if device is not None:
+            tracks = [*self._items(getattr(self.song, "tracks", [])), *self._items(getattr(self.song, "return_tracks", [])), self._read_attr(self.song, "master_track")]
+            by_identity = {identity_of(track): track for track in tracks if track is not None}
+            owner, candidate = None, device
+            for _ in range(64):
+                candidate = self._read_attr(candidate, "canonical_parent")
+                if candidate is None: break
+                owner = by_identity.get(identity_of(candidate))
+                if owner is not None: break
+            named = next((value for attribute, value in proposals if attribute == "selected_track"), None)
+            if named is not None and owner is not None and identity_of(named) != identity_of(owner): raise ValueError("deviceRef is on another track than trackRef")
+            if named is None and owner is not None: proposals.insert(0, ("selected_track", owner))
         assignments = []
         try:
             for attribute, value in proposals:
-                prior = self._read_attr(view, attribute)
-                setattr(view, attribute, value)
+                if attribute == "selected_device":
+                    # Song.View has no selected_device to set: it selects a device through select_device, on the
+                    # device's track (selected just before), so that track and its earlier device are what go back.
+                    select = getattr(view, "select_device", None)
+                    if not callable(select): raise ValueError("device selection is unavailable on this Live shape")
+                    prior = (self._read_attr(view, "selected_track"), self._selected_device(view))
+                    select(value)
+                else:
+                    prior = self._read_attr(view, attribute)
+                    setattr(view, attribute, value)
                 assignments.append((attribute, prior))
             for attribute, value in proposals:
-                observed = self._read_attr(view, attribute)
+                observed = self._selected_object(view, attribute)
                 if identity_of(observed) != identity_of(value): raise ValueError("selection change was not confirmed")
         except BaseException as error:
             rollback_failed = False
             for attribute, prior in reversed(assignments):
-                try: setattr(view, attribute, prior)
+                try:
+                    if attribute == "selected_device":
+                        track, device = prior
+                        setattr(view, "selected_track", track)
+                        if device is not None: view.select_device(device)
+                    else: setattr(view, attribute, prior)
                 except BaseException: rollback_failed = True
             if rollback_failed or self._bounded_canonical(self._selection_state()) != self._bounded_canonical(before_state): raise ValueError("selection change failed and exact rollback failed") from error
             raise
@@ -8203,24 +8446,12 @@ class LiveObjectMapper:
             application = None
         average = self._read_attr(application, "average_process_usage") if application is not None else None
         peak = self._read_attr(application, "peak_process_usage") if application is not None else None
-        snapshot = self.snapshot()
+        # Read from each track and its light device walk, not a whole-Set snapshot: someone asking what uses the
+        # CPU is worried about load already.
         tracks = []
-        for track in snapshot["tracks"]:
-            devices = []
-            def collect(rows: list[dict[str, Any]]) -> None:
-                for row in rows:
-                    devices.append({"ref": row["ref"], "latencySamples": row.get("latencySamples"), "latencyMs": row.get("latencyMs")})
-                    for chain in row.get("chains", []): collect(chain.get("devices", []))
-                    for pad in row.get("drumPads", []):
-                        for chain in pad.get("chains", []): collect(chain.get("devices", []))
-            collect(track.get("devices", []))
-            tracks.append({
-                "ref": track["ref"],
-                "performanceImpact": track.get("performanceImpact"),
-                "inputMeterLeft": track.get("inputMeterLeft"), "inputMeterRight": track.get("inputMeterRight"), "inputMeterLevel": track.get("inputMeterLevel"),
-                "outputMeterLeft": track.get("outputMeterLeft"), "outputMeterRight": track.get("outputMeterRight"), "outputMeterLevel": track.get("outputMeterLevel"),
-                "devices": devices,
-            })
+        for index, track in enumerate(self._all_track_objects()):
+            devices = [{"ref": light["ref"], **self._device_latency(device)} for device, _, _, light in self._light_walk(index)]
+            tracks.append({"ref": self.refs.put("track", track, str(index)), **self._track_load(track), "devices": devices})
         state = {"averageProcessUsage": average, "peakProcessUsage": peak, "tracks": tracks}
         return {**state, "sampledAt": int(time.time() * 1000), "revision": hashlib.sha256(self._bounded_canonical(state).encode("utf-8")).hexdigest()}
 
@@ -8351,7 +8582,21 @@ class LiveObjectMapper:
             if not isinstance(value, bool): raise ValueError("chainActivator is invalid")
             proposals.append((parameter, 1.0 if value else 0.0, "chain activator"))
         if not proposals: raise ValueError("chain mixer mutation has no fields")
-        for parameter, target, name in proposals: self._set_parameter_direct(parameter, target, name)
+        applied: list[tuple[Any, Any]] = []
+        try:
+            for parameter, target, name in proposals:
+                prior = self._read_attr(parameter, "value")
+                self._set_parameter_direct(parameter, target, name); applied.append((parameter, prior))
+        except BaseException as error:
+            # The one that failed put itself back; those written before it go back too, so a failed call leaves the chain as it was.
+            rollback_failed = False
+            for parameter, prior in reversed(applied):
+                try: parameter.value = prior
+                except BaseException: rollback_failed = True
+                restored = self._read_attr(parameter, "value")
+                if not isinstance(restored, (int, float)) or isinstance(restored, bool) or not _same_number(restored, prior): rollback_failed = True
+            if rollback_failed: raise ValueError("chain mixer change failed and exact rollback failed") from error
+            raise
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
@@ -8391,33 +8636,34 @@ class LiveObjectMapper:
         state_revision = hashlib.sha256(self._bounded_canonical({"routingType": current["routingType"], "routingChannel": current["routingChannel"]}).encode("utf-8")).hexdigest()
         if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(state_revision, args["expectedStateRevision"]): raise ValueError("device IO state changed since preview")
         if "routingType" not in args and "routingChannel" not in args: raise ValueError("device IO mutation has no fields")
-        proposals: list[tuple[str, Any, str]] = []
-        if "routingType" in args:
-            wanted = args["routingType"]
-            if not isinstance(wanted, str) or not 1 <= len(wanted) <= 128: raise ValueError("routingType is invalid")
-            available = self._items(self._read_attr(io, "available_routing_types") or [])
-            target = next((item for item in available if self._choice_name(item) == wanted), None)
-            if target is None: raise ValueError("routingType is not an available choice")
-            proposals.append(("routing_type", target, wanted))
-        if "routingChannel" in args:
-            wanted = args["routingChannel"]
-            if not isinstance(wanted, str) or not 1 <= len(wanted) <= 128: raise ValueError("routingChannel is invalid")
-            channels = self._items(self._read_attr(io, "available_routing_channels") or [])
-            target = next((item for item in channels if self._choice_name(item) == wanted), None)
-            if target is None: raise ValueError("routingChannel is not an available choice")
-            proposals.append(("routing_channel", target, wanted))
-        applied: list[tuple[str, Any]] = []
+        for field in ("routingType", "routingChannel"):
+            if field in args and (not isinstance(args[field], str) or not 1 <= len(args[field]) <= 128): raise ValueError(f"{field} is invalid")
+        choice = lambda attribute, wanted: next((item for item in self._items(self._read_attr(io, attribute) or []) if self._choice_name(item) == wanted), None)
+        route_type = choice("available_routing_types", args["routingType"]) if "routingType" in args else None
+        if "routingType" in args and route_type is None: raise ValueError("routingType is not an available choice")
+        # A new type brings its own channels: its channel is looked up once the type is set. Without one, before
+        # anything changes.
+        if "routingChannel" in args and route_type is None and choice("available_routing_channels", args["routingChannel"]) is None: raise ValueError("routingChannel is not an available choice")
+        prior_type, prior_channel = self._read_attr(io, "routing_type"), self._read_attr(io, "routing_channel"); changed = False
         try:
-            for attribute, target, wanted in proposals:
-                prior = self._read_attr(io, attribute)
-                setattr(io, attribute, target)
-                applied.append((attribute, prior))
-                if self._choice_name(self._read_attr(io, attribute)) != wanted: raise ValueError("device IO routing change was not confirmed")
+            if route_type is not None:
+                changed = True; io.routing_type = route_type
+                if self._choice_name(self._read_attr(io, "routing_type")) != args["routingType"]: raise ValueError("device IO routing change was not confirmed")
+            if "routingChannel" in args:
+                channel = choice("available_routing_channels", args["routingChannel"])
+                if channel is None: raise ValueError("routingChannel is not an available choice")
+                changed = True; io.routing_channel = channel
+                if self._choice_name(self._read_attr(io, "routing_channel")) != args["routingChannel"]: raise ValueError("device IO routing change was not confirmed")
         except BaseException as error:
+            if not changed: raise
+            # The type first, then the channel it had (a type puts its own default channel in place).
             rollback_failed = False
-            for attribute, prior in reversed(applied):
-                try: setattr(io, attribute, prior)
-                except BaseException: rollback_failed = True
+            try:
+                if route_type is not None: io.routing_type = prior_type
+                io.routing_channel = prior_channel
+            except BaseException: rollback_failed = True
+            restored = self._device_io_fields(owner)
+            if (restored["routingType"], restored["routingChannel"]) != (current["routingType"], current["routingChannel"]): rollback_failed = True
             if rollback_failed: raise ValueError("device IO routing change failed and exact rollback failed") from error
             raise
         revision = self.refs.touch(reference)
@@ -8605,7 +8851,7 @@ class LiveObjectMapper:
         args = {key: value for key, value in args.items() if key != "instrument"}
         reference = args.get("ref"); sample_path = args.get("samplePath"); name = args.get("name")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:drum_pad:") or set(args) - {"ref", "expectedObjectIdentity", "samplePath", "name"}: raise ValueError("drum pad authority is invalid")
-        if not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha())): raise ValueError("samplePath must be an absolute path")
+        if not _absolute_file_path(sample_path): raise ValueError("samplePath must be an absolute path")
         if name is not None and (not isinstance(name, str) or not 1 <= len(name) <= 256): raise ValueError("drum pad chain name is invalid")
         pad = self.refs.get(reference)
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(pad), args["expectedObjectIdentity"]): raise ValueError("drum pad identity changed since preview")
@@ -9065,6 +9311,36 @@ class LiveObjectMapper:
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
+    def _row_choice_names(self, value: Any) -> list[str] | None:
+        """A device's choices by name, as its row shows them (and as a setter must match them): a choice's own
+        name, else its text, which is the name itself where Live lists plain strings. An object without a name
+        reads as its type, never its address: a fresh wrapper each read has a new one, and a row that changes on
+        every read can never be confirmed."""
+        if value is None: return None
+        names = []
+        for item in self._items(value):
+            name = self._choice_name(item)
+            names.append(name if name is not None else re.sub(r" at 0x[0-9A-Fa-f]+", "", str(item))[:128])
+        return names
+
+    def _hybrid_reverb_row(self, device: Any) -> dict[str, Any]:
+        """Hybrid Reverb's IR and shaping, as its row shows them: what the host fences a change on."""
+        def number(value: Any) -> float | None:
+            return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
+        def chosen(index: Any, names: list[str] | None) -> str | None:
+            if not isinstance(index, int) or isinstance(index, bool) or names is None or not 0 <= index < len(names): return None
+            return names[index]
+        categories = self._row_choice_names(self._read_attr(device, "ir_category_list")); files = self._row_choice_names(self._read_attr(device, "ir_file_list"))
+        return {
+            "irCategory": chosen(self._read_attr(device, "ir_category_index"), categories),
+            "irFile": chosen(self._read_attr(device, "ir_file_index"), files),
+            "irCategoryList": categories,
+            "irFileList": files,
+            "attack": number(self._read_attr(device, "ir_attack_time")),
+            "decay": number(self._read_attr(device, "ir_decay_time")),
+            "size": number(self._read_attr(device, "ir_size_factor")),
+        }
+
     def _specialized_rows(self, device: Any, device_ref: str) -> dict[str, Any]:
         class_name = str(self._read_attr(device, "class_name") or device.__class__.__name__).lower()
         normalized = class_name.replace("_", "").replace(" ", "")
@@ -9075,16 +9351,7 @@ class LiveObjectMapper:
             return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
         def bool_or_none(value: Any) -> bool | None:
             return value if isinstance(value, bool) else None
-        def name_list(value: Any) -> list[str] | None:
-            if value is None: return None
-            items = self._items(value)
-            names = []
-            for item in items:
-                name = self._choice_name(item)
-                # An object without a name reads as its type, never its address: a fresh wrapper each read has a
-                # new one, and a row that changes on every read can never be confirmed.
-                names.append(name if name is not None else re.sub(r" at 0x[0-9A-Fa-f]+", "", str(item))[:128])
-            return names
+        name_list = self._row_choice_names
         def io_list(value: Any) -> list[str] | None:
             """A Max device's audio or MIDI ins and outs, each by where it's routed (its routing type's name), else its number."""
             if value is None: return None
@@ -9096,10 +9363,6 @@ class LiveObjectMapper:
                     name = self._choice_name(routing) if routing is not None else None
                 names.append(name if name is not None else str(index + 1))
             return names
-        def indexed_name(index: Any, choices: Any) -> str | None:
-            idx = int_or_none(index); names = name_list(choices)
-            if idx is None or names is None or not 0 <= idx < len(names): return None
-            return names[idx]
         if "drift" in class_name:
             # Live names each matrix slot's choices (mod_matrix_source_1_list...); slots of a kind share them.
             sources = name_list(self._read_attr(device, "mod_matrix_source_1_list", "mod_matrix_sources", "mod_sources"))
@@ -9127,15 +9390,7 @@ class LiveObjectMapper:
                 "selectedBand": int_or_none(self._read_attr(view, "selected_band")) if view is not None else None,
             }
         if "hybridreverb" in normalized or self._device_family(device) == "hybrid_reverb":
-            rows["hybridReverb"] = {
-                "irCategory": indexed_name(self._read_attr(device, "ir_category_index"), self._read_attr(device, "ir_category_list")),
-                "irFile": indexed_name(self._read_attr(device, "ir_file_index"), self._read_attr(device, "ir_file_list")),
-                "irCategoryList": name_list(self._read_attr(device, "ir_category_list")),
-                "irFileList": name_list(self._read_attr(device, "ir_file_list")),
-                "attack": float_or_none(self._read_attr(device, "ir_attack_time")),
-                "decay": float_or_none(self._read_attr(device, "ir_decay_time")),
-                "size": float_or_none(self._read_attr(device, "ir_size_factor")),
-            }
+            rows["hybridReverb"] = self._hybrid_reverb_row(device)
         if "meld" in class_name:
             rows["meld"] = {
                 "engine": int_or_none(self._read_attr(device, "selected_engine")),
@@ -9244,55 +9499,65 @@ class LiveObjectMapper:
             "selectedBand": ("view.selected_band", lambda value: isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 8),
         }, "eq8")
 
+    # What a Hybrid Reverb change is fenced on (the host fences on its row's same five), and each shaping
+    # setting's attribute and highest value.
+    _HYBRID_REVERB_STATE = ("irCategory", "irFile", "attack", "decay", "size")
+    _HYBRID_REVERB_SHAPING = {"attack": ("ir_attack_time", 10000), "decay": ("ir_decay_time", 100000), "size": ("ir_size_factor", 10000)}
+
+    def _hybrid_reverb_revision(self, device: Any) -> str:
+        row = self._hybrid_reverb_row(device)
+        return hashlib.sha256(self._bounded_canonical({field: row[field] for field in self._HYBRID_REVERB_STATE}).encode("utf-8")).hexdigest()
+
     def _hybrid_reverb_set(self, args: dict[str, Any]) -> dict[str, Any]:
-        reference = str(args.get("ref"))
+        reference = args.get("ref")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:") or "time" in args: raise ValueError("hybrid-reverb authority is invalid")
         device = self.refs.get(reference)
-        ir_proposals: list[tuple[str, int, int, str]] = []
-        if "irCategory" in args or "irFile" in args:
-            if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(device), args["expectedObjectIdentity"]): raise ValueError("device identity changed since preview")
-            for field, list_attr, index_attr, bound in (("irCategory", "ir_category_list", "ir_category_index", 128), ("irFile", "ir_file_list", "ir_file_index", 256)):
-                if field not in args: continue
-                value = args[field]
-                if not isinstance(value, str) or not 1 <= len(value) <= bound: raise ValueError(f"{field} is invalid")
-                choices = self._items(self._read_attr(device, list_attr) or [])
-                names = [self._choice_name(item) for item in choices]
-                if not choices or any(name is None for name in names): raise ValueError(f"{field} choices are unavailable on this device")
-                if value not in names: raise ValueError(f"{field} is not an available choice")
-                ir_proposals.append((index_attr, names.index(value), self._read_attr(device, index_attr), field))
-        applied: list[tuple[str, int]] = []
+        if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(device), args["expectedObjectIdentity"]): raise ValueError("device identity changed since preview")
+        # One state for the whole call, checked before anything is written, whether it changes the IR, its shaping or both.
+        before = self._hybrid_reverb_revision(device)
+        if not isinstance(args.get("expectedStateRevision"), str) or not hmac.compare_digest(before, args["expectedStateRevision"]): raise ValueError("hybrid-reverb state changed since preview")
+        for field, bound in (("irCategory", 128), ("irFile", 256)):
+            if field in args and (not isinstance(args[field], str) or not 1 <= len(args[field]) <= bound): raise ValueError(f"{field} is invalid")
+        shaping: list[tuple[str, Any]] = []
+        for field, (attribute, highest) in self._HYBRID_REVERB_SHAPING.items():
+            if field not in args: continue
+            value = args[field]
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value)) or not 0 <= float(value) <= highest: raise ValueError(f"{field} is invalid")
+            if self._read_attr(device, attribute) is None: raise ValueError(f"{attribute} is unavailable on this device")
+            shaping.append((attribute, value))
+        if not shaping and "irCategory" not in args and "irFile" not in args: raise ValueError("hybrid-reverb mutation has no fields")
+        prior = {attribute: self._read_attr(device, attribute) for attribute in ("ir_category_index", "ir_file_index", *(attribute for attribute, _ in shaping))}
+        written: list[str] = []
         try:
-            for index_attr, target_index, prior, field in ir_proposals:
-                setattr(device, index_attr, target_index)
-                applied.append((index_attr, prior))
+            # The category first: a file is one of its category's, so the file list is read once the category is set.
+            for field, list_attr, index_attr in (("irCategory", "ir_category_list", "ir_category_index"), ("irFile", "ir_file_list", "ir_file_index")):
+                if field not in args: continue
+                # By the names the row shows: Live may list them as plain strings.
+                names = self._row_choice_names(self._read_attr(device, list_attr)) or []
+                if not names: raise ValueError(f"{field} choices are unavailable on this device")
+                if args[field] not in names: raise ValueError(f"{field} is not an available choice")
+                # Choices Live hands out without names all read as their type: a name held more than once can't say
+                # which one is meant, so it's refused rather than taken as the first.
+                if names.count(args[field]) > 1: raise ValueError(f"{field} names more than one choice on this device")
+                target = names.index(args[field])
+                written.append(index_attr); setattr(device, index_attr, target)
                 observed = self._read_attr(device, index_attr)
-                if not isinstance(observed, int) or isinstance(observed, bool) or observed != target_index: raise ValueError(f"{field} change was not confirmed")
+                if not isinstance(observed, int) or isinstance(observed, bool) or observed != target: raise ValueError(f"{field} change was not confirmed")
+            for attribute, value in shaping:
+                written.append(attribute); setattr(device, attribute, value)
+            for attribute, value in shaping:
+                observed = self._read_attr(device, attribute)
+                if not isinstance(observed, (int, float)) or isinstance(observed, bool) or not _same_number(observed, value): raise ValueError("hybrid-reverb change was not confirmed")
         except BaseException as error:
+            # The shaping back first, then the category before its file: setting a category can move the file.
+            order = [attribute for attribute in reversed(written) if attribute not in ("ir_category_index", "ir_file_index")]
+            order += ["ir_category_index", "ir_file_index"] if "ir_category_index" in written else ["ir_file_index"] if "ir_file_index" in written else []
             rollback_failed = False
-            for index_attr, prior in reversed(applied):
-                try: setattr(device, index_attr, prior)
+            for attribute in order:
+                try: setattr(device, attribute, prior[attribute])
                 except BaseException: rollback_failed = True
-            if rollback_failed: raise ValueError("IR selection change failed and exact rollback failed") from error
+            if rollback_failed or self._hybrid_reverb_revision(device) != before: raise ValueError("hybrid-reverb change failed and exact rollback failed") from error
             raise
-        if any(field in args for field in ("attack", "decay", "size")):
-            try:
-                return self._specialized_set(reference, args, {
-                    "attack": ("ir_attack_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
-                    "decay": ("ir_decay_time", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 100000),
-                    "size": ("ir_size_factor", lambda value: isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0 <= float(value) <= 10000),
-                }, "hybrid-reverb")
-            except BaseException as error:
-                # The shaping phase fences independently, but a failure there
-                # must not strand the IR indices already applied above:
-                # restore the exact prior selection so one failed call leaves
-                # the device untouched, like every other specialized family.
-                rollback_failed = False
-                for index_attr, prior in reversed(applied):
-                    try: setattr(device, index_attr, prior)
-                    except BaseException: rollback_failed = True
-                if rollback_failed: raise ValueError("hybrid-reverb shaping change failed and exact IR rollback failed") from error
-                raise
-        if not ir_proposals: raise ValueError("hybrid-reverb mutation has no fields")
         revision = self.refs.touch(reference)
         return {"changed": True, "revision": revision}
 
@@ -9345,7 +9610,7 @@ class LiveObjectMapper:
     def _simpler_replace_sample(self, args: dict[str, Any]) -> dict[str, Any]:
         reference = str(args.get("ref"))
         file_path = args.get("filePath")
-        if not isinstance(file_path, str) or not 1 <= len(file_path) <= 1024 or not (file_path.startswith("/") or (len(file_path) > 2 and file_path[1] == ":" and file_path[0].isalpha())): raise ValueError("filePath must be an absolute path")
+        if not _absolute_file_path(file_path): raise ValueError("filePath must be an absolute path")
         if not isinstance(reference, str) or not reference.startswith(f"{self.refs.epoch}:device:") or set(args) - {"ref", "filePath", "expectedObjectIdentity", "expectedStateRevision"}: raise ValueError("simpler authority is invalid")
         device = self.refs.get(reference)
         if not isinstance(args.get("expectedObjectIdentity"), str) or not hmac.compare_digest(self._capture_object_identity(device), args["expectedObjectIdentity"]): raise ValueError("device identity changed since preview")
@@ -9911,6 +10176,13 @@ class LiveObjectMapper:
             seconds, samples = float(value), convert("seconds_to_sample_time", value); beats = convert("sample_to_beat_time", samples) if samples is not None else None
         return {"beats": beats, "samples": samples, "seconds": seconds}
 
+    @classmethod
+    def _python_ran_error(cls, error: BaseException) -> dict[str, str]:
+        """A python.run failure after the code ran: its type says so (PYTHON_RAN), and its message that Live may
+        have changed."""
+        shaped = cls._python_error(error)
+        return {**shaped, "type": PYTHON_RAN, "message": f"The code ran, so Live may have changed, but then {shaped['type']}: {shaped['message']}"[:MAX_WIRE_STRING_LENGTH]}
+
     @staticmethod
     def _python_error(error: BaseException) -> dict[str, str]:
         """Even an exception whose __str__ fails must stay data on the Live thread."""
@@ -9987,10 +10259,13 @@ class LiveObjectMapper:
     def _python_run(self, args: dict[str, Any]) -> dict[str, Any]:
         """Run on the invoke path's Live thread. No transaction undo: Live owns this undo step.
         Tracing interrupts Python bytecode; a native call is checked when it returns."""
-        output = io.StringIO()
+        output = _BoundedOutput(MAX_WIRE_STRING_LENGTH)
         previous_stdout, previous_trace = sys.stdout, sys.gettrace()
-        opened = None
+        opened = None; ran = False
         response = {"ok": False, "result": None, "stdout": "", "error": None}
+        # A failure once the code has run (its result, the deadline after it, its undo step, its output) says
+        # so: Live may have changed, and the caller mustn't take it for a refusal.
+        failure = lambda error: self._python_ran_error(error) if ran else self._python_error(error)
         try:
             mode, code, timeout = args.get("mode", "exec"), args.get("code"), args.get("timeoutMs", 5000)
             if set(args) - {"mode", "code", "ref", "timeoutMs"} or mode not in {"eval", "exec"} or not isinstance(code, str) or not 1 <= len(code) <= 65536 or not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 30000:
@@ -10029,6 +10304,7 @@ class LiveObjectMapper:
                 else:
                     exec(compiled, env, env)
                     value = env.get("result")
+                ran = True
                 response["result"] = self._python_json(value, live, application)
                 self._bounded_canonical(response["result"])
                 trace(None, "return", None)
@@ -10036,17 +10312,17 @@ class LiveObjectMapper:
             finally:
                 sys.settrace(previous_trace)
         except BaseException as error:
-            response.update(ok=False, result=None, error=self._python_error(error))
+            response.update(ok=False, result=None, error=failure(error))
         finally:
             sys.settrace(previous_trace)
             sys.stdout = previous_stdout
             if opened is not None:
                 try: self._undo_step_operation("undo.step.end", {"stepId": opened["stepId"]})
                 except BaseException as error:
-                    response.update(ok=False, result=None, error=self._python_error(error))
-            try: response["stdout"] = output.getvalue()[:MAX_WIRE_STRING_LENGTH]
+                    response.update(ok=False, result=None, error=failure(error))
+            try: response["stdout"] = output.getvalue()
             except BaseException as error:
-                response.update(ok=False, result=None, error=self._python_error(error))
+                response.update(ok=False, result=None, error=failure(error))
         return response
 
     def _application_message(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -10269,7 +10545,7 @@ class LiveObjectMapper:
                 if not 0 <= send_index < len(sends):
                     raise ValueError("send parameter is stale")
                 return sends[send_index]
-            parameter = self._read_attr(mixer, parts[2])
+            parameter = self._read_attr(mixer, self._MIXER_REF_ATTRIBUTES.get(parts[2], parts[2]))
             if parameter is None:
                 raise ValueError("mixer parameter is unavailable")
             return parameter
@@ -10287,8 +10563,14 @@ class LiveObjectMapper:
             if budget[0] > MAX_TRAVERSAL: raise ValueError("realtime parameter identity traversal exceeded its bound")
         def descriptor(current_ref: str, parameter: Any, owner_ref: str, owner: Any, track_ref: str, track: Any, siblings: list[dict[str, str]]) -> dict[str, Any]:
             return {"ref": current_ref, "parameterIdentity": self._capture_object_identity(parameter), "ownerRef": owner_ref, "ownerIdentity": self._capture_object_identity(owner), "trackRef": track_ref, "trackIdentity": self._capture_object_identity(track), "siblings": siblings}
-        # A ref is positional: only its own track can hold it, so only that track is walked.
+        # A ref is positional: only its own track can hold it, so only that track is walked, and on it only the
+        # devices on the way to the one the ref names (its path) are read past their place.
         own_track = self._ref_track_index(reference)
+        target_path: str | None = None; device_prefix = f"{self.refs.epoch}:device:"; key = reference.partition(":parameter:")[2]
+        if key.startswith(device_prefix):
+            path, _, last = key[len(device_prefix):].rpartition(":")
+            if path.endswith(":macro") and last.isdigit(): target_path = path[:-len(":macro")]
+            elif last.isdigit(): target_path = path
         for track_index, track in ([(own_track, tracks[own_track])] if own_track is not None and own_track < len(tracks) else [] if own_track is not None else enumerate(tracks)):
             if track is None: continue
             track_ref = self.refs.put("track", track, str(track_index)); mixer = self._read_attr(track, "mixer_device")
@@ -10312,12 +10594,14 @@ class LiveObjectMapper:
                 if len(devices) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device collection exceeds its bound")
                 for device_index, device in enumerate(devices):
                     consume(); device_path = f"{path}:{device_index}"; device_ref = self.refs.put("device", device, device_path)
-                    parameters: list[tuple[int, Any]] = []; native_parameters = self._items(self._read_attr(device, "parameters") or [])
+                    holds = target_path is None or target_path == device_path; inside = target_path is None or target_path.startswith(f"{device_path}:")
+                    if not holds and not inside: continue
+                    parameters: list[tuple[int, Any]] = []; native_parameters = self._items(self._read_attr(device, "parameters") or []) if holds else []
                     if len(native_parameters) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device parameter collection exceeds its complete-state bound")
                     for parameter_index, parameter in enumerate(native_parameters):
                         numeric = (self._read_attr(parameter, "min", "min_value"), self._read_attr(parameter, "max", "max_value"), self._read_attr(parameter, "value"))
                         if all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(float(item)) for item in numeric): parameters.append((parameter_index, parameter))
-                    macros = self._rack_macros(device) if self._read_attr(device, "can_have_chains") is True else []
+                    macros = self._rack_macros(device) if holds and self._read_attr(device, "can_have_chains") is True else []
                     if len(parameters) + len(macros) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device parameter collection exceeds its bound")
                     parameter_rows = [(self.refs.put("parameter", parameter, f"{device_ref}:{parameter_index}"), parameter) for parameter_index, parameter in parameters]
                     parameter_identities = {self._capture_object_identity(parameter) for _, parameter in parameter_rows}
@@ -10327,6 +10611,7 @@ class LiveObjectMapper:
                     consume(len(siblings))
                     for sibling, (_, parameter) in zip(siblings, parameter_rows):
                         if sibling["ref"] == reference and self._capture_same_object(parameter, target, target_identity): return descriptor(sibling["ref"], parameter, device_ref, device, track_ref, track, siblings)
+                    if not inside: continue
                     chains = self._items(self._read_attr(device, "chains") or []) if self._read_attr(device, "can_have_chains") is True else []
                     if len(chains) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("realtime device chain collection exceeds its bound")
                     for chain_index, chain in enumerate(chains):
@@ -10472,16 +10757,83 @@ class LiveObjectMapper:
             points.append({"time": float(time_value), "value": float(value)})
         return points
 
-    def _envelope_event_class(self) -> Any:
-        try: event_class = getattr(__import__("Live.Envelope", fromlist=["EnvelopeEvent"]), "EnvelopeEvent", None)
-        except Exception: event_class = None
-        if event_class is None:
-            class _Event:
-                def __init__(self, time: float, value: float): self.time = time; self.value = value
-            event_class = _Event
-        return event_class
+    def _envelope_event_types(self) -> tuple[Any, Any]:
+        """Live's EnvelopeEvent and EnvelopeEventControlCoefficients (an event's curve), or stand-ins made the same
+        way where Live has neither. A Live with events but no curve type makes events without curves."""
+        try: envelope = __import__("Live.Envelope", fromlist=["EnvelopeEvent", "EnvelopeEventControlCoefficients"])
+        except Exception: envelope = None
+        event_class = getattr(envelope, "EnvelopeEvent", None)
+        if event_class is not None: return event_class, getattr(envelope, "EnvelopeEventControlCoefficients", None)
+        class _Curve:
+            def __init__(self, x1: float, y1: float, x2: float, y2: float): self.x1, self.y1, self.x2, self.y2 = x1, y1, x2, y2
+        class _Event:
+            def __init__(self, time: float, value: float, control_coefficients: Any = None):
+                self.time = time; self.value = value
+                if control_coefficients is not None: self.control_coefficients = control_coefficients
+        return _Event, _Curve
 
-    def _restore_envelope_state(self, clip: Any, parameter: Any, existed: bool, points: list[dict[str, Any]], mode: str = "clear-recreate") -> None:
+    # How far a rollback looks for an envelope's events: all of them, wherever they sit in clip time (a loop that
+    # starts past the clip's length, events past a shortened clip's end). The reads' points stop at length + 4.
+    _ENVELOPE_REACH = 1_000_000.0
+
+    def _envelope_capture(self, envelope: Any) -> tuple[list[tuple[list[Any], float]], tuple[float, float]]:
+        """Every event an envelope holds, wherever it is in clip time: what it reads as (time, Live's raw value,
+        curve), which is what's checked, and its value in the parameter's own terms, which is what a new event
+        takes (Track Volume reads as linear gain, but takes the fader's value; a step's two are read either side
+        of it, as the history restore does); and the range read."""
+        reader = getattr(envelope, "events_in_range", None)
+        if not callable(reader): raise ValueError("complete automation envelope event enumeration is unavailable")
+        clip = getattr(envelope, "canonical_parent", None)
+        marks = [value for value in (self._read_attr(clip, name) for name in ("length", "loop_start", "loop_end", "start_marker", "end_marker")) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))]
+        # Live's clip markers bound it where the whole of clip time can't be asked for.
+        reaches = ((-self._ENVELOPE_REACH, self._ENVELOPE_REACH), (min([0.0, *marks]), max([0.0, *marks]) + 4.0))
+        for index, (low, high) in enumerate(reaches):
+            try: events = list(reader(low, high))
+            except Exception:
+                if index + 1 < len(reaches): continue
+                raise
+            if len(events) > MAX_WIRE_ARRAY_LENGTH: raise ValueError("automation envelope exceeds its authoritative point bound")
+            rows = [self._envelope_event_row(event) for event in events]
+            first: dict[float, int] = {}; count: dict[float, int] = {}
+            for at, row in enumerate(rows): first.setdefault(row[0], at); count[row[0]] = count.get(row[0], 0) + 1
+            value_at = getattr(envelope, "value_at_time", None); captured = []
+            number = lambda value: float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) else None
+            for at, row in enumerate(rows):
+                time = row[0]; own = None
+                if callable(value_at) and count[time] == 1: own = number(value_at(time))
+                elif callable(value_at):
+                    # A step's two values are the limits either side of its time, each straight from that side's two
+                    # nearest readings: one reading beside it is off by the slope of a ramp running into or out of it.
+                    side = -1e-6 if first[time] == at else 1e-6; near, far = number(value_at(time + side)), number(value_at(time + 2 * side))
+                    own = 2 * near - far if near is not None and far is not None else None
+                captured.append((row, own if own is not None else row[1]))
+            return captured, (low, high)
+        raise ValueError("complete automation envelope event enumeration is unavailable")
+
+    @staticmethod
+    def _envelope_event_row(event: Any) -> list[Any]:
+        """What an event reads as: its time, Live's raw value and its curve (control coefficients, None where it has none)."""
+        coefficients = getattr(event, "control_coefficients", None)
+        values = [getattr(coefficients, name, None) for name in ("x1", "y1", "x2", "y2")] if coefficients is not None else []
+        curve = [float(value) for value in values] if values and all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in values) else None
+        return [float(event.time), float(event.value), curve]
+
+    def _envelope_rows_text(self, rows: list[list[Any]]) -> str:
+        return self._bounded_canonical(sorted(rows, key=lambda row: (row[0], row[1], self._bounded_canonical(row[2]))))
+
+    @staticmethod
+    def _envelope_span(*times: float) -> tuple[float, float]:
+        """The range a change touched, a little wider at both ends (Live may hold a time a hair from what was
+        asked): deleting and restoring what was there over it leaves the envelope as it was."""
+        low, high = min(times), max(times)
+        return low - (1e-3 + abs(low) * 1e-6), high + (1e-3 + abs(high) * 1e-6)
+
+    def _restore_envelope_state(self, clip: Any, parameter: Any, existed: bool, prior: list[tuple[list[Any], float]], span: tuple[float, float] | None = None) -> None:
+        """Put an envelope back as it was: gone when it didn't exist; else what it holds over span (all of it
+        without one) deleted and the events that were there made again, each from its value in the parameter's
+        own terms and its curve, as the history restore does. Where that isn't exact (Live changed something
+        else too) the envelope is made again whole, the same way. Checked against what the events read as, over
+        every event it holds, not only the reads' range."""
         reader = getattr(clip, "automation_envelope", None); clearer = getattr(clip, "clear_envelope", None); creator = getattr(clip, "create_automation_envelope", None)
         if not callable(reader) or not callable(clearer): raise ValueError("automation rollback is unavailable")
         current = reader(parameter)
@@ -10489,25 +10841,28 @@ class LiveObjectMapper:
             if current is not None: clearer(parameter)
             if reader(parameter) is not None: raise ValueError("automation envelope cleanup was not confirmed")
             return
-        if mode == "clear-recreate":
-            if not callable(creator): raise ValueError("automation envelope recreation is unavailable")
-            if current is not None: clearer(parameter)
-            current = creator(parameter)
-        elif mode == "range-reset":
-            if current is None:
-                if not callable(creator): raise ValueError("automation envelope recreation is unavailable")
-                current = creator(parameter)
-            else:
-                delete = getattr(current, "delete_events_in_range", None); clip_length = self._read_attr(clip, "length")
-                if not callable(delete) or not isinstance(clip_length, (int, float)): raise ValueError("automation point reset is unavailable")
-                delete(0.0, float(clip_length) + 4.0)
-        else: raise ValueError("automation rollback mode is invalid")
-        create = getattr(current, "create_event", None)
-        if current is None or not callable(create): raise ValueError("automation point restoration is unavailable")
-        event_class = self._envelope_event_class()
-        for point in points: create(event_class(point["time"], point["value"]))
-        restored = reader(parameter)
-        if restored is None or self._bounded_canonical(self._envelope_points(restored)) != self._bounded_canonical(points): raise ValueError("automation point restoration was not confirmed")
+        event_class, curve_class = self._envelope_event_types(); expected = self._envelope_rows_text([row for row, _ in prior])
+        def put_back(envelope: Any, reach: tuple[float, float] | None) -> None:
+            delete = getattr(envelope, "delete_events_in_range", None); create = getattr(envelope, "create_event", None)
+            if envelope is None or not callable(delete) or not callable(create): raise ValueError("automation point restoration is unavailable")
+            low, high = reach if reach is not None else self._envelope_capture(envelope)[1]
+            delete(low, high)
+            for (time, _, curve), own in prior:
+                # Made again from the parameter's own value, with its curve: what Live reads back is checked below.
+                if low <= time < high: create(event_class(time, own, curve_class(*curve)) if curve is not None and curve_class is not None else event_class(time, own))
+        def exact() -> bool:
+            restored = reader(parameter)
+            return restored is not None and self._envelope_rows_text([row for row, _ in self._envelope_capture(restored)[0]]) == expected
+        if current is not None:
+            # In place first, over the span (all of it without one); made again whole if Live won't take that, or it isn't exact.
+            try:
+                put_back(current, span)
+                if exact(): return
+            except Exception: pass
+        if not callable(creator): raise ValueError("automation envelope recreation is unavailable")
+        if current is not None: clearer(parameter)
+        put_back(creator(parameter), None)
+        if not exact(): raise ValueError("automation point restoration was not confirmed")
 
     def _envelope_read(self, args: dict[str, Any]) -> dict[str, Any]:
         _, envelope = self._envelope(str(args["clipRef"]), str(args["parameterRef"]))
@@ -10543,13 +10898,14 @@ class LiveObjectMapper:
     def _envelope_delete(self, args: dict[str, Any]) -> dict[str, Any]:
         self._guard_envelope_mutation(args); clip, envelope = self._envelope(str(args["clipRef"]), str(args["parameterRef"]))
         if envelope is None: raise ValueError("envelope does not exist")
-        parameter = self._resolve_parameter(str(args["parameterRef"])); clearer = getattr(clip, "clear_envelope", None); creator = getattr(clip, "create_automation_envelope", None); prior_points = self._envelope_points(envelope)
+        parameter = self._resolve_parameter(str(args["parameterRef"])); clearer = getattr(clip, "clear_envelope", None); creator = getattr(clip, "create_automation_envelope", None)
         if not callable(clearer) or not callable(creator) or not callable(getattr(envelope, "create_event", None)) or not callable(getattr(envelope, "delete_events_in_range", None)): raise ValueError("envelope deletion cannot guarantee exact restoration")
+        prior_events = self._envelope_capture(envelope)[0]
         try:
             clearer(parameter)
             if getattr(clip, "automation_envelope", lambda _p: None)(parameter) is not None: raise ValueError("envelope deletion was not confirmed")
         except BaseException as error:
-            try: self._restore_envelope_state(clip, parameter, True, prior_points, "range-reset")
+            try: self._restore_envelope_state(clip, parameter, True, prior_events)
             except BaseException as rollback_error: raise ValueError("envelope deletion failed and exact rollback failed") from rollback_error
             raise
         return {"deleted": True}
@@ -10569,6 +10925,7 @@ class LiveObjectMapper:
             event_class = _Event
         events = [event_class(float(point["time"]), float(point["value"])) for point in points]; before_points = self._envelope_points(prior_envelope) if prior_envelope is not None else []; prior_exists = prior_envelope is not None; clearer = getattr(clip, "clear_envelope", None); creator = getattr(clip, "create_automation_envelope", None)
         if not callable(clearer) or not callable(creator) or prior_envelope is not None and not callable(getattr(prior_envelope, "create_event", None)): raise ValueError("automation insertion cannot guarantee exact rollback on this Live shape")
+        prior_events = self._envelope_capture(prior_envelope)[0] if prior_envelope is not None else []
         envelope = prior_envelope
         try:
             if envelope is None:
@@ -10578,7 +10935,8 @@ class LiveObjectMapper:
             after_points = self._envelope_points(envelope); expected_points = before_points + [{"time": float(point["time"]), "value": float(point["value"])} for point in points]; normalize = lambda rows: sorted(rows, key=lambda row: (row["time"], row["value"]))
             if self._bounded_canonical(normalize(after_points)) != self._bounded_canonical(normalize(expected_points)): raise ValueError("envelope point insert did not produce the exact requested state")
         except BaseException as error:
-            try: self._restore_envelope_state(clip, parameter, prior_exists, before_points, "clear-recreate")
+            # Only where this call wrote: the rest of the envelope, its curves and any events past the reads' range, stays as it is.
+            try: self._restore_envelope_state(clip, parameter, prior_exists, prior_events, self._envelope_span(*(float(point["time"]) for point in points)))
             except BaseException as rollback_error: raise ValueError("automation point insertion failed and exact rollback failed") from rollback_error
             raise
         return {"inserted": len(points)}
@@ -10591,11 +10949,12 @@ class LiveObjectMapper:
         if envelope is None or not callable(getattr(envelope, "delete_events_in_range", None)) or not callable(getattr(envelope, "create_event", None)) or not callable(getattr(clip, "clear_envelope", None)) or not callable(getattr(clip, "create_automation_envelope", None)): raise ValueError("envelope point deletion cannot guarantee exact rollback")
         before_points = self._envelope_points(envelope); expected = [point for point in before_points if not float(from_time) <= point["time"] < float(to_time)]
         if len(expected) == len(before_points): raise ValueError("automation delete range contains no authoritative points")
+        prior_events = self._envelope_capture(envelope)[0]
         try:
             envelope.delete_events_in_range(float(from_time), float(to_time)); after_points = self._envelope_points(envelope)
             if self._bounded_canonical(after_points) != self._bounded_canonical(expected): raise ValueError("automation point deletion changed unexpected points")
         except BaseException as error:
-            try: self._restore_envelope_state(clip, parameter, True, before_points)
+            try: self._restore_envelope_state(clip, parameter, True, prior_events, self._envelope_span(float(from_time), float(to_time)))
             except BaseException as rollback_error: raise ValueError("automation point deletion failed and exact rollback failed") from rollback_error
             raise
         return {"deleted": len(before_points) - len(expected)}
@@ -10615,6 +10974,7 @@ class LiveObjectMapper:
         if not float(minimum) <= float(value) <= float(maximum): raise ValueError("the step's value is outside the parameter's range")
         before_points = self._envelope_points(prior_envelope) if prior_envelope is not None else []; prior_exists = prior_envelope is not None
         if not callable(getattr(clip, "clear_envelope", None)) or not callable(getattr(clip, "create_automation_envelope", None)) or prior_exists and not callable(getattr(prior_envelope, "create_event", None)): raise ValueError("automation step insertion cannot guarantee exact rollback on this Live shape")
+        prior_events = self._envelope_capture(prior_envelope)[0] if prior_exists else []
         envelope = prior_envelope
         try:
             if envelope is None: _, envelope = self._envelope(clip_ref, parameter_ref, create=True)
@@ -10627,7 +10987,7 @@ class LiveObjectMapper:
                 if not isinstance(middle, (int, float)) or isinstance(middle, bool) or not math.isfinite(float(middle)) or not _same_number(float(middle), float(value)): raise ValueError("automation step was not confirmed")
             elif prior_exists and self._bounded_canonical(after_points) == self._bounded_canonical(before_points): raise ValueError("automation step was not confirmed")
         except BaseException as error:
-            try: self._restore_envelope_state(clip, parameter, prior_exists, before_points, "clear-recreate")
+            try: self._restore_envelope_state(clip, parameter, prior_exists, prior_events, self._envelope_span(float(start), float(start) + float(length)))
             except BaseException as rollback_error: raise ValueError("automation step insertion failed and exact rollback failed") from rollback_error
             raise
         return {"inserted": 0 if prior_exists and self._bounded_canonical(after_points) == self._bounded_canonical(before_points) else 1}
@@ -10750,7 +11110,7 @@ class LiveObjectMapper:
         # A new Simpler can arrive with its sample: loaded before the fingerprint below, so the
         # insert's undo takes both away, and a failed load takes the new device away again.
         sample_path = args.get("samplePath")
-        if sample_path is not None and (not isinstance(sample_path, str) or not 1 <= len(sample_path) <= 1024 or not (sample_path.startswith("/") or (len(sample_path) > 2 and sample_path[1] == ":" and sample_path[0].isalpha()))):
+        if sample_path is not None and not _absolute_file_path(sample_path):
             raise ValueError("samplePath must be an absolute path")
         index = args.get("index")
         if index is not None and (not isinstance(index, int) or isinstance(index, bool) or not -1 <= index <= MAX_COLLECTION_INDEX):
@@ -11045,11 +11405,12 @@ class LiveObjectMapper:
         needle = query.strip().lower() if isinstance(query, str) else ""
         items: list[dict[str, Any]] = []; seen_ids: set[str] = set(); traversal_count = 0
 
-        def walk(node: Any, path: str, depth: int) -> None:
+        def walk(node: Any, path: str, depth: int, children: list[Any] | None = None) -> None:
             nonlocal traversal_count
             if len(items) >= limit or depth > 6:
                 return
-            children = self._items(self._read_attr(node, "children") or [])
+            # A folder's children are read once: by its parent, to tell a folder from an item, then handed down.
+            children = self._items(self._read_attr(node, "children") or []) if children is None else children
             if len(children) > MAX_DISCOVERY_COLLECTION_LENGTH: raise ValueError("browser child collection exceeds its traversal bound")
             for child in children:
                 traversal_count += 1
@@ -11060,7 +11421,8 @@ class LiveObjectMapper:
                 if len(name) > 256 or len(child_path) > 256: continue
                 explicit_device = self._read_attr(child, "is_device"); is_loadable = self._read_attr(child, "is_loadable") is True
                 is_device = explicit_device is True or (explicit_device is None and category_name in self._DEVICE_BROWSER_CATEGORIES and is_loadable)
-                if not self._items(self._read_attr(child, "children") or []) or is_device:
+                grandchildren = self._items(self._read_attr(child, "children") or [])
+                if not grandchildren or is_device:
                     if not needle or needle in name.lower() or needle in child_path.lower():
                         # Live lists one thing twice under one path when it comes from two files (Core Library
                         # and a Pack, two library versions): the second is "<path>#2", and so on (#183).
@@ -11069,7 +11431,7 @@ class LiveObjectMapper:
                         if len(item_id) <= 256 and item_id not in seen_ids:
                             seen_ids.add(item_id); items.append({"id": item_id, "objectIdentity": self._browser_item_identity(item_id, child), "name": name, "category": category_name, "path": child_path, "isDevice": is_device})
                 if not is_device:
-                    walk(child, child_path, depth + 1)
+                    walk(child, child_path, depth + 1, grandchildren)
 
         repeats: dict[str, int] = {}
         categories = [category] if category else [name for name in self._BROWSER_SEARCH_ORDER if name in self._BROWSER_CATEGORIES]
@@ -11137,8 +11499,10 @@ class LiveObjectMapper:
         if len(track_matches) != 1:
             raise ValueError("browser loading is limited to one exact Set track")
         track_index, track = track_matches[0]
-        # Main and the returns take audio effects only, as in Live itself.
-        if track_index >= len(regular_tracks) and (metadata["category"] in {"instruments", "drums", "sounds", "midi_effects"} or str(metadata.get("deviceType") or "") in {"instrument", "midi_effect"}):
+        # What the item loads as, by the item rather than its Browser category: a Max for Live instrument or a
+        # preset is one too. Main and the returns take audio effects only, as in Live itself.
+        device_type = self._browser_item_type(metadata)
+        if track_index >= len(regular_tracks) and device_type in (1, 4):
             raise ValueError("Main and return tracks take audio effects only")
         if track_ref != f"{self.refs.epoch}:track:{track_index}": raise ValueError("browser target track reference is stale")
         authority = self._top_level_device_authority(track, track_ref)
@@ -11149,8 +11513,11 @@ class LiveObjectMapper:
         if view is None or not hasattr(view, "selected_track"):
             raise ValueError("track-targeted browser loading is unavailable")
         previous_selection = getattr(view, "selected_track", None); previous_identity = self._capture_object_identity(previous_selection) if previous_selection is not None else None; before_devices = self._items(getattr(track, "devices", []))
-        # Live replaces a track's instrument with a new one, which cleanup couldn't bring back.
-        if metadata["category"] in {"instruments", "drums", "sounds"} and any(self._read_attr(device, "type") == 1 for device in before_devices): raise ValueError("this track already has an instrument, which Live would replace: delete it first (then load this), or load onto a new track or into an Instrument Rack")
+        # Live replaces a track's instrument with a new one, which cleanup couldn't bring back: nor does an item
+        # that may be an instrument (Kumi can't tell what a plug-in is) load onto a track that has one.
+        if device_type in (1, None) and any(self._read_attr(device, "type") == 1 for device in before_devices):
+            if device_type is None: raise ValueError(f"this track already has an instrument, and Kumi can't tell whether this item is one too, which Live would replace it with: load it onto a new track, or delete the instrument first{UNRUN_SUFFIX}")
+            raise ValueError(f"this track already has an instrument, which Live would replace: delete it first (then load this), or load onto a new track or into an Instrument Rack{UNRUN_SUFFIX}")
         # The new device goes after the last one, not wherever the producer last clicked.
         track_view = self._read_attr(track, "view"); previous_device = self._read_attr(track_view, "selected_device") if track_view is not None else None
         before_identities = [self._capture_object_identity(prior) for prior in before_devices]
@@ -11224,6 +11591,21 @@ class LiveObjectMapper:
             if re.search(r"instrument", words, re.I): return ("Simpler", 1)
             if re.search(r"\bmidi\b|expression control", words, re.I): return ("Velocity", 4)
             return ("Utility", 2)
+        return None
+
+    # The folders Live keeps presets in, by the kind of device they hold (User Library/Presets/Audio Effects/…).
+    _PRESET_FOLDER_TYPES = ((re.compile(r"audio effects?", re.I), 2), (re.compile(r"midi effects?", re.I), 4), (re.compile(r"instruments?|drums?|sounds", re.I), 1))
+
+    @classmethod
+    def _browser_item_type(cls, metadata: dict[str, Any]) -> int | None:
+        """Live's device type for what a Browser item loads (1 instrument, 2 audio effect, 4 MIDI effect): by its
+        kind, as a chain's placeholder is chosen, else by the first folder on its path that names one; None when
+        nothing says (a plug-in, a preset outside those folders)."""
+        spec = cls._chain_placeholder(metadata)
+        if spec is not None: return spec[1]
+        for folder in str(metadata.get("path") or "").split("/"):
+            for pattern, device_type in cls._PRESET_FOLDER_TYPES:
+                if pattern.fullmatch(folder.strip()): return device_type
         return None
 
     def _browser_load_into_chain(self, args: dict[str, Any], item: Any, metadata: dict[str, Any], loader: Any) -> dict[str, Any]:
@@ -12074,6 +12456,9 @@ class LiveObjectMapper:
                 or not math.isfinite(float(note["start"])) or not math.isfinite(float(note["duration"]))
                 or float(note["start"]) < 0 or float(note["duration"]) <= 0):
             raise ValueError("note is invalid")
+        # Live's clip notes have no MIDI channel: Live keeps every note on channel 1, and a note asked for on another
+        # couldn't be confirmed (the batch went back with a misleading "Live changed …").
+        if note["channel"] != 1: raise ValueError(f"Live's clip notes have no MIDI channel, so a note can't be on channel {note['channel']}: leave the channel out, or use 1{UNRUN_SUFFIX}")
         if float(note["start"]) + float(note["duration"]) > (self._note_time_end(clip) or 0.0):
             raise ValueError(f"note runs past the clip: {self._note_span(clip)}")
         probability = note.get("probability")
@@ -12602,6 +12987,21 @@ class _RealtimeAuthorityChanged(ValueError):
     pass
 
 
+def _bind_alone(sock: socket.socket, stream: bool) -> None:
+    """Make a socket the only one on its port (set before it binds). Windows' SO_REUSEADDR lets a second socket bind
+    a port already taken, so two Lives (or the surface in two slots) could both listen and Kumi drive the wrong one;
+    a plain bind there refuses a taken port and rebinds past TIME_WAIT already, so nothing is set (as CPython's
+    create_server does; SO_EXCLUSIVEADDRUSE would keep the port from Live's next start while its connections close).
+    Elsewhere a listener keeps SO_REUSEADDR (it rebinds while the last one's connections close), and a datagram
+    socket sets nothing."""
+    if os.name != "nt" and stream:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+
+# Windows' code for a datagram larger than the receive buffer (its errno and winerror alike).
+_WSAEMSGSIZE = 10040
+
+
 class _RealtimePlane:
     """Short-lived loopback realtime ingress shared by JSON UDP, OSC, XY,
     and Max clients. Authentication, endpoint/channel allowlists, sequence and
@@ -12642,6 +13042,7 @@ class _RealtimePlane:
             family = socket.AF_INET6 if ":" in host else socket.AF_INET
             self._socket = socket.socket(family, socket.SOCK_DGRAM)
             try:
+                _bind_alone(self._socket, stream=False)
                 self._socket.bind((host, port))
                 self._socket.settimeout(0.2)
                 self._thread = threading.Thread(target=self._recv_loop, name="AbletonMcpRealtime", daemon=True)
@@ -12747,7 +13148,13 @@ class _RealtimePlane:
                 data, address = self._socket.recvfrom(REALTIME_MAX_DATAGRAM + 1)
             except socket.timeout:
                 continue
-            except OSError:
+            except OSError as error:
+                # Windows refuses a datagram bigger than the buffer (WSAEMSGSIZE) where other systems cut it:
+                # it's an oversized packet, dropped like one, not the end of the ingress.
+                if not self._stop.is_set() and _WSAEMSGSIZE in (getattr(error, "winerror", None), error.errno):
+                    with self._lock:
+                        self.dropped_invalid += 1
+                    continue
                 break
             try:
                 self._handle(data, address)
@@ -13266,9 +13673,16 @@ def _changes_live(request: Any) -> bool:
     """Whether a request is a step of a change to the Set (its time isn't held to the reads' budget)."""
     if not isinstance(request, dict): return False
     method = request.get("method")
+    # Any line reaches here, signed or not: a method that's a list or an object can't be looked up in a set.
+    if not isinstance(method, str): return False
     if method == "invoke": return _mutation_authority_required(str(request.get("operation", "")))
     return method in {"preflight", "prepare", "mutate"}
 MAX_OUTBOUND_BYTES = 4 * MAX_WIRE_BYTES
+# Until a connection's first request passes its MAC check, anyone may be on it (any local process can
+# connect): it gets this much buffered in and out, and this long, before it's closed. Kumi's first
+# request is a status of a few hundred bytes, sent as soon as the hello arrives.
+MAX_UNAUTHENTICATED_BYTES = 64 * 1024
+AUTHENTICATION_SECONDS = 10.0
 # How much one socket read takes, and one send hands the socket.
 RECEIVE_CHUNK_BYTES = 1 << 20
 SEND_CHUNK_BYTES = 1 << 20
@@ -13280,7 +13694,7 @@ class _Connection:
     Buffers grow in place and are consumed by offset, compacted once per service: a big frame
     arriving (or leaving) in pieces is copied a bounded number of times, not once per piece."""
 
-    __slots__ = ("socket", "auth", "holder", "inbound", "scanned", "outbound", "sent", "closing")
+    __slots__ = ("socket", "auth", "holder", "inbound", "scanned", "outbound", "sent", "closing", "opened")
 
     def __init__(self, client: socket.socket, auth: "AuthenticatedRemoteScript", holder: dict[str, Any]) -> None:
         self.socket = client
@@ -13293,6 +13707,7 @@ class _Connection:
         # Bytes of outbound already handed to the socket.
         self.sent = 0
         self.closing = False
+        self.opened = time.monotonic()
 
     def pending_outbound(self) -> int:
         return len(self.outbound) - self.sent
@@ -13326,7 +13741,7 @@ class AbletonMcpBridge:
         self._bridge_epoch = secrets.token_urlsafe(24)
         self.auth = AuthenticatedRemoteScript(secret, self._dispatch, self._bridge_epoch, "internal-bridge-channel")
         self._server = socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET, socket.SOCK_STREAM)
-        self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        _bind_alone(self._server, stream=True)
         self._server.bind((host, port))
         self._server.listen(MAX_BRIDGE_CONNECTIONS)
         self._server.setblocking(False)
@@ -13477,7 +13892,13 @@ class AbletonMcpBridge:
                     connection.outbound += self._frame(frame)
             inbound = connection.inbound
             while not connection.closing:
-                try: chunk = connection.socket.recv(RECEIVE_CHUNK_BYTES)
+                # Before it says who it is, a connection gets no more than a first request's worth read (once
+                # it's signed in, the tick's lingering serves what it sent behind that request).
+                size = RECEIVE_CHUNK_BYTES
+                if not connection.auth.authenticated:
+                    size = min(size, MAX_UNAUTHENTICATED_BYTES + 1 - len(inbound))
+                    if size <= 0: break
+                try: chunk = connection.socket.recv(size)
                 except (BlockingIOError, InterruptedError): break
                 if not chunk: connection.closing = True; break
                 inbound += chunk
@@ -13486,12 +13907,13 @@ class AbletonMcpBridge:
                 if time.perf_counter() >= deadline: break
             # Frames are taken by offset, searching only bytes not searched before, and the buffer is
             # compacted once: a frame arriving in many pieces is scanned once, not once per piece.
-            frames = 0; start = 0; search = connection.scanned
-            while not connection.auth.invalid and frames < MAX_FRAMES_PER_PUMP and (frames == 0 or time.perf_counter() < deadline):
+            frames = 0; lines = 0; start = 0; search = connection.scanned
+            # Every line counts toward the deadline, a blank one too: a flood of newlines can't hold Live's thread.
+            while not connection.auth.invalid and frames < MAX_FRAMES_PER_PUMP and (lines == 0 or time.perf_counter() < deadline):
                 newline = inbound.find(b"\n", search)
                 if newline < 0:
                     search = len(inbound); break
-                line = bytes(inbound[start:newline]); start = search = newline + 1
+                line = bytes(inbound[start:newline]); start = search = newline + 1; lines += 1
                 if not line: continue
                 frames += 1; began = time.perf_counter(); request = None
                 try: request = json.loads(line.decode("utf-8")); response = connection.auth.dispatch(request)
@@ -13501,6 +13923,10 @@ class AbletonMcpBridge:
             if start: del inbound[:start]
             connection.scanned = max(0, search - start)
             if connection.auth.invalid: connection.closing = True
+            # Still unknown after what it sent was read: more than a first request waiting, answers it isn't
+            # reading, or too long to say who it is, and it's closed (its slot and buffers back).
+            if not connection.auth.authenticated and (len(inbound) > MAX_UNAUTHENTICATED_BYTES or connection.pending_outbound() > MAX_UNAUTHENTICATED_BYTES or time.monotonic() - connection.opened > AUTHENTICATION_SECONDS):
+                self._close(connection); return frames
             outbound = connection.outbound
             while connection.sent < len(outbound):
                 try: sent = connection.socket.send(outbound[connection.sent:connection.sent + SEND_CHUNK_BYTES])
@@ -13510,6 +13936,11 @@ class AbletonMcpBridge:
             if connection.sent >= len(outbound): outbound.clear(); connection.sent = 0
             elif connection.sent > len(outbound) // 2: del outbound[:connection.sent]; connection.sent = 0
         except OSError:
+            self._close(connection); return frames
+        except Exception:
+            # Whatever one connection sent can't stop the tick (and the queued Live work after it): it's closed,
+            # with what it left unread, instead of failing again on every tick.
+            _debug_trace("bridge-service-failure")
             self._close(connection); return frames
         finished = connection.auth.invalid or not connection.has_complete_frame()
         if (connection.closing and finished and not connection.pending_outbound()) or connection.pending_outbound() > MAX_OUTBOUND_BYTES:

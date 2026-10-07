@@ -786,6 +786,32 @@ async fn retries_up_to_three_times_before_any_output_escapes_but_never_after_tex
 }
 
 #[tokio::test]
+async fn a_providers_error_inside_its_stream_is_retried_by_its_own_status() {
+    local(async {
+        let stream_error = |fields: Value| Scripted::Parts(vec![StreamPart::Error { error: LanguageModelError::ProviderStream(fields.as_object().unwrap().clone()) }]);
+        // Anthropic's overloaded_error, as its stream reports it: tried again before anything reaches the producer.
+        let overloaded = json!({"message":"Overloaded","type":"overloaded_error","statusCode":529,"isRetryable":true,"data":{}});
+        let retried = harness(move |_, n| if n == 1 { stream_error(overloaded.clone()) } else { answer("ok") }, Options::default());
+        let (events, emit) = collect();
+        assert_eq!(retried.kernel.run("q", signal(), emit).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(retried.count(), 2);
+        let reasons: Vec<_> =
+            events.borrow().iter().filter_map(|event| if let KernelEvent::Retry { reason, .. } = event { Some(reason.clone()) } else { None }).collect();
+        assert_eq!(reasons, ["test is overloaded (HTTP 529)"]);
+        // OpenAI's response.failed for a request it won't take: not tried again, and its own words said.
+        let refused = json!({"message":"Invalid schema for function 'tempo'","type":"response.failed","code":"invalid_function_parameters","statusCode":400,"isRetryable":false,"data":{}});
+        let turned_down = harness(move |_, _| stream_error(refused.clone()), Options::default());
+        let error = kumi_error(turned_down.kernel.run("q", signal(), ignore()).await.unwrap_err());
+        assert_eq!(turned_down.count(), 1);
+        assert!(error.message.contains("turned the request down (HTTP 400): Invalid schema for function 'tempo'"), "{}", error.message);
+        assert_eq!(error.kind, FailureKind::Request);
+        retried.kernel.close().await;
+        turned_down.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
 async fn a_throwing_listener_discards_the_turn_without_poisoning_the_next_one() {
     local(async {
         let h = harness(|_, _| answer("x"), Options::default());
@@ -1813,6 +1839,35 @@ async fn a_reply_that_breaks_off_after_its_plan_began_isnt_asked_for_again_one_t
         assert_eq!(retried.count(), 2, "nothing had begun, so the reply was asked for again");
         assert!(early.borrow()[0].abandoned.get());
         retried.kernel.close().await;
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_answer_that_breaks_off_with_a_plan_not_yet_begun_sets_it_aside_before_carrying_on() {
+    local(async {
+        let (plan, early, executed) = streaming_tool();
+        let seen = early.clone();
+        let set_aside = Rc::new(Cell::new(None));
+        let noted = set_aside.clone();
+        let h = harness(
+            move |_, n| {
+                if n == 1 {
+                    // Words shown, then a plan begun with no whole step yet, then the stream breaks off.
+                    Scripted::Parts([text("Making the bass"), plan_parts(false), vec![StreamPart::Error { error: broke_off() }]].concat())
+                } else {
+                    noted.set(Some(seen.borrow()[0].abandoned.get()));
+                    answer(" with a Reese.")
+                }
+            },
+            Options { tools: vec![plan], ..Options::default() },
+        );
+        assert_eq!(h.kernel.run("make a bass", signal(), ignore()).await.unwrap().stop_reason, StopReason::Completed);
+        assert_eq!(h.count(), 2, "it carried on");
+        assert_eq!(set_aside.get(), Some(true), "the broken reply's plan was set aside before the next request");
+        assert!(early.borrow()[0].finished.borrow().is_none(), "and never finished");
+        assert_eq!(executed.get(), 0);
+        h.kernel.close().await;
     })
     .await
 }

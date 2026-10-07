@@ -1,4 +1,5 @@
 use super::super::{audition::render_span, bridge_version::ARRANGEMENT_BRIDGE, concurrent::eager_all};
+use super::ears::RawFile;
 use super::rig::Rig;
 use super::*;
 use crate::ears::capture::{frame_at, read_capture, runs, write_capture_wav, Anchors};
@@ -18,7 +19,10 @@ impl Rendering {
             .history
             .quietly(None, async {
                 if rig.hold.as_ref().and_then(|hold| hold.main.as_ref()).is_none() {
-                    self.save_main(rig, prior, false);
+                    // Main goes quiet only once its level is noted for after a crash.
+                    if !self.save_main(rig, prior, false) {
+                        return Err(observation(MAIN_UNNOTED));
+                    }
                     self.step("set_mixer", json!({"trackRef":main_ref,"volume":0}), signal.clone()).await?;
                     if let Some(hold) = &mut rig.hold {
                         hold.main = Some((main_ref, prior));
@@ -93,11 +97,11 @@ impl Rendering {
                         let notes = &notes;
                         let collected = &collected;
                         async move {
-                            let raw = self.ears_folder.join(format!("{}.raw", uuid::Uuid::new_v4()));
+                            let raw = RawFile(self.ears_folder.join(format!("{}.raw", uuid::Uuid::new_v4())));
                             let written: Result<(), RuntimeError> = async {
                                 let written =
-                                    link.write(tap, &raw.to_string_lossy().replace('\\', "/"), Some(signal)).await.map_err(plain)?;
-                                let capture = read_capture(&raw, written.channels, written.sample_rate).await.map_err(plain)?;
+                                    link.write(tap, &raw.0.to_string_lossy().replace('\\', "/"), Some(signal)).await.map_err(plain)?;
+                                let capture = read_capture(&raw.0, written.channels, written.sample_rate).await.map_err(plain)?;
                                 let stretches = runs(&capture, Anchors { first: Some(written.beats), after_jump: Some(span.position) });
                                 let part = stretches.iter().rev().find(|run| {
                                     frame_at(run, window.from).is_some() && frame_at(run, window.from + window.beats - 1e-3).is_some()
@@ -124,7 +128,7 @@ impl Rendering {
                             if let Err(error) = written {
                                 notes.borrow_mut().push(kumi_common::js::string::head(&error.to_string(), 200));
                             }
-                            let _ = tokio::fs::remove_file(raw).await;
+                            drop(raw);
                             Ok::<_, RuntimeError>(())
                         }
                     }))

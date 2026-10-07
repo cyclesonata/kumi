@@ -1,6 +1,6 @@
 //! Frames of one cycle each, written as a mono 32-bit WAV with Serum's "clm " chunk.
 
-use super::decode::{open_audio, AudioError};
+use super::decode::{open_audio_to, AudioError};
 use kumi_common::js::number::round;
 use serde::{Deserialize, Serialize};
 use std::f64::consts::PI;
@@ -113,7 +113,8 @@ pub fn frames_from_keyframes(keyframes: &[Keyframe], count: Option<f64>) -> Resu
 }
 /// Single cycles cut evenly from a sound, each stretched to a frame and started at a rising zero crossing.
 pub async fn frames_from_audio(file: &str, count: f64, start: Option<f64>, seconds: Option<f64>) -> Result<Vec<Vec<f32>>, AudioError> {
-    let mut source = open_audio(file, None).await?;
+    let reach = start.unwrap_or(0.0).max(0.0) + seconds.unwrap_or(8.0).max(0.0) + 1.0;
+    let mut source = open_audio_to(file, None, Some(reach)).await?;
     let rate = source.sample_rate;
     let result = async {
         let from = (start.unwrap_or(0.0) * rate).floor().max(0.0) as usize;
@@ -265,9 +266,11 @@ pub async fn build_wavetable(spec: &WavetableSpec) -> Result<Vec<Vec<f32>>, Audi
     if let Some(audio) = &spec.from_audio {
         frames_from_audio(&audio.file, spec.count.unwrap_or(64.0), audio.start, audio.seconds).await
     } else {
-        frames_from_keyframes(
-            spec.keyframes.as_deref().unwrap_or(&[Keyframe { shape: Some(Shape::Saw), ..Default::default() }]),
-            spec.count,
-        )
+        // Up to 256 frames of 1,023 sines over 2,048 samples each: off Kumi's thread, which keeps drawing meanwhile.
+        let keyframes = spec.keyframes.clone().unwrap_or_else(|| vec![Keyframe { shape: Some(Shape::Saw), ..Default::default() }]);
+        let count = spec.count;
+        tokio::task::spawn_blocking(move || frames_from_keyframes(&keyframes, count))
+            .await
+            .map_err(|error| AudioError(error.to_string()))?
     }
 }

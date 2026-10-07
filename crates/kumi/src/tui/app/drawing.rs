@@ -49,24 +49,33 @@ pub(super) struct NowLine {
 }
 impl TuiApp {
     pub(super) fn draw(&self) {
+        // A panic Kumi caught (a worker's) gave the terminal back: take it again, and draw all of it.
+        if self.0.tty.recover() {
+            self.0.renderer.borrow_mut().invalidate();
+        }
         if !self.0.tty.is_active() {
             return;
         }
         let size = self.0.tty.size();
         let (columns, rows) = (size.columns, size.rows);
-        let mut screen = Screen::with_table(columns, rows, self.0.table.clone());
+        let kept = self.0.screen.borrow_mut().take();
+        let mut screen = kept
+            .filter(|kept| kept.width == columns && kept.height == rows && Rc::ptr_eq(&kept.table, &self.0.table))
+            .unwrap_or_else(|| Screen::with_table(columns, rows, self.0.table.clone()));
+        // Every cell painted over: nothing of the last frame stays.
         screen.fill(screen.bounds(), &st::GROUND);
         self.0.state.borrow_mut().hits.clear();
         if columns < 24 || rows < 8 {
+            // No pane to keep fresh here, nor during setup or beside the dock below.
+            self.keep_tree_fresh(None);
             screen.put(1, 0, &truncate("Make this window bigger for Kumi", columns - 2), &st::DIM);
-            let frame = self.0.renderer.borrow_mut().frame(&screen, None);
-            self.0.tty.write(&frame);
+            self.present(screen, None);
             return;
         }
         if self.setup_active() {
+            self.keep_tree_fresh(None);
             let cursor = self.draw_setup(&mut screen, columns, rows).filter(|_| !self.0.state.borrow().closing);
-            let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
-            self.0.tty.write(&frame);
+            self.present(screen, cursor);
             return;
         }
         let (pane, left) = Self::layout_for(columns);
@@ -86,6 +95,7 @@ impl TuiApp {
         if pane != 0 {
             self.draw_pane(&mut screen, Rect::new(left, 1, pane, rows - 1));
         } else {
+            self.keep_tree_fresh(None);
             self.draw_dock(&mut screen, Rect::new(0, box_top - dock - 1, columns, dock));
         }
         if chip != 0 {
@@ -108,8 +118,13 @@ impl TuiApp {
         if self.0.state.borrow().closing {
             cursor = None;
         }
+        self.present(screen, cursor);
+    }
+    /// The frame out to the terminal; its screen is kept to draw the next one on.
+    fn present(&self, screen: Screen, cursor: Option<Cursor>) {
         let frame = self.0.renderer.borrow_mut().frame(&screen, cursor);
         self.0.tty.write(&frame);
+        *self.0.screen.borrow_mut() = Some(screen);
     }
     fn status_line(&self) -> (Style, &'static str) {
         let state = self.0.state.borrow();
@@ -163,7 +178,7 @@ impl TuiApp {
         let now = perf_now();
         let (rows, next) = {
             let mut state = self.0.state.borrow_mut();
-            let rows = state.transcript.rows(width, now);
+            let rows = state.transcript.layout(width, now);
             let next = state.transcript.change_at(now);
             (rows, next)
         };
@@ -298,7 +313,7 @@ impl TuiApp {
         if perf_now() - at >= CHANGE_FLASH_MS {
             return None;
         }
-        state.changes.iter().find(|c| &c.id == id).cloned()
+        state.records.changes().iter().find(|c| &c.id == id).cloned()
     }
     pub(super) fn now_line(&self) -> NowLine {
         let turn = self.0.options.controller.status().state;
@@ -315,7 +330,7 @@ impl TuiApp {
             .last_change
             .as_ref()
             .filter(|(_, at)| now - at < CHANGE_FLASH_MS)
-            .and_then(|(id, _)| state.changes.iter().find(|c| &c.id == id));
+            .and_then(|(id, _)| state.records.changes().iter().find(|c| &c.id == id));
         let action = state.last_action.as_ref().filter(|a| now - a.at < CHANGE_FLASH_MS);
         if turn == TurnState::Running {
             // A steady dot: NOW's glyph already shows Kumi is at work.
@@ -514,7 +529,9 @@ impl TuiApp {
             return;
         }
         let about = 3 + super::input::COMMANDS.iter().map(|c| c.name.len()).max().unwrap_or(0) as i32 + 2;
-        screen.fill(Rect::new(1, top - 1, width, items.len() as i32 + 1), &st::RAISED);
+        let area = Rect::new(1, top - 1, width, items.len() as i32 + 1);
+        screen.fill(area, &st::RAISED);
+        self.cover(area);
         let selected = self.0.state.borrow().menu_index;
         for (index, item) in items.iter().enumerate() {
             let y = top + index as i32;

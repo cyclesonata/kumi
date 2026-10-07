@@ -48,6 +48,10 @@ struct Record {
     audition: RefCell<Option<Rc<dyn Fn(&AuditionRequest)>>>,
     goal_rig: RefCell<Option<Rc<dyn GoalRig>>>,
     goal_requests: RefCell<Vec<AuditionRequest>>,
+    /// Setting up a goal's search waits until the goal is stopped.
+    goal_holds: Cell<bool>,
+    /// Reading the Set waits until the operation is stopped.
+    observe_holds: Cell<bool>,
     audio_resolved: RefCell<Vec<String>>,
 }
 struct TestKernel {
@@ -116,8 +120,12 @@ impl Integration for TestIntegration {
         (self.listener)(ConnectionState::Connected, None);
         Ok(())
     }
-    async fn observe(&self, _: Signal, _: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
+    async fn observe(&self, signal: Signal, _: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         self.record.observations.set(self.record.observations.get() + 1);
+        if self.record.observe_holds.get() {
+            signal.cancelled().await;
+            return Err(RuntimeError::Aborted);
+        }
         if self.record.refresh_error.get() {
             return Err(RuntimeError::plain("secret-token-must-not-escape"));
         }
@@ -139,8 +147,12 @@ impl Integration for TestIntegration {
     fn has_goal(&self) -> bool {
         self.record.goal_rig.borrow().is_some()
     }
-    async fn goal(&self, request: &AuditionRequest, _: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+    async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
         self.record.goal_requests.borrow_mut().push(request.clone());
+        if self.record.goal_holds.get() {
+            signal.cancelled().await;
+            return Err(RuntimeError::Aborted);
+        }
         Ok(self.record.goal_rig.borrow().clone().ok_or_else(|| "no rig".into()))
     }
     fn has_stop_live(&self) -> bool {
@@ -593,6 +605,45 @@ local_test!(startup_failure_cleans_integration_and_late_kernel_is_closed, {
     settle().await;
     assert_eq!(h.record.closes.get(), 1);
     assert_eq!(h.session.status().state, TurnState::Closed);
+});
+local_test!(a_first_start_stopped_before_it_finished_finishes_once_live_is_there, {
+    async fn started(h: &Harness) -> bool {
+        for _ in 0..500 {
+            match h.session.submit("hello", None).await {
+                Ok(()) => return true,
+                Err(error) if error.message().contains("busy") => delay(2).await,
+                Err(_) => return false,
+            }
+        }
+        false
+    }
+    // Live drops while the first start reads the Set, then comes back.
+    let h = harness(None, |_| {});
+    h.record.observe_holds.set(true);
+    let s = h.session.clone();
+    let starting = tokio::task::spawn_local(async move { s.start().await });
+    for _ in 0..500 {
+        if h.record.observations.get() > 0 {
+            break;
+        }
+        delay(1).await;
+    }
+    let first = h.record.listeners.borrow()[0].clone();
+    first(ConnectionState::Disconnected, Some(DisconnectCause::Live));
+    let _ = starting.await.unwrap();
+    h.record.observe_holds.set(false);
+    first(ConnectionState::Connected, None);
+    assert!(started(&h).await, "the session started once Live was back");
+    h.session.close().await.unwrap();
+    // The first start's wait runs out before Live is there; then Live connects.
+    let h = harness(None, |o| o.timeout_ms = Some(30));
+    h.record.observe_holds.set(true);
+    let _ = h.session.start().await;
+    h.record.observe_holds.set(false);
+    let first = h.record.listeners.borrow()[0].clone();
+    first(ConnectionState::Connected, None);
+    assert!(started(&h).await, "the session started once Live connected");
+    h.session.close().await.unwrap();
 });
 local_test!(reconnect_carries_same_set_but_other_saved_set_starts_fresh, {
     let h = harness(None, |_| {});
@@ -1584,6 +1635,108 @@ local_test!(goal_pauses_persists_resumes_without_setup_and_stop_finishes, {
     }
     assert_eq!(status, Some(GoalRun::Done));
     assert!(!h.session.stop_goal().await.unwrap());
+});
+local_test!(a_goal_stopped_while_its_search_is_set_up_is_done_and_the_next_goals_escape_still_pauses_it, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_goal_store(dir.path().join("goals"));
+    let mut raw = SearchRig::new(vec![55.]);
+    raw.ms = 25;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |o| o.goals = Some(store.clone()));
+    h.record.goal_holds.set(true);
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("match my reference")).await });
+    for _ in 0..500 {
+        if !h.record.goal_requests.borrow().is_empty() {
+            break;
+        }
+        delay(1).await;
+    }
+    assert!(h.session.stop_goal().await.unwrap());
+    let _ = running.await.unwrap();
+    let stopped = h.session.goal_status().unwrap();
+    // The next goal is its own: Esc pauses it, as Esc does, and its candidates stay.
+    h.record.goal_holds.set(false);
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("match my reference again")).await });
+    generation(&h.session, 2).await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Paused);
+    assert!(!rig.cleanup.borrow().iter().any(|s| s.starts_with("tidy:")));
+    // And the stopped one said so.
+    assert_eq!((stopped.state, stopped.why.as_deref()), (GoalPhase::Done, Some("stopped")));
+    h.session.close().await.unwrap();
+});
+local_test!(a_goal_stopped_during_its_setup_turn_stops_that_turn_and_leaves_an_older_paused_goal_paused, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_goal_store(dir.path().join("goals"));
+    let mut raw = SearchRig::new(vec![55.]);
+    raw.ms = 25;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |o| o.goals = Some(store.clone()));
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("match my reference")).await });
+    generation(&h.session, 2).await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    h.session.close().await.unwrap();
+    assert_eq!(store.load("unsaved").await.unwrap().unwrap().status, GoalRun::Paused);
+    // A new goal whose setup turn is still being written when the producer says /goal stop.
+    let writing: Run = Rc::new(|_, signal, _| {
+        async move {
+            signal.cancelled().await;
+            Err(RuntimeError::Aborted)
+        }
+        .boxed_local()
+    });
+    let h = harness(Some(writing), |o| o.goals = Some(store.clone()));
+    *h.record.goal_rig.borrow_mut() = Some(rig.clone());
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("a new goal")).await });
+    for _ in 0..500 {
+        if !h.record.calls.borrow().is_empty() {
+            break;
+        }
+        delay(1).await;
+    }
+    assert!(h.session.stop_goal().await.unwrap());
+    tokio::time::timeout(Duration::from_secs(5), running).await.expect("the setup turn stopped").unwrap().ok();
+    assert_eq!(h.session.goal_status().unwrap().why.as_deref(), Some("stopped"));
+    h.session.close().await.unwrap();
+    assert_eq!(store.load("unsaved").await.unwrap().unwrap().status, GoalRun::Paused, "the older goal is still there to pick up");
+});
+local_test!(a_paused_goal_stays_with_its_set, {
+    let dir = tempfile::tempdir().unwrap();
+    let store = create_goal_store(dir.path().join("goals"));
+    let mut raw = SearchRig::new(vec![55.]);
+    raw.ms = 25;
+    let rig = Rc::new(raw);
+    let h = goal_harness(rig.clone(), true, |o| o.goals = Some(store.clone()));
+    h.observation.borrow_mut().project = Some(ProjectRef { id: "set-a".into(), name: "Set A".into() });
+    h.session.start().await.unwrap();
+    let s = h.session.clone();
+    let running = tokio::task::spawn_local(async move { s.goal(Some("match my reference")).await });
+    generation(&h.session, 2).await;
+    h.session.cancel().await.unwrap();
+    running.await.unwrap().unwrap();
+    assert_eq!(h.session.goal_status().unwrap().state, GoalPhase::Paused);
+    let rendered = rig.calls.borrow().len();
+    // The producer opens Set B, and Kumi sees it on the next turn.
+    h.observation.borrow_mut().project = Some(ProjectRef { id: "set-b".into(), name: "Set B".into() });
+    h.session.submit("what's in this Set?", None).await.unwrap();
+    // Set A's goal doesn't carry on in Set B, and stopping there doesn't touch it.
+    let opened = h.record.goal_requests.borrow().len();
+    h.session.goal(None).await.unwrap();
+    assert_eq!(h.record.goal_requests.borrow().len(), opened, "no search set up in Set B");
+    assert_eq!(rig.calls.borrow().len(), rendered, "nothing rendered in Set B");
+    assert!(!h.session.stop_goal().await.unwrap());
+    h.session.close().await.unwrap();
+    assert!(store.load("set-b").await.unwrap().is_none());
+    assert_eq!(store.load("set-a").await.unwrap().unwrap().status, GoalRun::Paused);
 });
 local_test!(goal_silent_renders_pause_and_structural_gap_prompts_leap, {
     let mut raw = SearchRig::new(vec![]);

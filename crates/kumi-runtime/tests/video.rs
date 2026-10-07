@@ -114,7 +114,11 @@ fn whisper_output_becomes_timed_lines_without_music_or_silence() {
     assert_eq!(speech_model_for(Some("de")), "ggml-small-q5_1.bin");
 }
 async fn test_video(folder: &Path, name: &str, captions: bool) -> Option<String> {
+    test_video_sized(folder, name, captions, "640x360").await
+}
+async fn test_video_sized(folder: &Path, name: &str, captions: bool, size: &str) -> Option<String> {
     let ffmpeg = find_ffmpeg(FfmpegOptions { installed_only: true, ..Default::default() }).await.unwrap()?;
+    let picture = format!("testsrc2=size={size}:rate=10:duration=12");
     let file = folder.join(format!("{name}.mp4")).to_string_lossy().into_owned();
     run(
         &ffmpeg,
@@ -125,7 +129,7 @@ async fn test_video(folder: &Path, name: &str, captions: bool) -> Option<String>
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=640x360:rate=10:duration=12",
+            &picture,
             "-f",
             "lavfi",
             "-i",
@@ -210,6 +214,100 @@ async fn offline_a_saved_transcript_still_answers_and_its_note_says_why_ffmpeg_c
     assert_eq!(watched.lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["then a Saturator"]);
     assert_eq!(watched.notes, [note]);
     assert_eq!(asked.lock().unwrap().len(), 2);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_portrait_video_and_side_closeups_have_frames_and_thumbnails() {
+    let folder = tempfile::tempdir().unwrap();
+    let Some(short) = test_video_sized(folder.path(), "short", false, "360x640").await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let options = watch_options(folder.path(), "videos");
+    // A Short: its thumbnails are 32 high, as a landscape frame's are 32 wide.
+    let watched = watch_video(WatchRequest { url: short, frames: Some(2.0), ..Default::default() }, options.clone()).await.unwrap();
+    assert_eq!(watched.frames.len(), 2, "{:?}", watched.notes);
+    for frame in &watched.frames {
+        assert_eq!(&frame.jpeg[..2], [0xff, 0xd8]);
+        assert_eq!((frame.thumb.width, frame.thumb.height, frame.thumb.rgb.len()), (18, 32, 18 * 32 * 3));
+    }
+    // A left or right close-up of a landscape video is taller than wide too.
+    let video = test_video(folder.path(), "tutorial", false).await.unwrap();
+    let left = watch_video(
+        WatchRequest { url: video, look_at: Some(vec![7.0]), zoom: Some(Region::Left), frames: Some(0.0), ..Default::default() },
+        options,
+    )
+    .await
+    .unwrap();
+    assert_eq!(left.frames.len(), 1, "{:?}", left.notes);
+    assert_eq!((left.frames[0].thumb.width, left.frames[0].thumb.height), (28, 32));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn captions_beside_a_video_are_read_in_windows_1252_and_utf_16_too() {
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "latin", false).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let options = watch_options(folder.path(), "videos");
+    // As older subtitle tools write it: Windows-1252, where é is one byte.
+    std::fs::write(folder.path().join("latin.srt"), b"1\n00:00:01,000 --> 00:00:03,000\nCaf\xe9 Saturator\n").unwrap();
+    let watched = watch_video(WatchRequest { url: video.clone(), frames: Some(0.0), ..Default::default() }, options.clone()).await.unwrap();
+    assert_eq!(watched.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["Caf\u{e9} Saturator"]);
+    let other = test_video(folder.path(), "wide", false).await.unwrap();
+    let utf16: Vec<u8> = [0xff, 0xfe]
+        .into_iter()
+        .chain("1\n00:00:01,000 --> 00:00:03,000\n\u{65e5}\u{672c}\n".encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    std::fs::write(folder.path().join("wide.srt"), utf16).unwrap();
+    let watched = watch_video(WatchRequest { url: other, frames: Some(0.0), ..Default::default() }, options).await.unwrap();
+    assert_eq!(watched.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["\u{65e5}\u{672c}"]);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn a_private_address_isnt_given_to_yt_dlp() {
+    let folder = tempfile::tempdir().unwrap();
+    // A yt-dlp that writes down what it's given.
+    let ytdlp =
+        fake(folder.path(), "yt-dlp", "printf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/asked\"\nexit 1", "echo %*>>\"%~dp0asked\"\nexit /b 1");
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_YTDLP".into(), ytdlp);
+    let mut options = watch_options(folder.path(), "videos");
+    options.env = Some(env);
+    for address in ["http://192.168.1.20/tutorial.mp4", "http://localhost:8080/watch?v=x", "http://[::1]/video"] {
+        let error = watch_video(WatchRequest { url: address.into(), ..Default::default() }, options.clone()).await.unwrap_err();
+        assert!(error.to_string().contains("only public web addresses"), "{address}: {error}");
+    }
+    assert!(!folder.path().join("asked").exists(), "yt-dlp wasn't run");
+    // The URL standard's host here is public.invalid, and Python's (yt-dlp's) is 127.0.0.1: yt-dlp is given the
+    // address as Kumi read it, so it asks the host Kumi checked.
+    let _ = watch_video(WatchRequest { url: "http://public.invalid\\@127.0.0.1:8080/".into(), ..Default::default() }, options).await;
+    let given = std::fs::read_to_string(folder.path().join("asked")).unwrap();
+    assert!(given.contains("http://public.invalid/@127.0.0.1:8080/") && !given.contains("\\@"), "{given}");
+}
+#[tokio::test(flavor = "current_thread")]
+async fn pieces_a_fetch_stopped_dead_left_go_before_the_next_fetch() {
+    let folder = tempfile::tempdir().unwrap();
+    let tools = folder.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    // Half an archive a Kumi stopped dead left two hours ago, and one another Kumi is fetching now.
+    let left = tools.join(".ffmpeg-0b1d.tar.xz");
+    std::fs::write(&left, "half an archive").unwrap();
+    let two_hours = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::options().write(true).open(&left).unwrap().set_modified(two_hours).unwrap();
+    let fetching = tools.join(".ffmpeg-77.tar.xz");
+    std::fs::write(&fetching, "a fetch under way").unwrap();
+    let unreachable: Download = Arc::new(|_, _| async { Err(VideoFailure::other("error sending request")) }.boxed());
+    let found = find_ffmpeg(FfmpegOptions {
+        env: Some(Default::default()),
+        tools_dir: Some(tools.to_string_lossy().into()),
+        platform: Some("linux".into()),
+        arch: Some("x64".into()),
+        download: Some(unreachable),
+        ..Default::default()
+    })
+    .await;
+    assert!(found.is_err());
+    assert!(!left.exists(), "the stale piece is gone");
+    assert!(fetching.exists(), "the fetch under way keeps its own");
 }
 #[tokio::test(flavor = "current_thread")]
 async fn video_files_have_captions_frames_closeups_sound_and_are_kept() {
@@ -574,6 +672,20 @@ async fn a_stream_its_site_wants_in_pieces_is_asked_for_in_pieces() {
     let sound = sound_between(&ffmpeg, &pieces, 2.0, 4.0, &path("pieces.wav"), None, false).await.unwrap();
     assert!(std::fs::metadata(sound).unwrap().len() > 44_100 * 2 * 2);
 }
+#[tokio::test(flavor = "current_thread")]
+async fn a_frame_whose_thumbnail_cant_be_made_keeps_its_picture() {
+    use kumi_runtime::video::frames::frame_at;
+    let folder = tempfile::tempdir().unwrap();
+    // Frames already taken, and an ffmpeg that can't make their thumbnails.
+    let ffmpeg = fake(folder.path(), "ffmpeg", "exit 1", "exit /b 1");
+    let path = |name: &str| folder.path().join(name).to_string_lossy().into_owned();
+    std::fs::write(path("whole.jpg"), [0xff, 0xd8, 0xff, 0xe0, 0, 0, 0xff, 0xd9]).unwrap();
+    let frame = frame_at(&ffmpeg, None, 7.0, &path("whole.jpg"), None, None).await.unwrap();
+    assert_eq!((frame.jpeg.len(), frame.thumb.width, frame.thumb.height), (8, 0, 0));
+    // A picture cut off isn't one to show.
+    std::fs::write(path("cut.jpg"), [0xff, 0xd8, 0xff, 0xe0]).unwrap();
+    assert!(frame_at(&ffmpeg, None, 7.0, &path("cut.jpg"), None, None).await.is_err());
+}
 
 /// A program in `folder`: a shell script, or on Windows a batch file, so the tests that use one run
 /// everywhere, without ffmpeg.
@@ -734,6 +846,46 @@ async fn a_youtube_stream_is_asked_for_in_its_pieces_and_an_older_ffmpeg_says_so
     }
 }
 #[tokio::test(flavor = "current_thread")]
+async fn ffmpeg_reads_a_stream_at_the_host_kumi_checked() {
+    let folder = tempfile::tempdir().unwrap();
+    let tools = folder.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    // A stream address whose host is public.invalid to the URL standard, and 127.0.0.1 to ffmpeg's own reading.
+    let page = json!({
+        "id": "bkslash0001",
+        "extractor_key": "Youtube",
+        "title": "Backslash",
+        "duration": 300,
+        "webpage_url": "https://www.youtube.com/watch?v=bkslash0001",
+        "formats": [{"format_id": "1", "url": "https://public.invalid\\@127.0.0.1:8124/videoplayback", "protocol": "https", "ext": "mp4",
+            "vcodec": "avc1.4d401f", "acodec": "none", "height": 720}]
+    });
+    std::fs::write(tools.join("page.json"), page.to_string()).unwrap();
+    let ytdlp = fake(
+        &tools,
+        "yt-dlp",
+        "if [ \"$1\" = --version ]; then echo 2025.01.01; exit 0; fi\ncat \"$(dirname \"$0\")/page.json\"",
+        "if \"%~1\"==\"--version\" (\n  echo 2025.01.01\n  exit /b 0\n)\ntype \"%~dp0page.json\"",
+    );
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_FFMPEG".into(), refused_ffmpeg(&tools));
+    env.insert("KUMI_YTDLP".into(), ytdlp);
+    env.insert("KUMI_WHISPER".into(), tools.join("no-whisper").to_string_lossy().into());
+    let mut options = watch_options(&tools, "videos");
+    options.env = Some(env);
+    let watched =
+        watch_video(WatchRequest { url: "https://youtu.be/bkslash0001".into(), look_at: Some(vec![10.0]), ..Default::default() }, options)
+            .await
+            .unwrap();
+    assert!(watched.frames.is_empty());
+    let takes = lines_in(&tools, "takes");
+    assert!(
+        !takes.is_empty()
+            && takes.iter().all(|take| take.contains("https://public.invalid/@127.0.0.1:8124/videoplayback") && !take.contains("\\@")),
+        "{takes:?}"
+    );
+}
+#[tokio::test(flavor = "current_thread")]
 async fn a_program_that_stalls_is_said_to_have_timed_out() {
     let folder = tempfile::tempdir().unwrap();
     // A batch file's ping outlives it, holding its pipes until it ends: these end soon after the timeouts.
@@ -853,6 +1005,143 @@ async fn speech_that_couldnt_be_taken_leaves_a_note_and_the_frames() {
 
 #[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
+async fn captions_that_didnt_come_are_asked_for_again_next_time() {
+    let folder = tempfile::tempdir().unwrap();
+    let tools = folder.path().join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    // A video with English captions. The first time yt-dlp can't fetch them (turned away); then it can.
+    let page = json!({"id":"captioned01","extractor_key":"Youtube","title":"Captioned","duration":12,
+        "webpage_url":"https://www.youtube.com/watch?v=captioned01","formats":[],
+        "subtitles":{"en":[{"ext":"vtt","url":"http://127.0.0.1:9/captions.vtt"}]}});
+    std::fs::write(tools.join("page.json"), page.to_string()).unwrap();
+    let ytdlp = program(
+        &tools,
+        "yt-dlp",
+        r#"if [ "$1" = --version ]; then echo 2025.01.01; exit 0; fi
+for arg in "$@"; do case "$arg" in --write-subs|--write-auto-subs) subs=1;; esac; done
+if [ -z "$subs" ]; then cat "$(dirname "$0")/page.json"; exit 0; fi
+if [ ! -f "$(dirname "$0")/allowed" ]; then echo 'ERROR: Unable to download video subtitles: HTTP Error 429: Too Many Requests' >&2; exit 1; fi
+while [ "$#" -gt 0 ]; do if [ "$1" = -o ]; then shift; out="$1"; fi; shift; done
+printf 'WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nload Operator\n' > "$(printf '%s' "$out" | sed 's/%(ext)s/vtt/')""#,
+    );
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_YTDLP".into(), ytdlp);
+    env.insert("KUMI_FFMPEG".into(), program(&tools, "ffmpeg", "exit 1"));
+    env.insert("KUMI_WHISPER".into(), tools.join("no-whisper").to_string_lossy().into());
+    let mut options = watch_options(folder.path(), "videos");
+    options.env = Some(env);
+    let watch = || {
+        watch_video(WatchRequest { url: "https://youtu.be/captioned01".into(), frames: Some(0.0), ..Default::default() }, options.clone())
+    };
+    assert!(watch().await.unwrap().lines.is_empty());
+    std::fs::write(tools.join("allowed"), "").unwrap();
+    let again = watch().await.unwrap();
+    assert_eq!(again.lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(), ["load Operator"], "{:?}", again.notes);
+    // Captions that came are kept: the next watch doesn't ask.
+    std::fs::remove_file(tools.join("allowed")).unwrap();
+    assert_eq!(watch().await.unwrap().lines.len(), 1);
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_cached_video_that_cant_be_tidied_away_doesnt_stop_a_watch() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "tidy", true).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let options = watch_options(folder.path(), "videos");
+    // 25 watched videos kept, so the oldest goes; a file in it is held (here, its folder can't be written).
+    let videos = std::path::Path::new(&options.videos_dir);
+    for index in 0..25 {
+        let kept = videos.join(format!("file-{index:016}"));
+        std::fs::create_dir_all(kept.join("frames")).unwrap();
+        std::fs::write(kept.join("frames/1.0.jpg"), "jpeg").unwrap();
+        std::fs::write(kept.join("meta.json"), "{}").unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(1000 - index);
+        std::fs::File::options().write(true).open(kept.join("meta.json")).unwrap().set_modified(when).unwrap();
+    }
+    let held = videos.join("file-0000000000000000/frames");
+    std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let watched = watch_video(WatchRequest { url: video, frames: Some(0.0), ..Default::default() }, options).await;
+    std::fs::set_permissions(&held, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(watched.unwrap().lines.len(), 2);
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_video_has_its_duration_from_an_ffmpeg_without_ffprobe() {
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "alone", true).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let real = find_ffmpeg(FfmpegOptions { installed_only: true, ..Default::default() }).await.unwrap().unwrap();
+    // As Kumi keeps its own: ffmpeg alone, no ffprobe beside it.
+    let tools = folder.path().join("own");
+    std::fs::create_dir_all(&tools).unwrap();
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_FFMPEG".into(), program(&tools, "ffmpeg", &format!("exec '{real}' \"$@\"")));
+    let mut options = watch_options(folder.path(), "videos");
+    options.env = Some(env);
+    let watched = watch_video(WatchRequest { url: video, frames: Some(2.0), ..Default::default() }, options).await.unwrap();
+    assert!((watched.duration.unwrap_or(0.0) - 12.0).abs() < 0.5, "{:?}", watched.duration);
+    assert_eq!(watched.frames.len(), 2, "{:?}", watched.notes);
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_video_without_a_duration_is_as_long_as_its_transcribed_words() {
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "unknown", false).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let real = find_ffmpeg(FfmpegOptions { installed_only: true, ..Default::default() }).await.unwrap().unwrap();
+    // An ffmpeg that can't say how long anything is, and no ffprobe: the transcript says it.
+    let tools = folder.path().join("blind");
+    std::fs::create_dir_all(&tools).unwrap();
+    let ffmpeg =
+        program(&tools, "ffmpeg", &format!("for arg in \"$@\"; do if [ \"$arg\" = null ]; then exit 1; fi; done\nexec '{real}' \"$@\""));
+    let whisper = program(
+        folder.path(),
+        "whisper",
+        r#"while [ "$#" -gt 0 ]; do if [ "$1" = '-of' ]; then shift; out="$1"; fi; shift; done
+printf '%s' '{"transcription":[{"offsets":{"from":1000,"to":3000},"text":" load Operator "},{"offsets":{"from":6000,"to":8000},"text":" then a Saturator "}]}' > "$out.json""#,
+    );
+    std::fs::write(folder.path().join("model.bin"), "").unwrap();
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_FFMPEG".into(), ffmpeg);
+    env.insert("KUMI_WHISPER".into(), whisper);
+    env.insert("KUMI_WHISPER_MODEL".into(), folder.path().join("model.bin").to_string_lossy().into());
+    let mut options = watch_options(folder.path(), "videos");
+    options.env = Some(env);
+    let watched = watch_video(WatchRequest { url: video, frames: Some(3.0), ..Default::default() }, options).await.unwrap();
+    assert_eq!(watched.duration, None);
+    assert_eq!(watched.lines.len(), 2, "{:?}", watched.notes);
+    assert_eq!(watched.frames.len(), 3, "{:?}", watched.notes);
+    assert!(watched.frames.iter().all(|frame| frame.at <= 8.0), "{:?}", watched.frames.iter().map(|f| f.at).collect::<Vec<_>>());
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn a_speech_model_kumi_cant_get_leaves_a_note_and_the_frames() {
+    let folder = tempfile::tempdir().unwrap();
+    let Some(video) = test_video(folder.path(), "unmodelled", false).await else {
+        eprintln!("ffmpeg makes the test video; unavailable");
+        return;
+    };
+    let mut env = kumi_runtime::system::process_env();
+    env.insert("KUMI_WHISPER".into(), program(folder.path(), "whisper", "exit 1"));
+    env.insert("KUMI_WHISPER_MODEL".into(), folder.path().join("gone.bin").to_string_lossy().into());
+    let mut options = watch_options(folder.path(), "videos");
+    options.env = Some(env);
+    // Offline, or short of disk, as a model that isn't there: the frames still come.
+    let watched = watch_video(WatchRequest { url: video, frames: Some(2.0), ..Default::default() }, options).await.unwrap();
+    assert_eq!(watched.notes.len(), 1, "{:?}", watched.notes);
+    assert!(watched.notes[0].starts_with("Kumi couldn't transcribe the video's speech (KUMI_WHISPER_MODEL names "), "{:?}", watched.notes);
+    assert_eq!(watched.frames.len(), 2);
+    assert_eq!(runs(folder.path(), "whisper"), 0);
+}
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
 async fn speech_process_receives_options_reports_progress_and_cleans_up_after_success_timeout_and_abort() {
     use kumi_runtime::video::speech::{transcribe, TranscribeOptions};
     use std::os::unix::fs::PermissionsExt;
@@ -949,9 +1238,21 @@ fn youtube_uses_the_retained_installer_runtime_with_a_restricted_path() {
 #[cfg(unix)]
 #[tokio::test]
 async fn youtube_javascript_runtime_child() {
+    use std::os::unix::fs::PermissionsExt;
     let Ok(ytdlp) = std::env::var("KUMI_TEST_YTDLP") else { return };
     let expected = format!("node:{}/node/bin/node", std::env::var("KUMI_HOME").unwrap());
-    assert_eq!(programs::yt_dlp_extras(&ytdlp, None).await, vec!["--js-runtimes".to_string(), expected]);
+    // A yt-dlp that couldn't say its version isn't kept as one without a runtime: it's asked again.
+    let answers = std::fs::read(&ytdlp).unwrap();
+    std::fs::write(&ytdlp, "#!/bin/sh\nexit 1\n").unwrap();
+    assert!(programs::yt_dlp_extras(&ytdlp, None).await.is_empty());
+    std::fs::write(&ytdlp, &answers).unwrap();
+    assert_eq!(programs::yt_dlp_extras(&ytdlp, None).await, vec!["--js-runtimes".to_string(), expected.clone()]);
+    // A watch stopped while yt-dlp is asked leaves the asking to finish for the next one.
+    let slow = format!("{ytdlp} slow");
+    std::fs::write(&slow, "#!/bin/sh\n/bin/sleep 1\nprintf '2025.11.12\\n'\n").unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(programs::yt_dlp_extras(&slow, Some(kumi_common::abort::timeout(100))).await.is_empty());
+    assert_eq!(programs::yt_dlp_extras(&slow, None).await, vec!["--js-runtimes".to_string(), expected]);
     // The source memoizes each executable probe, including the selected runtime.
     std::fs::remove_file(&ytdlp).unwrap();
     assert_eq!(programs::yt_dlp_extras(&ytdlp, None).await.len(), 2);

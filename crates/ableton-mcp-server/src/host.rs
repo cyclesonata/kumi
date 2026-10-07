@@ -2,6 +2,7 @@
 
 #![allow(dead_code)]
 mod advanced_devices;
+mod apply_failure;
 mod arrangement;
 mod arrangement_clip;
 mod arrangement_midi;
@@ -138,6 +139,8 @@ pub struct McpHost {
     song_history_calls: RefCell<VecDeque<(String, Value)>>,
     analysis_runner: crate::analysis_runner::AnalysisRunner,
     adapter: Rc<dyn AsyncLiveAdapter>,
+    /// The last adapter call that failed (see `apply_failure`).
+    last_live_failure: Rc<RefCell<Option<apply_failure::NotedFailure>>>,
     views: Rc<LiveViews>,
     initialized: Cell<bool>,
     initialized_notification: Cell<bool>,
@@ -170,6 +173,7 @@ pub struct McpHost {
     options: McpHostOptions,
     import_files: Rc<import_files::ImportFiles>,
     semantic_exports: RefCell<VecDeque<project::SemanticExport>>,
+    library_reads: probe_library::LibraryReads,
 }
 impl Default for McpHost {
     fn default() -> Self {
@@ -182,6 +186,9 @@ impl McpHost {
     }
     pub fn new(adapter: Rc<dyn AsyncLiveAdapter>, options: McpHostOptions) -> Result<Self, LiveError> {
         let policy = Rc::new(RefCell::new(tool_catalog::parse_tool_policy_spec(options.tool_policy.as_ref()).map_err(policy_error)?));
+        let last_live_failure = Rc::new(RefCell::new(None));
+        let adapter: Rc<dyn AsyncLiveAdapter> =
+            Rc::new(apply_failure::FailureNotingAdapter { adapter, last_failure: last_live_failure.clone() });
         let provider = adapter.clone();
         let views = Rc::new(LiveViews::new(move || provider.clone()));
         let policy_for_batch = policy.clone();
@@ -212,7 +219,7 @@ impl McpHost {
         let clip_lifecycle_transactions = BoundedTransactionMap::new(
             retention.clone(),
             Some(Rc::new(move |value| {
-                cleanup_imports.release_for(&value.borrow());
+                cleanup_imports.release_unused(&value.borrow());
                 Ok(())
             })),
         );
@@ -254,12 +261,14 @@ impl McpHost {
             batch_transactions: batch,
             views,
             adapter,
+            last_live_failure,
             retention,
             recovery_finalization_in_flight: Cell::new(false),
             active_async_operations: Cell::new(0),
             options,
             import_files,
             semantic_exports: RefCell::new(VecDeque::new()),
+            library_reads: Default::default(),
         })
     }
     pub fn effective_tool_policy(&self) -> ToolPolicySpec {
@@ -351,7 +360,7 @@ fn safe_adapter_status(adapter: &dyn AsyncLiveAdapter) -> LiveStatus {
         let capabilities: HashSet<_> = status.capabilities.iter().collect();
         let operations_valid = status.operations.as_ref().is_none_or(|operations| {
             let unique: HashSet<_> = operations.iter().collect();
-            unique.len() == operations.len() && operations.iter().all(|operation| live_registry_operations().contains(operation))
+            unique.len() == operations.len() && operations.iter().all(|operation| crate::registry::is_live_registry_operation(operation))
         });
         let hash_valid = status
             .registry_hash

@@ -159,7 +159,7 @@ use super::{
     measure_worker::{MeasureJob, MeasurePool},
     presets::{plugin_preset_facts, read_live_preset, read_max_device, PresetFacts, PRESET_EXTENSIONS},
     sets::read_set,
-    sources::{basename, browser_path, dirname, join, SourceKind, SEP},
+    sources::{basename, below, browser_path, dirname, join, SourceKind},
     store::{pack_vector, write_json},
     taste::build_taste,
 };
@@ -285,20 +285,36 @@ async fn walk(
     let mut complete = true;
     while let Some((path, depth)) = queue.pop() {
         signal.check()?;
+        // A folder that can't be read (a NAS's hiccup, a placeholder nothing serves now) is skipped, and the walk
+        // isn't whole: what was learned in it stays. One deleted meanwhile is gone.
         let mut entries = match tokio::fs::read_dir(&path).await {
             Ok(entries) => entries,
             Err(_) if depth == 0 => return Ok(false),
-            Err(_) => continue,
+            Err(error) => {
+                complete &= error.kind() == io::ErrorKind::NotFound;
+                continue;
+            }
         };
         let parent = basename(&path).to_lowercase();
-        while let Some(entry) = entries.next_entry().await.map_err(io_error)? {
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => {
+                    complete = false;
+                    break;
+                }
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with('.') {
                 continue;
             }
             let full = join(&path, &name);
             let lower = name.to_lowercase();
-            let kind = entry.file_type().await.map_err(io_error)?;
+            let Ok(kind) = entry.file_type().await else {
+                complete = false;
+                continue;
+            };
             if kind.is_dir() {
                 if SKIP.contains(&lower.as_str())
                     || lower == "backup"
@@ -335,7 +351,14 @@ async fn walk(
             if !found.seen.insert(full.clone()) {
                 continue;
             }
-            let Ok(info) = tokio::fs::metadata(&full).await else { continue };
+            // The listing's own: a regular file (file_type said so), so the same as by path, one round trip fewer on a NAS.
+            let info = match entry.metadata().await {
+                Ok(info) => info,
+                Err(error) => {
+                    complete &= error.kind() == io::ErrorKind::NotFound;
+                    continue;
+                }
+            };
             if info.len() < 64 {
                 continue;
             }
@@ -446,13 +469,15 @@ async fn gone<T: LogEntry>(
         .keys()
         .filter(|path| {
             !present.contains(path)
-                && (roots.iter().any(|root| path.starts_with(&format!("{root}{SEP}")))
+                && (roots.iter().any(|root| below(path, root).is_some())
                     || (outside && ((!Path::new(path).exists() && Path::new(&dirname(&dirname(path))).exists()) || backup_set(path))))
         })
         .cloned()
         .collect();
-    for path in &lost {
-        known.shift_remove(path);
+    // In one pass: removing them one at a time moves every entry after each.
+    if !lost.is_empty() {
+        let lost: HashSet<&String> = lost.iter().collect();
+        known.retain(|path, _| !lost.contains(path));
     }
     log.append(&lost.into_iter().map(Entry::gone).collect::<Vec<_>>()).await.map_err(io_error)
 }
@@ -505,7 +530,7 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
     }
     let source_paths = sources.iter().map(|s| s.path.clone()).collect();
     for path in &plan.set_folders {
-        if sources.iter().any(|s| *path == s.path || path.starts_with(&format!("{}{SEP}", s.path))) {
+        if sources.iter().any(|s| *path == s.path || below(path, &s.path).is_some()) {
             continue;
         }
         let source = Source { path: path.clone(), label: basename(path), kind: SourceKind::Folder };
@@ -639,20 +664,25 @@ pub async fn learn(options: LearnOptions) -> Result<LearnProgress, RuntimeError>
                 let Some(file) = todo.get(next.get()) else { break };
                 next.set(next.get() + 1);
                 progress.value.borrow_mut().at = Some(file.source.label.clone());
-                let entry = pool
-                    .run(
-                        slot,
-                        MeasureJob {
-                            id: 0,
-                            path: file.file.path.clone(),
-                            relative: file.relative.clone(),
-                            size: file.file.size,
-                            mtime: file.file.mtime,
-                            start: None,
-                            seconds: None,
-                        },
-                    )
-                    .await;
+                let job = MeasureJob {
+                    id: 0,
+                    path: file.file.path.clone(),
+                    relative: file.relative.clone(),
+                    size: file.file.size,
+                    mtime: file.file.mtime,
+                    start: None,
+                    seconds: None,
+                };
+                // A stop doesn't wait for the measurement (up to the pool's timeout): the pool ends its worker below.
+                let entry = tokio::select! {
+                    // No room to convert, or no worker: nothing is kept of the file, and the next run measures it.
+                    entry = pool.run(slot, job) => entry.map_err(|error| RuntimeError::plain(if error.kind() == io::ErrorKind::StorageFull {
+                        error.to_string()
+                    } else {
+                        format!("Kumi couldn't start its measuring ({error}); it will try again")
+                    }))?,
+                    _ = options.signal.cancelled() => return Err(RuntimeError::Aborted),
+                };
                 options.signal.check()?;
                 if entry.error.is_some() && entry.r#class.is_none() && entry.kind.is_none() {
                     progress.value.borrow_mut().failed += 1;

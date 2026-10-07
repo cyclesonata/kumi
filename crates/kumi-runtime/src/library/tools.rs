@@ -45,7 +45,7 @@ pub trait LibraryAccess {
     async fn sets(&self) -> Result<Vec<SetEntry>, RuntimeError>;
     fn learning(&self) -> LearningState;
     fn remember(&self, folders: Vec<String>);
-    fn folders(&self) -> Vec<String>;
+    async fn folders(&self) -> Vec<String>;
     async fn measure(&self, path: String, options: MeasureOptions) -> Result<SoundEntry, RuntimeError>;
 }
 pub type ResolveSound = Rc<dyn Fn(String, Signal) -> LocalBoxFuture<'static, Result<Option<String>, RuntimeError>>>;
@@ -144,8 +144,8 @@ struct LibraryTool {
     options: LibraryToolsOptions,
 }
 impl LibraryTool {
-    fn everywhere(&self) -> Vec<String> {
-        let known = self.library.folders();
+    async fn everywhere(&self) -> Vec<String> {
+        let known = self.library.folders().await;
         if known.is_empty() {
             default_sample_folders(None, None, None)
         } else {
@@ -162,7 +162,7 @@ impl LibraryTool {
         note: Value,
     ) -> Result<ToolResult, RuntimeError> {
         let found = find_samples(FindSamplesOptions {
-            folders: if folders.is_empty() { self.everywhere() } else { folders },
+            folders: if folders.is_empty() { self.everywhere().await } else { folders },
             words,
             limit,
             random,
@@ -185,6 +185,11 @@ impl LibraryTool {
             return Ok(ToolResult::error("Name folders by their full path, such as ~/Samples or /Users/me/Music/Drums."));
         }
         let folders: Vec<_> = named.into_iter().flatten().collect();
+        // As the disk spells them, as the library's places are: a folder named in another case is the same one.
+        let asked = folders.clone();
+        let folders = tokio::task::spawn_blocking(move || asked.iter().map(|folder| super::sources::on_disk(folder)).collect::<Vec<_>>())
+            .await
+            .unwrap_or(folders);
         let words = strings(input.get("words"));
         let limit = limit_of(input.get("limit"), 20, 50);
         let random = input.get("random").and_then(Value::as_bool) == Some(true);
@@ -291,7 +296,7 @@ impl LibraryTool {
             && !truthy(input.get("key"))
         {
             if let Ok(found) = find_samples(FindSamplesOptions {
-                folders: if folders.is_empty() { self.everywhere() } else { folders },
+                folders: if folders.is_empty() { self.everywhere().await } else { folders },
                 words,
                 limit,
                 random,

@@ -3,9 +3,19 @@ use std::collections::HashMap;
 /// `process.env`, as the functions that took an `env` parameter read it (tests pass their own).
 pub type Env = HashMap<String, String>;
 
-/// `process.env` of this process.
+/// `process.env` of this process (a name or value that isn't Unicode read as near as it can be).
 pub fn process_env() -> Env {
-    std::env::vars().collect()
+    kumi_common::env::vars()
+}
+
+/// A variable of `env` by name, as `platform` reads one: Windows matches a name in any case and keeps PATH as
+/// "Path"; the exact name comes first.
+pub fn env_var<'a>(env: &'a Env, name: &str, platform: &str) -> Option<&'a str> {
+    env.get(name)
+        .or_else(|| {
+            (platform == "win32").then(|| env.iter().find(|(key, _)| key.eq_ignore_ascii_case(name)).map(|(_, value)| value)).flatten()
+        })
+        .map(String::as_str)
 }
 
 /// `process.platform`: "win32", "darwin", "linux", or the system's own name elsewhere.
@@ -19,6 +29,20 @@ pub fn platform() -> &'static str {
     } else {
         std::env::consts::OS
     }
+}
+
+/// Whether Windows takes a file name for one of its devices: CON, PRN, AUX, NUL, COM0–9 or LPT0–9 (and COM¹–³ and
+/// LPT¹–³) in any case, before the name's first dot and its trailing spaces. It does with an extension too ("aux.json",
+/// "Con .amxd"), so a file by such a name can't be made there.
+pub fn windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
+        return true;
+    }
+    let (Some(port), Some(number)) = (stem.get(..3), stem.get(3..)) else {
+        return false;
+    };
+    matches!(port, "COM" | "LPT") && (matches!(number.as_bytes(), [b'0'..=b'9']) || matches!(number, "\u{b9}" | "\u{b2}" | "\u{b3}"))
 }
 
 /// A program Windows comes with that Kumi runs.

@@ -439,8 +439,11 @@ impl kumi::tui::tabs::Tab for Stub {
     fn title(&self) -> &str {
         "STUB"
     }
-    fn rows(&self, _: i32) -> Vec<kumi::tui::tabs::TabRow> {
-        vec![kumi::tui::tabs::TabRow { spans: vec![kumi::tui::wrap::Span::styled("stub row", Default::default())], ..Default::default() }]
+    fn rows(&self, _: i32) -> Rc<[kumi::tui::tabs::TabRow]> {
+        Rc::new([kumi::tui::tabs::TabRow {
+            spans: vec![kumi::tui::wrap::Span::styled("stub row", Default::default())],
+            ..Default::default()
+        }])
     }
 }
 fn strip(lines: &[String]) -> usize {
@@ -557,8 +560,31 @@ case!(memory_rows_forget_and_use, async {
     h.has("◆ Forgot the technique: Neuro from a Reese");
     h.type_text(&click(&h.screen(), row + 2, "forget")).await;
     h.has("That was already gone.");
+    // HISTORY's rows are kept between frames, and made again when what they show changes.
+    assert!(h.screen()[row + 2].contains("forgotten"), "{}", h.screen()[row + 2]);
     h.emit(json!({"type":"technique","action":"used","technique":{"id":"t2","name":"Parallel drum crush","fits":"punchy drums"}}));
     h.has("◆ Using your technique: Parallel drum crush");
+    h.close().await;
+});
+case!(a_forget_that_fails_says_so_and_can_be_tried_again, async {
+    let c = Rc::new(Control::default());
+    *c.memory.borrow_mut() = Some(serde_json::from_value(json!({"producer":[],"set":[],"saved":true})).unwrap());
+    c.set("recipes", json!([]));
+    c.set("forget-fails", json!("recipes.json is in use by another program"));
+    let h = Harness::with(120, 36, c, |_| {});
+    h.start().await;
+    h.connect();
+    h.emit(json!({"type":"recipe","action":"saved","name":"Drum bus","steps":3}));
+    h.has("↻ Saved a recipe: Drum bus (3 steps)");
+    let lines = h.screen();
+    let row = strip(&lines) + 1;
+    assert!(lines[row].contains("↻ Drum bus") && lines[row].contains("forget"));
+    h.type_text(&click(&lines, row, "forget")).await;
+    assert!(h.calls().contains(&"forget-recipe:Drum bus".into()));
+    h.has("recipes.json is in use by another program");
+    assert!(!has(&h.screen(), "That was already gone."));
+    // Still Kumi's to forget: the row offers it again.
+    assert!(h.screen()[row].contains("forget") && !h.screen()[row].contains("forgotten"), "{}", h.screen()[row]);
     h.close().await;
 });
 case!(a_technique_offered_after_an_answer_is_answered_by_number, async {
@@ -701,6 +727,42 @@ case!(reconnect_refused_undo_and_narrow_undo, async {
     let row = lines.iter().position(|s| s.contains("Tempo 120 → 130 BPM") && s.contains("undo")).unwrap();
     h.type_text(&click(&lines, row, "undo")).await;
     assert!(h.calls().contains(&"undo:c3".into()));
+    h.close().await;
+});
+case!(after_reconnecting_history_says_kumi_cant_undo_what_it_could, async {
+    let c = Rc::new(Control::default());
+    c.set("reconnect", json!(true));
+    let h = Harness::with(120, 36, c, |_| {});
+    h.start().await;
+    h.connect();
+    h.emit(json!({"type":"change","change":{"id":"c8","family":"tempo","title":"Tempo 120 → 128 BPM","state":"applied","at":1}}));
+    let lines = h.screen();
+    let history = lines.iter().position(|s| s.contains("HISTORY")).unwrap();
+    let row = lines[history + 1].clone();
+    assert!(row.contains("Tempo 120 → 128 BPM") && row.trim_end().ends_with("undo") && !row.contains("no undo"), "{row}");
+    // Reconnecting changes the records in place: HISTORY's own row says so, not only NOW.
+    h.type_text("/reconnect\r").await;
+    let row = h.screen()[history + 1].clone();
+    assert!(row.contains("Tempo 120 → 128 BPM") && row.contains("no undo"), "{row}");
+    h.close().await;
+});
+case!(a_picker_over_the_dock_takes_the_clicks_on_what_it_hides, async {
+    let h = Harness::new(80, 24);
+    h.start().await;
+    h.connect();
+    h.emit(json!({"type":"change","change":{"id":"c4","family":"tempo","title":"Tempo 120 → 128 BPM","state":"applied","at":1}}));
+    let docked = h.screen();
+    let row = docked.iter().position(|s| s.contains("Tempo 120 → 128 BPM") && s.contains("undo")).unwrap();
+    // The answers picker opens over the dock: its lower right is where undo was.
+    h.type_text("which one?\r").await;
+    h.emit(json!({"type":"state","state":"running"}));
+    h.emit(json!({"type":"text","text":"Which reverb?\n\n1. Hall\n2. Plate\n3. Spring\n4. Room\n5. None"}));
+    h.emit(json!({"type":"turn-complete","result":{"stopReason":"completed"},"elapsedMs":900}));
+    h.emit(json!({"type":"state","state":"idle"}));
+    h.has("Your answer");
+    assert!(!h.screen()[row].contains("undo"), "the picker covers the dock's undo:\n{}", h.screen().join("\n"));
+    h.type_text(&click(&docked, row, "undo")).await;
+    assert!(!h.calls().iter().any(|c| c.starts_with("undo:")), "a click on the picker undid a change: {:?}", h.calls());
     h.close().await;
 });
 case!(history_scroll_mouse_keyboard_and_badges, async {

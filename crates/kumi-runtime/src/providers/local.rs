@@ -18,6 +18,7 @@ use crate::{
         budget::{budget_for, BYTES_PER_TOKEN},
         failure::clean_detail,
     },
+    system::{env_var, platform},
 };
 use async_trait::async_trait;
 use futures::{
@@ -128,7 +129,9 @@ fn ollama_address(host: Option<&String>) -> String {
     if !value.is_empty() {
         static SCHEME: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"(?i)^[a-z][a-z0-9+.-]*://").unwrap());
         static PORT: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"^[^/]*:\d+(/|$)").unwrap());
-        if let Ok(mut url) = Url::parse(&if SCHEME.is_match(value) { value.into() } else { format!("http://{value}") }) {
+        // Kumi reaches Ollama over http or https only: another scheme (tcp://, unix://) has no origin to name.
+        let parsed = Url::parse(&if SCHEME.is_match(value) { value.into() } else { format!("http://{value}") });
+        if let Some(mut url) = parsed.ok().filter(|url| matches!(url.scheme(), "http" | "https")) {
             if url.host_str() == Some("0.0.0.0") {
                 let _ = url.set_host(Some("127.0.0.1"));
             }
@@ -210,7 +213,7 @@ pub fn local_installed(kind: LocalKind, env: Option<&HashMap<String, String>>) -
     let env = env.unwrap_or(&process);
     let home = home::home_dir().unwrap_or_default();
     let on_path = |name: &str| {
-        std::env::split_paths(env.get("PATH").map(String::as_str).unwrap_or(""))
+        std::env::split_paths(env_var(env, "PATH", platform()).unwrap_or(""))
             .any(|dir| !dir.as_os_str().is_empty() && (dir.join(name).exists() || dir.join(format!("{name}.exe")).exists()))
     };
     match kind {
@@ -218,7 +221,7 @@ pub fn local_installed(kind: LocalKind, env: Option<&HashMap<String, String>>) -
             on_path("ollama")
                 || Path::new("/Applications/Ollama.app").exists()
                 || home.join("Applications/Ollama.app").exists()
-                || env.get("LOCALAPPDATA").is_some_and(|v| !v.is_empty() && Path::new(v).join("Programs/Ollama").exists())
+                || env_var(env, "LOCALAPPDATA", platform()).is_some_and(|v| !v.is_empty() && Path::new(v).join("Programs/Ollama").exists())
         }
         LocalKind::Lmstudio => home.join(".lmstudio").exists() || Path::new("/Applications/LM Studio.app").exists() || on_path("lms"),
         LocalKind::OpenaiCompatible => false,

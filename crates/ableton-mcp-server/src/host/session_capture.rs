@@ -29,6 +29,22 @@ fn authority_fields(value: &Value, names: &[&str]) -> Result<Value, LiveError> {
 fn clips(snapshot: &LiveSnapshot) -> Vec<Value> {
     snapshot.tracks.iter().flatten().flat_map(|track| track.clips.iter().map(|clip| serde_json::to_value(clip).unwrap())).collect()
 }
+/// Whether a clip that is `identity` is still in `snapshot`: in a Session slot, a take lane or the Arrangement.
+/// Arrangement clip refs are positional (`{track}:{index}`): the next clip takes a deleted one's ref, so only its
+/// identity says it's still there.
+fn clip_remains(snapshot: &LiveSnapshot, identity: &str) -> bool {
+    owned_clip_ref(snapshot, identity).is_some()
+}
+/// Where the clip that is `identity` is now: its ref, wherever it is in `snapshot`.
+fn owned_clip_ref(snapshot: &LiveSnapshot, identity: &str) -> Option<String> {
+    let s = serde_json::to_value(snapshot).unwrap();
+    rows(&s["tracks"])
+        .iter()
+        .flat_map(|track| rows(&track["clips"]).iter().chain(rows(&track["takeLanes"]).iter().flat_map(|lane| rows(&lane["clips"]))))
+        .chain(rows(&s["arrangement"]["clips"]))
+        .find(|clip| clip["objectIdentity"] == identity)
+        .and_then(|clip| clip["ref"].as_str().map(str::to_owned))
+}
 impl McpHost {
     pub(super) fn capture_authority_revision(&self, snapshot: &LiveSnapshot) -> Result<String, LiveError> {
         let s = serde_json::to_value(snapshot).unwrap();
@@ -86,13 +102,25 @@ impl McpHost {
         _expected_notes_revision: Option<&str>,
     ) -> Result<(), LiveError> {
         let snapshot = self.views.view_for(Some(context), &[json!(reference)], None, &[]).await?;
-        let located = match self.clip_row(&snapshot, reference) {
-            Ok(row) => row,
-            Err(_) if allow_absent => return Ok(()),
-            Err(e) => return Err(e),
-        };
-        if located.clip["objectIdentity"] != identity {
+        // Arrangement clip refs are positional: a clip added or deleted before it moves it to another ref, so it's
+        // found by its identity (and a retry after it went finds nothing left to delete).
+        let Some(at) = owned_clip_ref(&snapshot, identity) else {
+            if allow_absent {
+                return Ok(());
+            }
+            self.clip_row(&snapshot, reference)?;
             return Err(LiveError::error("owned clip identity changed before cleanup"));
+        };
+        let located = self.clip_row(&snapshot, &at)?;
+        // Live's ownership of a made clip (the remote adapter's cleanup token, the Remote Script's ledger row) is keyed
+        // by the ref it was made at, so a delete at any other ref would be refused there: a clip that moved is refused
+        // here, clearly and with nothing sent.
+        if at != reference {
+            return Err(LiveError::error(if located.arrangement {
+                "the clip moved since it was made (a clip before it was added or removed): delete it in Live"
+            } else {
+                "the clip moved with its scene since it was made (a scene was added or removed above it): delete it in Live"
+            }));
         }
         let operation = if located.arrangement { "arrangement.clip.delete" } else { "clip.delete" };
         let authority = if located.arrangement {
@@ -113,16 +141,11 @@ impl McpHost {
             adapter.invoke_async(&LiveInvocation::new(operation, args), Some(context)).await?;
         }
         let parent = located.track.as_ref().and_then(|row| row.get("ref")).filter(|v| !v.is_null()).cloned().unwrap_or(json!(reference));
-        let check = async {
-            let snapshot = self.views.view_for(Some(context), &[parent], None, &[]).await?;
-            self.clip_row(&snapshot, reference)
+        let after = self.views.view_for(Some(context), &[parent], None, &[]).await?;
+        if clip_remains(&after, identity) {
+            return Err(LiveError::error("owned clip cleanup was not confirmed"));
         }
-        .await;
-        if check.is_err() {
-            Ok(())
-        } else {
-            Err(LiveError::error("owned clip cleanup was not confirmed"))
-        }
+        Ok(())
     }
     pub async fn dispatch_session_capture_tool(
         &self,
@@ -240,8 +263,13 @@ impl McpHost {
             let status = self.require_connected(Some("session.read"))?;
             if json!(status.epoch) != t["epoch"] {
                 let mut row = record.borrow_mut();
-                row["state"] = json!("previewed");
-                row.as_object_mut().unwrap().remove("applyKey");
+                if reconciliation {
+                    // What the first apply did is still unknown: the record stays the marker recovery needs.
+                    row["state"] = json!("uncertain");
+                } else {
+                    row["state"] = json!("previewed");
+                    row.as_object_mut().unwrap().remove("applyKey");
+                }
                 return Ok(transaction_error(id, "Live connection epoch changed; preview again"));
             }
 
@@ -428,8 +456,28 @@ impl McpHost {
                     return Err(LiveError::error("captured MIDI clip deletion was not confirmed"));
                 }
             } else {
+                // Scene refs are positional: once the captured scene is deleted the next scene has its ref, so it's
+                // confirmed gone by its identity, and a retry after the delete went finds nothing left to delete.
+                let identity =
+                    t["created"]["objectIdentity"].as_str().filter(|_| is_non_empty_string(&t["created"]["objectIdentity"], 256));
+                let present = |snapshot: &LiveSnapshot| {
+                    identity
+                        .is_some_and(|identity| snapshot.scenes.iter().flatten().any(|s| s.object_identity.as_deref() == Some(identity)))
+                };
                 let reference = t["created"]["sceneRef"].as_str();
-                let scene = reference.and_then(|r| snapshot.scenes.iter().flatten().find(|s| s.ref_.0 == r));
+                let found =
+                    identity.and_then(|identity| snapshot.scenes.iter().flatten().find(|s| s.object_identity.as_deref() == Some(identity)));
+                // Scene refs are positional, and so are its slots' and clips' in what it was made with: a scene added
+                // or removed above it leaves nothing to check it against.
+                if found.is_some_and(|scene| Some(scene.ref_.0.as_str()) != reference) {
+                    return Err(LiveError::error(
+                        "the captured scene moved since it was made (a scene was added or removed above it): delete it in Live",
+                    ));
+                }
+                // Gone by its identity: a retry finds nothing left to delete; a first try still checks what's at its ref.
+                let scene = found.or_else(|| {
+                    reference.filter(|_| !reconciliation).and_then(|r| snapshot.scenes.iter().flatten().find(|s| s.ref_.0 == r))
+                });
                 if let Some(scene) = scene {
                     if !is_non_empty_string(&t["created"]["objectIdentity"], 256)
                         || t["created"]["fingerprint"]
@@ -451,9 +499,9 @@ impl McpHost {
                     .await?;
                 }
 
-                if let Some(reference) = reference {
+                if identity.is_some() {
                     let after = self.views.view(Some(&context), LiveViewScope::Indices(vec![]), Some(&[LiveSnapshotPart::Scenes])).await?;
-                    if after.scenes.iter().flatten().any(|s| s.ref_.0 == reference) {
+                    if present(&after) {
                         return Err(LiveError::error("captured scene deletion was not confirmed"));
                     }
                 }

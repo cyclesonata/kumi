@@ -310,10 +310,11 @@ impl McpHost {
             Ok(outcome(id, &t, &verified))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Groove state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Groove state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     pub async fn undo_groove_async(&self, id: &Value, params: &Value, signal: Option<&Signal>) -> Value {
         let Some(record) = params["transactionId"]
@@ -440,8 +441,11 @@ impl McpHost {
                 let mut args = json!({
                 "ref":payload["ref"]}
                 );
+                // Only what the edit changed: a field the producer changed since stays as they left it.
                 for (k, v) in t["prior"].as_object().unwrap() {
-                    args[k] = v.clone();
+                    if payload.get(k).is_some() {
+                        args[k] = v.clone();
+                    }
                 }
                 args["expectedObjectIdentity"] = groove["objectIdentity"].clone();
                 args["expectedRevision"] = before["revision"].clone();
@@ -459,8 +463,8 @@ impl McpHost {
             } else {
                 let groove =
                     row(&verified, &payload["ref"], "verified")?.ok_or_else(|| LiveError::error("edited groove disappeared after undo"))?;
-                for f in FIELDS {
-                    if !same_live_value(groove.get(f), t["prior"].get(f)) {
+                for f in FIELDS.iter().filter(|f| payload.get(**f).is_some()) {
+                    if !same_live_value(groove.get(*f), t["prior"].get(*f)) {
                         return Err(LiveError::error("groove undo did not restore the exact prior fields"));
                     }
                 }

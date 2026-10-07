@@ -51,14 +51,6 @@ fn fire_fence(reference: &Value, scene: &Value, fire: &Value) -> String {
     js_json::stringify(&value)
 }
 
-fn strict_equal(a: Option<&Value>, b: &Value) -> bool {
-    match (a, b) {
-        (Some(Value::Number(a)), Value::Number(b)) => a.as_f64() == b.as_f64(),
-        (Some(a), b) => a == b,
-        _ => false,
-    }
-}
-
 impl McpHost {
     pub(super) fn scene_collection_revision(&self, snapshot: &LiveSnapshot) -> Result<String, LiveError> {
         let scenes =
@@ -366,7 +358,7 @@ impl McpHost {
                     .ok_or_else(|| LiveError::error("edited scene disappeared after apply"))?;
                 for f in FIELDS {
                     if let Some(proposed) = payload.get(f) {
-                        if !strict_equal(verified.get(f), proposed) {
+                        if !same_live_value(verified.get(f), Some(proposed)) {
                             return Err(LiveError::error("scene postcondition was not confirmed"));
                         }
                     }
@@ -391,9 +383,9 @@ impl McpHost {
         }
         .await;
         Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(
+            self.apply_failed(
                 id,
+                &record,
                 &e,
                 if fire {
                     "Scene-fire state is uncertain; inspect Live before retrying."

@@ -12,6 +12,7 @@ use super::{
 use crate::{
     core::{contracts::*, errors::RuntimeError},
     mcp::types::{CallToolResult, ContentBlock},
+    notation::thousands,
 };
 use futures::{future::LocalBoxFuture, FutureExt};
 use indexmap::{IndexMap, IndexSet};
@@ -30,6 +31,10 @@ use std::{
 
 /// The most each call to Live of Kumi's undo of a cut waits.
 const RESTORE_MS: u64 = 30_000;
+/// The most changes a session's history keeps, the oldest going first.
+pub const MAX_ENTRIES: usize = 20_000;
+/// How Kumi's Live script says a kept audio clip's file is gone, before its path (snapshots.py).
+const MISSING_FILE: &str = "audio file isn't there any more (";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Restore {
@@ -59,11 +64,26 @@ pub struct Applied {
     /// What the change cut or deleted, which Kumi's undo makes again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub material: Option<Material>,
+    /// A group's first steps that were past the most changes Kumi keeps when it was recorded: only Live's own undo
+    /// takes them back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trimmed: Option<usize>,
 }
 impl Applied {
     pub fn new(record: ChangeRecord, transaction_id: String, restore: Option<Restore>) -> Self {
         let permanent = (record.state == ChangeState::Kept).then_some(true);
-        Self { record, transaction_id, restore, permanent, undo_key: None, members: None, within: None, revert: None, material: None }
+        Self {
+            record,
+            transaction_id,
+            restore,
+            permanent,
+            undo_key: None,
+            members: None,
+            within: None,
+            revert: None,
+            material: None,
+            trimmed: None,
+        }
     }
 }
 #[derive(Clone, Serialize)]
@@ -82,6 +102,9 @@ impl UndoResult {
         Self { record: Some(record), text: text.into(), is_error }
     }
 }
+/// The Remote Script's python.run error type for a failure after the code ran (its result, the deadline after it,
+/// its undo step): Live may have changed.
+pub const PYTHON_RAN: &str = "RanResultUnavailable";
 pub enum FastResult {
     Result(Value),
     Error { error: String, sent: bool },
@@ -136,14 +159,21 @@ impl History {
     pub fn is_quiet(&self) -> bool {
         self.quiet.borrow().is_some()
     }
+    /// At most `most` changes are kept, the oldest going first, however they came in (quiet ones, groups). The
+    /// history keeps MAX_ENTRIES.
+    fn keep_within(&self, most: usize) {
+        let mut entries = self.entries.borrow_mut();
+        let over = entries.len().saturating_sub(most);
+        if over > 0 {
+            entries.drain(..over);
+        }
+    }
     pub fn remember(&self, record: ChangeRecord, transaction_id: String, restore: Option<Restore>) {
         self.entries.borrow_mut().insert(record.id.clone(), Rc::new(RefCell::new(Applied::new(record.clone(), transaction_id, restore))));
+        self.keep_within(MAX_ENTRIES);
         if let Some(quiet) = self.quiet.borrow_mut().as_mut() {
             quiet.push(record.id.clone());
             return;
-        }
-        if self.entries.borrow().len() > 20_000 {
-            self.entries.borrow_mut().shift_remove_index(0);
         }
         self.emit(&record);
         self.remember.schedule_save(20_000);
@@ -218,17 +248,16 @@ impl History {
         }
     }
     pub fn grouped(&self, title: &str, ids: &[String], apart: &[String]) -> Option<String> {
-        let members: Vec<_> = ids
-            .iter()
-            .filter(|id| {
-                !apart.contains(id)
-                    && self.entries.borrow().get(*id).is_some_and(|entry| {
-                        matches!(entry.borrow().record.state, ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept)
-                    })
-            })
-            .cloned()
-            .collect();
-        let gone: Vec<_> = ids.iter().filter(|id| !members.contains(id)).collect();
+        let standing = |id: &String| {
+            !apart.contains(id)
+                && self.entries.borrow().get(id).is_some_and(|entry| {
+                    matches!(entry.borrow().record.state, ChangeState::Applied | ChangeState::Unsure | ChangeState::Kept)
+                })
+        };
+        // The build's first steps that are already past the most changes Kumi keeps (the oldest go first).
+        let mut trimmed = ids.iter().filter(|id| !apart.contains(id)).take_while(|id| !self.entries.borrow().contains_key(*id)).count();
+        let members: Vec<_> = ids.iter().filter(|id| standing(id)).cloned().collect();
+        let gone: Vec<_> = ids.iter().filter(|id| !standing(id)).collect();
         let released: Vec<_> = gone
             .iter()
             .filter_map(|id| self.entries.borrow().get(*id).cloned())
@@ -241,6 +270,11 @@ impl History {
         for id in gone {
             self.entries.borrow_mut().shift_remove(id);
         }
+        // Room for the group's own record before its members are chosen, so keeping to the cap can't drop one of them.
+        self.keep_within(MAX_ENTRIES - 1);
+        let count = members.len();
+        let members: Vec<_> = members.into_iter().filter(|id| self.entries.borrow().contains_key(id)).collect();
+        trimmed += count - members.len();
         if members.is_empty() {
             return None;
         }
@@ -250,6 +284,7 @@ impl History {
         }
         let mut entry = Applied::new(record.clone(), String::new(), None);
         entry.members = Some(members);
+        entry.trimmed = (trimmed > 0).then_some(trimmed);
         self.entries.borrow_mut().insert(record.id.clone(), Rc::new(RefCell::new(entry)));
         self.emit(&record);
         self.remember.schedule_save(20_000);
@@ -272,7 +307,9 @@ impl History {
             let error = context::object(body.get("error").filter(|v| !v.is_null()).unwrap_or(&json!({})))?;
             let message =
                 error.get("message").filter(|v| !v.is_null()).map(|v| js_string(Some(v))).unwrap_or_else(|| "Live refused it".into());
-            return Ok(FastResult::Error { error: head(&message, 600), sent: false });
+            // The code ran and only its answer failed (or its undo step): Live may have changed.
+            let sent = error.get("type").and_then(Value::as_str) == Some(PYTHON_RAN);
+            return Ok(FastResult::Error { error: head(&message, 600), sent });
         }
         Ok(FastResult::Result(body.get("result").cloned().unwrap_or(Value::Null)))
     }
@@ -392,25 +429,45 @@ impl History {
             let undo_key = entry.borrow_mut().undo_key.get_or_insert_with(|| uuid::Uuid::new_v4().to_string()).clone();
             if let Some(members) = snapshot.members {
                 let mut hidden = Vec::new();
+                let standing =
+                    |id: &String| self.entries.borrow().get(id).is_some_and(|entry| entry.borrow().record.state != ChangeState::Undone);
                 self.quietly(Some(&mut hidden), async {
                     for id in members.iter().rev() {
-                        if self.entries.borrow().get(id).is_none_or(|entry| entry.borrow().record.state != ChangeState::Undone) {
+                        if standing(id) {
                             let _ = self.undo(id, signal.clone(), false).await;
                         }
                     }
                 })
                 .await;
-                let left = members
-                    .iter()
-                    .filter(|id| self.entries.borrow().get(*id).is_none_or(|entry| entry.borrow().record.state != ChangeState::Undone))
-                    .count();
-                if left == 0 {
+                // Its first steps past the most changes Kumi keeps, when it was recorded or since (the oldest go first).
+                let past = snapshot.trimmed.unwrap_or(0) + members.iter().filter(|id| !self.entries.borrow().contains_key(*id)).count();
+                let left = members.iter().filter(|id| standing(id)).count();
+                if left == 0 && past == 0 {
                     return Ok(self.undone(&entry));
                 }
+                let total = members.len() + snapshot.trimmed.unwrap_or(0);
+                let them = |count: usize| if count == 1 { "it" } else { "them" };
+                let mut why = Vec::new();
+                if left > 0 {
+                    why.push(if past == 0 {
+                        "the rest changed in Live since, so Kumi left them".to_owned()
+                    } else {
+                        format!("{} changed in Live since, so Kumi left {}", thousands(left), them(left))
+                    });
+                }
+                if past > 0 {
+                    why.push(format!(
+                        "{} past the {} changes Kumi keeps, so only Live's own undo (Cmd-Z in Live) can take {} back",
+                        if past == 1 { "the first is".to_owned() } else { format!("the first {} are", thousands(past)) },
+                        thousands(MAX_ENTRIES),
+                        them(past)
+                    ));
+                }
                 let note = format!(
-                    "Kumi took back {} of its {} changes; the rest changed in Live since, so Kumi left them.",
-                    members.len() - left,
-                    members.len()
+                    "Kumi took back {} of its {} changes; {}.",
+                    thousands(total - past - left),
+                    thousands(total),
+                    why.join(", and ")
                 );
                 return Ok(UndoResult::with(self.update(&entry, ChangeState::Kept, Some(note.clone())), note, true));
             }
@@ -581,8 +638,10 @@ impl History {
             why.find('\u{201d}').map(|end| format!("Move or delete {}, then undo again.", &why[..end + '\u{201d}'.len_utf8()]))
         } else if why.contains("'s slot now") {
             Some("Move or delete the clip in its slot, then undo again.".to_owned())
-        } else if why.contains("audio file isn't there any more") {
-            why.rfind(" (").map(|at| format!("Put the file back at {}, then undo again.", why[at + 2..].trim_end_matches(')')))
+        } else if let Some(at) = why.find(MISSING_FILE) {
+            // The path is all that follows the fixed words, less their closing parenthesis: it may hold " (" and ")".
+            let file = &why[at + MISSING_FILE.len()..];
+            Some(format!("Put the file back at {}, then undo again.", file.strip_suffix(')').unwrap_or(file)))
         } else if why.ends_with(" is frozen") {
             Some(format!("Unfreeze {}, then undo again.", why.trim_end_matches(" is frozen")))
         } else {
@@ -615,15 +674,25 @@ impl History {
             snapshots::Stopped::Partway(why, done) => (why, material.host_undo || done.changed()),
         };
         if let Some(before) = &before {
-            if !known && snapshots::state(self, material, bound()).await.as_ref() == Some(before) {
-                let record = entry.borrow().record.clone();
-                return UndoResult::with(
-                    record,
-                    format!("Kumi couldn't bring back {names} ({why}); nothing changed. Undo again, or Live's own undo (Cmd-Z in Live) can take it back."),
-                    true,
-                );
-            }
-            if self.live_undo_once(bound()).await {
+            let unread = if known {
+                false
+            } else {
+                match snapshots::state(self, material, bound()).await {
+                    Some(now) if now == *before => {
+                        let record = entry.borrow().record.clone();
+                        return UndoResult::with(
+                            record,
+                            format!("Kumi couldn't bring back {names} ({why}); nothing changed. Undo again, or Live's own undo (Cmd-Z in Live) can take it back."),
+                            true,
+                        );
+                    }
+                    Some(_) => false,
+                    // Unread, the track can't say whether Kumi's step changed anything: Live's undo might take back
+                    // the producer's own last step instead, so it's left to them.
+                    None => true,
+                }
+            };
+            if !unread && self.live_undo_once(bound()).await {
                 if snapshots::state(self, material, bound()).await.as_ref() == Some(before) {
                     if material.host_undo {
                         // The change's own undo went with it, and the bridge counts it done: only Live's undo is left.

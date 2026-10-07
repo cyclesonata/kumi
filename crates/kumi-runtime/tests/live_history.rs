@@ -5,10 +5,13 @@ use kumi_common::{
     js::json::stringify,
 };
 use kumi_runtime::{
-    core::{contracts::JsonObject, errors::RuntimeError},
+    core::{
+        contracts::{ChangeRecord, JsonObject},
+        errors::RuntimeError,
+    },
     integrations::ableton::{
         connection::{ConnectionOptions, LiveConnection},
-        history::{Applied, FastResult, History},
+        history::{Applied, FastResult, History, MAX_ENTRIES},
         remember::Remember,
     },
     mcp::{
@@ -178,4 +181,58 @@ async fn undo_quiet_groups_retirement_and_emergency_stop_match_source() {
   connection.close().await.unwrap();
  }
 }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_sessions_history_keeps_at_most_its_cap_however_changes_come_in() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let endpoint = Rc::new(Fixture { config: json!({}), calls: RefCell::new(Vec::new()), original: RefCell::new(Signal::new()) });
+            let mut options = ConnectionOptions::new(Rc::new(|_, _| {}));
+            let out = endpoint.clone();
+            options.connect = Some(Rc::new(move |_| {
+                let endpoint: Rc<dyn McpEndpoint> = out.clone();
+                async move { Ok(endpoint) }.boxed_local()
+            }));
+            let connection = LiveConnection::new(options);
+            connection.start(Signal::new()).await.unwrap();
+            let remember = Remember::new(connection.clone(), None, None);
+            let history = History::new(connection.clone(), remember, Some(50), None);
+            let record = |n: usize| {
+                serde_json::from_value::<ChangeRecord>(
+                    json!({"id":format!("c{n}"),"family":"clip","title":"Made a clip","state":"applied","at":0}),
+                )
+                .unwrap()
+            };
+            // An Arrangement build: more changes than the cap, quietly, then one group of them.
+            let mut ids = Vec::new();
+            history
+                .quietly(Some(&mut ids), async {
+                    for n in 0..MAX_ENTRIES + 100 {
+                        history.remember(record(n), format!("t{n}"), None);
+                    }
+                })
+                .await;
+            assert_eq!(history.entries.borrow().len(), MAX_ENTRIES);
+            assert!(history.entries.borrow().get("c0").is_none(), "the oldest go first");
+            let group = history.grouped("Built the arrangement", &ids, &[]).unwrap();
+            assert_eq!(history.entries.borrow().len(), MAX_ENTRIES);
+            // The group made room for its own record before choosing its members, so none of them went for it.
+            let members = history.entries.borrow()[&group].borrow().members.clone().unwrap();
+            assert_eq!(members.len(), MAX_ENTRIES - 1);
+            assert!(members.iter().all(|id| history.entries.borrow().contains_key(id)), "each member is kept");
+            // One by one past the cap: each brings it back down, the group's first members going.
+            for n in MAX_ENTRIES + 100..MAX_ENTRIES + 103 {
+                history.remember(record(n), format!("t{n}"), None);
+            }
+            assert_eq!(history.entries.borrow().len(), MAX_ENTRIES);
+            // The group's undo takes back the members Kumi keeps, and says only Live's own undo has the first steps.
+            let undone = history.undo(&group, Signal::new(), false).await.unwrap();
+            assert_eq!(
+                (undone.text.as_str(), undone.is_error),
+                ("Kumi took back 19,996 of its 20,100 changes; the first 104 are past the 20,000 changes Kumi keeps, so only Live's own undo (Cmd-Z in Live) can take them back.", true)
+            );
+            connection.close().await.unwrap();
+        })
+        .await;
 }

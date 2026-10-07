@@ -150,6 +150,12 @@ impl McpHost {
             };
             let mut args = t["payload"].clone();
             args.as_object_mut().unwrap().remove("action");
+            if let Err(error) = self.keep_staged(&t) {
+                return Ok(transaction_error(
+                    id,
+                    &format!("the staged sample couldn't be kept for the Set ({}); nothing was sent to Live", error.message()),
+                ));
+            }
             record.borrow_mut()["state"] = json!("applying");
             record.borrow_mut()["applyKey"] = p["idempotencyKey"].clone();
             let mut result = adapter.invoke_async(&LiveInvocation::new(operation, args), Some(&context)).await?;
@@ -185,10 +191,11 @@ impl McpHost {
             Ok(success_text(id, &json!({"transactionId":t["id"],"state":"applied","result":result,"idempotent":false})))
         }
         .await;
-        Some(result.unwrap_or_else(|e| {
-            record.borrow_mut()["state"] = json!("uncertain");
-            adapter_tool_error(id, &e, "Device state is uncertain; perform fresh discovery before retrying.")
-        }))
+        Some(
+            result.unwrap_or_else(|e| {
+                self.apply_failed(id, &record, &e, "Device state is uncertain; perform fresh discovery before retrying.")
+            }),
+        )
     }
     pub async fn undo_device_basic_async(&self, id: &Value, p: &Value, signal: Option<&Signal>) -> Value {
         let Some(record) =
