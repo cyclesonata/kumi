@@ -3,6 +3,34 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.10.1 — 2026-10-07
+
+Ships with bridge 1.0.89, as 1.10.0 did.
+
+- A plan no longer stops at the first step Live refuses. Everything that doesn't depend on that step
+  is still done, and Kumi resends only the refused steps instead of rewriting the whole plan.
+- Deleting several tracks in one request works (it used to delete one and give up), and a plan can add
+  a track and keep working on the tracks after it without being refused.
+- The first sample searches of a session no longer wait seconds on each other.
+- Writing many clips from notation no longer starts over for one mistake: Kumi reports every mistake
+  at once, writes the clips that are fine, and quietly fixes small slips (a note past the clip's end,
+  a pitch without its octave) and tells you.
+- A request that starts a new Set or opens one carries on in it, and a request to save or open a Set
+  finishes without waiting on the model again.
+- With Willington on, loading an LFO, Shaper, Envelope Follower or Expression Control and mapping it
+  to a parameter is one plan, and Kumi's undo takes the mapping back.
+- A change that makes dozens of tracks at once gets the time it needs instead of being called
+  unconfirmed after 30 seconds, and `/undo` takes back the latest change even when Live didn't confirm
+  it.
+- When Live is busy (loading a big Set, say) rather than gone, Kumi waits for it, and your request
+  carries on when Live answers.
+- Fewer refusals cost a model reply: a just-made track or device that Live is still setting up is
+  asked again a moment later, an audio clip's loop points go through the right tool, and a sidechain
+  with a channel is set instead of refused.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.10.0 — 2026-10-07
 
 Ships with bridge 1.0.89, which Live loads when it restarts. After updating, Kumi offers to quit Live
