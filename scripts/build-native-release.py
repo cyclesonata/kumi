@@ -33,7 +33,7 @@ MIT_SHA256 = "f6a4bf820a492313c9d4e100e16bd474cd5cf06c0fba27c1035238acb4af75cb"
 # file's SHA-256. Only these may ship: its C++ sources, headers and debug files stay in its own repository.
 WILLINGTON = "vendor/willington"
 WILLINGTON_SCHEMA = "kumi-willington-vendor/v1"
-WILLINGTON_COMPONENTS = ("WillingtonRuntime", "WillingtonBindings", "WillingtonDeviceTools", "WillingtonRackZones")
+WILLINGTON_COMPONENTS = ("WillingtonRuntime", "WillingtonBindings", "WillingtonDeviceTools", "WillingtonRackZones", "WillingtonEditing")
 WILLINGTON_SUFFIXES = (".py", ".json", ".md", ".pyd", ".dylib")
 WILLINGTON_LICENSES = ("LICENSE", "LICENSE.md")
 WILLINGTON_MAX_BYTES = 16 * 1024 * 1024
