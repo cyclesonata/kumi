@@ -299,6 +299,13 @@ class _ProviderFixture:
             'WillingtonRackZones': types.ModuleType('WillingtonRackZones'),
             'WillingtonRackZones.api': zones_api, 'WillingtonRuntime': runtime,
             'WillingtonEditing': types.ModuleType('WillingtonEditing'), 'WillingtonEditing.api': editing_api}
+        editing_folder = root / 'WillingtonEditing'; editing_folder.mkdir()
+        self.modules['WillingtonEditing'].__file__ = str(editing_folder / '__init__.py')
+        self.editing.path = str(self.library)
+        self.editing_receipt = editing_folder / 'self-test.json'
+        self.editing_receipt.write_text(json.dumps({'component':'WillingtonEditing', 'status':'passed', 'library_sha256':hashlib.sha256(self.library.read_bytes()).hexdigest()}))
+        self.editing_receipt.chmod(0o600)
+        _protect_windows_owner_only(self.editing_receipt)
         self.write_receipt()
 
     def write_config(self, config):
@@ -452,6 +459,22 @@ class ProviderTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'zone teardown failed'): provider.close()
             self.assert_closed(fixture, provider)
             self.assertFalse(fixture.editing.patches)
+
+    def test_editing_receipt_requires_exact_library_and_preserves_other_writes(self):
+        for failure in ('missing', 'stale', 'failed', 'component', 'symlink'):
+            with self.subTest(failure=failure), _provider_fixture({'editing':True, 'deviceTools':True, 'enableWrites':True}) as fixture:
+                receipt=fixture.editing_receipt
+                if failure=='missing': receipt.unlink()
+                elif failure=='stale': fixture.library.write_bytes(b'different build')
+                elif failure=='symlink':
+                    target=receipt.with_name('other.json'); receipt.rename(target); receipt.symlink_to(target)
+                else:
+                    data=json.loads(receipt.read_text());data['status' if failure=='failed' else 'component']='wrong';receipt.write_text(json.dumps(data))
+                provider=fixture.construct()
+                self.assertIsNotNone(provider.editing)
+                self.assertFalse(fixture.mapper.willington_editing_writes)
+                self.assertTrue(fixture.mapper.willington_device_writes)
+                self.assertNotIn(('editing',True),fixture.calls)
 
     def test_editing_opt_in_requires_a_boolean(self):
         for value in ('true', 1, None, {}):

@@ -84,7 +84,7 @@ class NativeEditingTests(unittest.TestCase):
 
     def test_arrangement_opaque_snapshot_restore_and_session_fence(self):
         selector={'kind':'arrangement-automation','ref':self.track_ref,'targetRef':self.parameter_ref}
-        before=self.read(selector,{'action':'insert','event':[4,.75,.2,.3,.7,.8]})
+        before=self.read(selector,{'action':'insert','event':[4,.75,.5,.5,.5,.5]})
         after=self.apply(selector,before)
         self.assertTrue(self.envelope['exists'])
         self.assertEqual(self.undo(selector,before,after)['stateRevision'],before['stateRevision'])
@@ -117,6 +117,7 @@ class NativeEditingTests(unittest.TestCase):
         for events in ([[0,128,.5,.5,.5,.5]], [[0,1,.5,.5,.5,.5]]*3, [[1,1,.5,.5,.5,.5],[0,1,.5,.5,.5,.5]]):
             with self.assertRaises(ValueError): self.read(selector,{'exists':True,'events':events})
         with self.assertRaises(ValueError): self.read({'kind':'scene-follow','ref':self.scene_ref},{'chance_a':70,'chance_b':70})
+        with self.assertRaisesRegex(ValueError,'linear handles'): self.read({'kind':'arrangement-automation','ref':self.track_ref,'targetRef':self.parameter_ref},{'action':'insert','event':[60,.5,.2,.3,.7,.8]})
         self.assertEqual(self.calls,[])
 
     def test_group_creation_returns_new_reference_and_declares_no_history_inverse(self):

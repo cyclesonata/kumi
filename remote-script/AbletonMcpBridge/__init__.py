@@ -531,8 +531,23 @@ class _WillingtonProvider:
                     self.zones.enable(True)
                     self.mapper.willington_zone_writes = True
                 if self.editing is not None:
-                    self.editing.enable(True)
-                    self.mapper.willington_editing_writes = True
+                    verified = False
+                    try:
+                        import hashlib
+                        import WillingtonEditing
+                        receipt = Path(WillingtonEditing.__file__).with_name("self-test.json")
+                        if receipt.is_symlink() or not receipt.is_file() or not _owner_controlled(receipt) or not _mode_owner_only(receipt) or receipt.stat().st_size > 8192:
+                            raise ValueError("owner-only native editing self-test receipt is required")
+                        evidence = json.loads(receipt.read_text())
+                        digest = hashlib.sha256(Path(self.editing.path).read_bytes()).hexdigest()
+                        if evidence.get("component") != "WillingtonEditing" or evidence.get("status") != "passed" or evidence.get("library_sha256") != digest:
+                            raise ValueError("current-library native editing self-test is required")
+                        verified = True
+                    except Exception as error:
+                        if callable(log): log("Willington native editing writes unavailable: " + str(error))
+                    if verified:
+                        self.editing.enable(True)
+                        self.mapper.willington_editing_writes = True
             if callable(log):
                 components = (("Follow Actions", self.follow, self.mapper.willington_follow_writes),
                               ("Device Tools", self.devices, self.mapper.willington_device_writes),

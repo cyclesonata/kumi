@@ -9109,7 +9109,7 @@ class LiveObjectMapper:
             return {'value': edit}
         if edit.get('action') == 'insert' and set(edit) == {'action', 'event'}:
             self._native_editing_event(edit['event'], (state['minimum'], state['maximum']))
-            if edit['event'][2] > edit['event'][4] or edit['event'][3] > edit['event'][5]: raise ValueError('Arrangement curves must be monotonic')
+            if edit['event'][2:] != [.5,.5,.5,.5]: raise ValueError('Kumi Arrangement insertion currently requires linear handles; Live can normalize custom curves')
         elif edit.get('action') == 'delete' and set(edit) == {'action', 'start', 'end'}:
             if any(type(edit[k]) not in (int, float) or not math.isfinite(edit[k]) for k in ('start', 'end')) or not 0 <= edit['start'] <= edit['end'] <= 1576800: raise ValueError('invalid Arrangement interval')
         else: raise ValueError('Arrangement edit requires insert event or delete interval')
