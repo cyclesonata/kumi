@@ -35,7 +35,7 @@ Remote Script が止まると、Follow Action の書き込みをオフにし、D
 
 ### willington.json
 
-`/willington` がこのファイルを書き込みますが、自分で書くこともできます。通常のファイルで、オーナー専用、4 KiB 以下で、次のキーを持つ必要があります（`rackZones` は省略可）。`/willington` が書き込む内容（合格したセルフテストがあれば `followActions` は true）：
+`/willington` がこのファイルを書き込みますが、自分で書くこともできます。通常のファイルで、オーナー専用、4 KiB 以下で、次のキーを持つ必要があります（`rackZones` と `editing` は省略可）。`/willington` が書き込む内容（合格したセルフテストがあれば `followActions` は true）：
 
 ```json
 {"version": 1, "followActions": false, "deviceTools": true, "rackZones": true, "enableWrites": true}
@@ -47,6 +47,7 @@ Remote Script が止まると、Follow Action の書き込みをオフにし、D
 | `followActions` | WillingtonBindings を読み込む |
 | `deviceTools` | WillingtonDeviceTools を読み込む |
 | `rackZones` | 省略可。WillingtonRackZones を読み込む |
+| `editing` | 省略可。WillingtonEditing を読み込みます。`/willington` は実際のライブラリに一致するセルフテストに合格した場合のみ `"editing": true` を追加します。 |
 | `enableWrites` | 編集を許可する。`false` ではプロバイダーを読み込むが、編集は提供しない |
 
 ブリッジは、このファイルが変わってから 1 秒以内に読み直します。Kumi を更新しても残り、ブリッジのインストールの確認にも影響しません。このファイルがなければ、素のブリッジです。

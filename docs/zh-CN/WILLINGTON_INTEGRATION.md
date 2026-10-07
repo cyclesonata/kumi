@@ -35,7 +35,7 @@ Remote Script 停止时，会关闭跟随动作写入，并卸载 DeviceTools �
 
 ### willington.json
 
-`/willington` 会写入这个文件；你也可以自己写。它必须是普通文件、仅所有者可访问、最多 4 KiB，并包含以下这些键（`rackZones` 可选）。`/willington` 写入的内容（有通过的自检时 `followActions` 为 true）：
+`/willington` 会写入这个文件；你也可以自己写。它必须是普通文件、仅所有者可访问、最多 4 KiB，并包含以下这些键（`rackZones` 和 `editing` 可选）。`/willington` 写入的内容（有通过的自检时 `followActions` 为 true）：
 
 ```json
 {"version": 1, "followActions": false, "deviceTools": true, "rackZones": true, "enableWrites": true}
@@ -47,6 +47,7 @@ Remote Script 停止时，会关闭跟随动作写入，并卸载 DeviceTools �
 | `followActions` | 加载 WillingtonBindings |
 | `deviceTools` | 加载 WillingtonDeviceTools |
 | `rackZones` | 可选；加载 WillingtonRackZones |
+| `editing` | 可选；加载 WillingtonEditing。仅当通过匹配实际库的自测时，`/willington` 才添加 `"editing": true`。 |
 | `enableWrites` | 允许编辑；为 `false` 时加载提供程序，但不提供编辑 |
 
 这个文件变化后，桥接会在一秒内重新读取它。Kumi 更新会保留它，它也不会影响桥接的安装检查。没有它，桥接就是普通的桥接。

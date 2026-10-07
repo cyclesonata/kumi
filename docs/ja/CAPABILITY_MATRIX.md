@@ -67,7 +67,7 @@ Live 12.4.15b5 の Python API の全数調査（[LOM 監査](../evidence/lom-aud
 | グループトラックの作成 | [Willington のネイティブ編集](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)。セルフテスト合格が必要で、b5 macOS ARM64 のみ |
 | アレンジメントのオートメーションの編集 | [Willington のネイティブ編集](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)。セルフテスト合格が必要で、b5 macOS ARM64 のみ |
 | マクロやモジュレーターのパラメータへのマッピング | Wavetable と Drift のモジュレーションマトリクス。Willington を通じたマクロとモジュレーターのマッピング |
-| Follow Actions | [Willington のネイティブ編集](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)。セルフテスト合格が必要で、b5 macOS ARM64 のみ |
+| Follow Actions | Session クリップの Follow Actions は Willington で提供。シーン/全体の操作：[Willington のネイティブ編集](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)。セルフテスト合格が必要で、b5 macOS ARM64 のみ |
 | コンプの編集、テイクレーンの削除や試聴 | レーンとコンプの読み取り、レーンの名前の変更、レーンへのオーディオ |
 | ノートごとの MPE（プレッシャー、スライド、ノートごとのチューニング） | [Willington のネイティブ編集](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)。セルフテスト合格が必要で、b5 macOS ARM64 のみ |
 | プラグイン独自のウィンドウや内部の状態 | そのパラメータ、プリセット、ウィンドウの開閉 |

@@ -18,9 +18,6 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 下述真实 Live 测试来自较早的 TypeScript 版本。原生版 CI 和迁移检查不等同于真实 Live 硬件验收。
 
-
-原生编辑（分组、编曲自动化、场景/全局 Follow Actions、逐音符 MPE）要求安装已验证的 `WillingtonEditing`、通过与实际库匹配的自测，并明确启用。仅支持 Live 12.4.15b5 macOS ARM64，不支持 b4、Intel macOS 或 Windows。参见[自测流程](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。
-
 ## Ableton Live
 
 | Live | 状态 |
@@ -30,6 +27,8 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 | 11 或更早 | 不支持。 |
 
 版本类型：桥接会探查它所连接的 Live 提供了什么，因此某个版本类型缺少的设备和内容（Standard 和 Intro 较少）会保持不可用，而不会靠猜测。制作 Max for Live 设备需要 Max for Live（Suite，或加装了该附加组件的 Standard）。Willington（从带有它的文件的版本起在 Kumi 的桥接中，在此之前可以自己安装；在 `/willington` 开启之前一直关闭）有适用于 macOS ARM64 上 Live 12.4.15b4 和 b5（机架链区域仅限 b5）以及 Windows x64 上 Live 12.4.15b5 的绑定；见 [Willington](WILLINGTON_INTEGRATION.md)。
+
+原生编辑（分组、编曲自动化、场景/全局 Follow Actions、逐音符 MPE）要求安装已验证的 `WillingtonEditing`、通过与实际库匹配的自测，并明确启用。仅支持 Live 12.4.15b5 macOS ARM64，不支持 b4、Intel macOS 或 Windows。参见[自测流程](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。
 
 ## Windows
 
