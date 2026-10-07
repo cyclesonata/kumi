@@ -459,7 +459,7 @@ def _debug_trace(context: str) -> None:
 
 METHODS = {"status", "snapshot", "discover", "get", "preflight", "prepare", "invoke", "mutate", "subscribe", "reconnect", "retire"}
 # Pure reads need no mutation authority: a preflight->prepare fence on them only failed while Live played.
-_READ_ONLY_INVOKES = {"session.playback", "willington.device.read", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
+_READ_ONLY_INVOKES = {"session.playback", "willington.device.read", "willington.editing.read", "automation.envelope.read", "arrangement.automation.read", "audio.take-lane.read", "audio.warp-marker.read", "browser.search", "browser.inspect", "browser.roots", "audio.capture.inspect", "audio.capture.status", "realtime.stats", "session.reconnect", "song.read", "song.time-convert", "tuning.read", "groove.read", "note.read-by-id", "note.read-selected", "performance.read", "authority.digest", "dev.lom-audit", "data.get", "automation.value-at", "plugin.parameter-names", "device.banks.read", "clip.time-convert"}
 _TRANSACTION_CREATIONS = {"track.create", "track.create-return", "track.duplicate", "scene.create", "scene.duplicate", "clip.create", "clip.duplicate", "arrangement.clip.create", "arrangement.audio-clip.create", "session.audio-clip.create", "browser.load", "device.insert", "device.duplicate", "session.capture-midi", "scene.capture", "locator.add"}
 _TRANSACTION_DELETIONS = {"track.delete", "track.delete-return", "scene.delete", "clip.delete", "arrangement.clip.delete", "device.delete", "locator.delete"}
 _OWNED_CONTENT_MUTATIONS = {"note.add", "note.add-batch", "note.update", "note.delete"}
@@ -1563,6 +1563,8 @@ class LiveObjectMapper:
             return self._offers("pad", "delete_all_chains")
         if operation == "ownership.settle":
             return self._operation_supported("browser.load")
+        if operation in {"willington.editing.read", "willington.editing.set"}:
+            return getattr(self, "willington_editing_writes", False) is True
         if operation in {"willington.device.read", "willington.device.set"}:
             return getattr(self, "willington_device_writes", False) is True or getattr(self, "willington_zone_writes", False) is True
         if operation == "rack.set":
@@ -4341,6 +4343,8 @@ class LiveObjectMapper:
             return self._drum_pad_load_sample(args)
         if operation == "drum-pad.load-samples":
             return self._drum_pad_load_samples(args)
+        if operation == "willington.editing.read": return self._native_editing_read(args)
+        if operation == "willington.editing.set": return self._native_editing_set(args)
         if operation == "willington.device.read": return self._willington_device_read(args)
         if operation == "willington.device.set": return self._willington_device_set(args)
         if operation == "rack.set":
@@ -9015,6 +9019,187 @@ class LiveObjectMapper:
                     except BaseException: pass
                 raise ValueError(f"drum pad {index + 1} of {len(pads)}: {str(error)[:200]}") from error
         return {"pads": loaded}
+
+    _NATIVE_EDITING_KINDS = {'group-tracks', 'scene-follow', 'global-follow', 'note-expression', 'arrangement-automation'}
+    _NATIVE_EDITING_SELECTOR = ('kind', 'ref', 'targetRef', 'noteId', 'dimension', 'trackRefs')
+    _NATIVE_SCENE_FIELDS = ('enabled', 'action_a', 'action_b', 'chance_a', 'chance_b', 'jump_a', 'jump_b', 'time', 'linked', 'loop_count')
+
+    def _native_editing_object(self, reference, kinds):
+        if not isinstance(reference, str) or len(reference.split(':')) < 3 or reference.split(':')[0] != str(self.refs.epoch) or reference.split(':')[1] not in kinds:
+            raise ValueError('invalid native editing reference')
+        obj = self.refs.get(reference)
+        identity = self._capture_object_identity(obj)
+        if self._positional_identity(reference) != identity:
+            raise ValueError('native editing target identity changed')
+        return obj
+
+    def _native_editing_state(self, selector):
+        if not getattr(self, 'willington_editing_writes', False): raise ValueError('native editing provider unavailable')
+        kind = selector.get('kind')
+        required = {'kind'} | ({'trackRefs'} if kind == 'group-tracks' else set() if kind == 'global-follow' else {'ref'})
+        if kind == 'note-expression': required |= {'noteId', 'dimension'}
+        if kind == 'arrangement-automation': required |= {'targetRef'}
+        if kind not in self._NATIVE_EDITING_KINDS or set(selector) != required: raise ValueError('invalid native editing selector')
+        state = {'kind': kind, 'songIdentity': self._capture_object_identity(self.song)}
+        if kind == 'global-follow':
+            state['value'] = bool(self.song.get_follow_actions_enabled())
+        elif kind == 'group-tracks':
+            refs = selector['trackRefs']
+            if not isinstance(refs, list) or not 1 <= len(refs) <= 128 or len(set(refs)) != len(refs): raise ValueError('group requires distinct track references')
+            tracks = [self._native_editing_object(ref, {'track'}) for ref in refs]
+            current = tuple(self.song.tracks)
+            if any(track not in current or track.is_grouped or track.is_foldable for track in tracks): raise ValueError('group requires top-level audio/MIDI tracks')
+            indices = [current.index(track) for track in tracks]
+            if indices != list(range(indices[0], indices[0] + len(indices))): raise ValueError('group tracks must be contiguous and in Song order')
+            state['value'] = {'topology': [self._capture_object_identity(t) for t in current], 'tracks': [self._track_authority_row(ref) for ref in refs]}
+        else:
+            obj = self._native_editing_object(selector['ref'], {'scene'} if kind == 'scene-follow' else {'track'} if kind == 'arrangement-automation' else {'clip', 'arrangement_clip'})
+            state['objectIdentity'] = self._capture_object_identity(obj)
+            if kind == 'scene-follow':
+                state['sceneOrder'] = [self._capture_object_identity(s) for s in self.song.scenes]
+                state['value'] = json.loads(obj.get_follow_actions())
+            elif kind == 'note-expression':
+                note_id, dimension = selector['noteId'], selector['dimension']
+                if type(note_id) is not int or not 0 < note_id <= 9007199254740991 or dimension not in ('pitch', 'slide', 'pressure'): raise ValueError('invalid note or dimension')
+                notes = tuple(obj.get_notes_by_id((note_id,)))
+                if len(notes) != 1: raise ValueError('note no longer exists')
+                state['note'] = {key: getattr(notes[0], key) for key in ('note_id', 'pitch', 'start_time', 'duration', 'velocity', 'mute', 'probability', 'velocity_deviation', 'release_velocity')}
+                state['value'] = json.loads(obj.get_note_expression(note_id, dimension))
+            else:
+                parameter = self._native_editing_object(selector['targetRef'], {'parameter'})
+                state['targetIdentity'] = self._capture_object_identity(parameter)
+                state['minimum'], state['maximum'] = float(parameter.min), float(parameter.max)
+                state['value'] = json.loads(obj.get_arrangement_snapshot(parameter))
+        encoded = self._bounded_canonical(state)
+        if len(encoded.encode()) > 1048576: raise ValueError('native editing state exceeds 1 MiB transaction limit')
+        return state
+
+    def _native_editing_plan(self, selector, state, edit):
+        kind = selector['kind']
+        if not isinstance(edit, dict): raise ValueError('edit must be an object')
+        if kind == 'group-tracks':
+            if edit != {'action': 'group'}: raise ValueError('group edit requires action=group')
+            return edit
+        if kind == 'global-follow':
+            if set(edit) != {'enabled'} or type(edit['enabled']) is not bool: raise ValueError('global follow requires a boolean enabled')
+            return {'value': edit['enabled']}
+        if kind == 'scene-follow':
+            if not edit or set(edit) - set(self._NATIVE_SCENE_FIELDS): raise ValueError('invalid scene follow fields')
+            value = {**state['value'], **edit}
+            if 'chance_a' in edit and 'chance_b' not in edit: value['chance_b'] = 100 - edit['chance_a']
+            if 'chance_b' in edit and 'chance_a' not in edit: value['chance_a'] = 100 - edit['chance_b']
+            for field, number in value.items():
+                if field in ('enabled', 'linked'):
+                    if type(number) is not bool: raise ValueError('scene flags must be booleans')
+                else:
+                    if type(number) not in (int, float) or not math.isfinite(number): raise ValueError('scene values must be finite numbers')
+                    low, high = (0.25, 1576800) if field == 'time' else (1, 1073741823) if field == 'loop_count' else (0, 8388608) if field.startswith('jump') else (0, 100) if field.startswith('chance') else (0, 9)
+                    if not low <= number <= high or (field != 'time' and int(number) != number): raise ValueError('scene value out of bounds')
+            if value['chance_a'] + value['chance_b'] != 100: raise ValueError('scene chances must sum to 100')
+            return {'value': value}
+        if kind == 'note-expression':
+            if set(edit) != {'exists', 'events'} or type(edit['exists']) is not bool or not isinstance(edit['events'], list) or len(edit['events']) > 4096 or (not edit['exists'] and edit['events']): raise ValueError('invalid expression lane')
+            previous = None; coincident = 0
+            for event in edit['events']:
+                self._native_editing_event(event, (-4800, 4800) if selector['dimension'] == 'pitch' else (0, 127))
+                if previous is not None and event[0] < previous: raise ValueError('expression events must be ordered')
+                coincident = coincident + 1 if event[0] == previous else 1
+                if coincident > 2: raise ValueError('at most two coincident expression events')
+                previous = event[0]
+            return {'value': edit}
+        if edit.get('action') == 'insert' and set(edit) == {'action', 'event'}:
+            self._native_editing_event(edit['event'], (state['minimum'], state['maximum']))
+            if edit['event'][2] > edit['event'][4] or edit['event'][3] > edit['event'][5]: raise ValueError('Arrangement curves must be monotonic')
+        elif edit.get('action') == 'delete' and set(edit) == {'action', 'start', 'end'}:
+            if any(type(edit[k]) not in (int, float) or not math.isfinite(edit[k]) for k in ('start', 'end')) or not 0 <= edit['start'] <= edit['end'] <= 1576800: raise ValueError('invalid Arrangement interval')
+        else: raise ValueError('Arrangement edit requires insert event or delete interval')
+        return edit
+
+    @staticmethod
+    def _native_editing_event(event, bounds):
+        if not isinstance(event, list) or len(event) != 6 or any(type(v) not in (int, float) or not math.isfinite(v) for v in event): raise ValueError('event requires six finite numbers')
+        if not 0 <= event[0] <= 1576800 or not bounds[0] <= event[1] <= bounds[1] or any(not 0 <= v <= 1 for v in event[2:]): raise ValueError('event out of bounds')
+
+    @staticmethod
+    def _native_editing_event_same(observed, expected):
+        return len(observed) == 6 and observed[0] == expected[0] and observed[2:] == expected[2:] and _same_number(observed[1], expected[1])
+
+    def _native_editing_read(self, args):
+        selector = {k: args[k] for k in self._NATIVE_EDITING_SELECTOR if k in args}
+        if set(args) - set(selector) - {'edit'}: raise ValueError('unknown native editing read field')
+        state = self._native_editing_state(selector)
+        encoded = self._bounded_canonical(state)
+        value = state['value']; kind = selector['kind']
+        summary = {'kind': kind, 'undo': 'not undoable' if kind == 'group-tracks' else 'exact within current connection'}
+        if kind in ('arrangement-automation', 'note-expression'): summary.update(exists=value['exists'], eventCount=len(value['events']))
+        elif kind == 'group-tracks': summary['trackCount'] = len(selector['trackRefs'])
+        else: summary['value'] = value
+        result = {'state': encoded, 'stateRevision': hashlib.sha256(encoded.encode()).hexdigest(), 'summary': self._bounded_canonical(summary)}
+        if 'edit' in args:
+            if self.song.is_playing: raise ValueError('native editing requires stopped playback')
+            plan = self._native_editing_plan(selector, state, args['edit'])
+            if kind in ('global-follow', 'scene-follow') and plan['value'] == value: raise ValueError('native preview would not change state')
+            result['next'] = self._bounded_canonical(plan)
+        return result
+
+    def _native_editing_set(self, args):
+        selector = {k: args[k] for k in self._NATIVE_EDITING_SELECTOR if k in args}
+        if set(args) != set(selector) | {'next', 'expectedStateRevision'}: raise ValueError('invalid native editing write fields')
+        before = self._native_editing_read(selector)
+        if before['stateRevision'] != args['expectedStateRevision']: raise ValueError('native editing state changed since preview')
+        if self.song.is_playing: raise ValueError('native editing requires stopped playback')
+        state = json.loads(before['state']); kind = selector['kind']
+        if not isinstance(args['next'], str) or len(args['next'].encode()) > 1048576: raise ValueError('invalid native edit payload')
+        plan = json.loads(args['next'])
+        restoring = isinstance(plan, dict) and set(plan) == {'restore'}
+        if restoring:
+            prior = json.loads(plan['restore'])
+            if kind == 'group-tracks': raise ValueError('group creation has no Kumi history inverse')
+            if {k:v for k,v in prior.items() if k != 'value'} != {k:v for k,v in state.items() if k != 'value'}: raise ValueError('native restore target changed')
+            value = prior['value']
+            edit = {'enabled': value} if kind == 'global-follow' else {k:value[k] for k in ('exists', 'events')} if kind == 'note-expression' else value
+            if kind != 'arrangement-automation': self._native_editing_plan(selector, state, edit)
+        else:
+            edit = {'enabled': plan['value']} if kind == 'global-follow' else plan.get('value') if kind in ('scene-follow', 'note-expression') else plan
+            plan = self._native_editing_plan(selector, state, edit)
+        if kind == 'group-tracks':
+            group = self.song.group_tracks(*(self.refs.get(ref) for ref in selector['trackRefs']))
+            reference = self.refs.put('track', group, str(tuple(self.song.tracks).index(group)))
+            value = self._bounded_canonical({'kind': kind, 'createdRef': reference, 'objectIdentity': self._capture_object_identity(group)})
+            return {'changed': True, 'state': value, 'stateRevision': hashlib.sha256(value.encode()).hexdigest(), 'summary': self._bounded_canonical({'createdRef': reference, 'undo': 'not undoable'})}
+        obj = self.refs.get(selector['ref']) if 'ref' in selector else self.song
+        def restore(value):
+            if kind == 'global-follow': self.song.set_follow_actions_enabled(value)
+            elif kind == 'scene-follow':
+                for field in self._NATIVE_SCENE_FIELDS:
+                    if json.loads(obj.get_follow_actions())[field] != value[field]: obj.set_follow_action(field, value[field])
+            elif kind == 'note-expression': obj.replace_note_expression(selector['noteId'], selector['dimension'], json.dumps(value))
+            else: obj.restore_arrangement_snapshot(self.refs.get(selector['targetRef']), json.dumps(value))
+        try:
+            if restoring: restore(prior['value'])
+            elif kind != 'arrangement-automation': restore(plan['value'])
+            elif plan['action'] == 'insert': obj.insert_arrangement_event(self.refs.get(selector['targetRef']), json.dumps(plan['event']))
+            else: obj.delete_arrangement_events(self.refs.get(selector['targetRef']), plan['start'], plan['end'])
+            after = self._native_editing_read(selector)
+            actual = json.loads(after['state'])['value']
+            if restoring:
+                if after['state'] != self._bounded_canonical(prior): raise ValueError('native restoration was not exact')
+            elif kind in ('global-follow', 'scene-follow'):
+                if actual != plan['value']: raise ValueError('native edit postcondition failed')
+            elif kind == 'note-expression':
+                expected = plan['value']
+                if actual['exists'] != expected['exists'] or len(actual['events']) != len(expected['events']) or any(not self._native_editing_event_same(row, want) for row,want in zip(actual['events'], expected['events'])): raise ValueError('native expression postcondition failed')
+            else:
+                start, end = (plan['event'][0], plan['event'][0]) if plan['action'] == 'insert' else (plan['start'], plan['end'])
+                observed = json.loads(obj.get_arrangement_automation(self.refs.get(selector['targetRef']), start, end))['events']
+                if (plan['action'] == 'delete' and observed) or (plan['action'] == 'insert' and not any(self._native_editing_event_same(row, plan['event']) for row in observed)): raise ValueError('native Arrangement postcondition failed')
+        except BaseException as error:
+            try:
+                restore(state['value'])
+                if self._native_editing_read(selector)['stateRevision'] != before['stateRevision']: raise ValueError('rollback state differs')
+            except BaseException: raise ValueError('native edit failed and exact rollback failed') from error
+            raise
+        return {'changed': True, **after}
 
     def _willington_zone_state(self, args: dict[str, Any]) -> dict[str, Any]:
         if not getattr(self, "willington_zone_writes", False): raise ValueError("Willington rack zones are unavailable")
