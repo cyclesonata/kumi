@@ -7,6 +7,13 @@ normal matrix bundles. Kumi has not yet imported that bundle or released the
 runtime integration; `/willington` does not currently enable these capabilities.
 Other Live builds and Windows are not supported by this component.
 
+In pending [Kumi PR #249](https://github.com/user1303836/kumi/pull/249),
+`/willington` requests editing only with an owner-only `self-test.json` matching
+an installed library; the provider checks the actual selected library again.
+Its developer fixture runner tests all five editing kinds before issuing that
+receipt and leaves writes disabled afterward. Receipt provisioning is explicit,
+not automatic for end users. The owner-only bundle import remains a prerequisite.
+
 For disposable-fixture development, follow the upstream
 [build and installation instructions](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md).
 With the promoted package installed, `api.install()` selects and verifies the
