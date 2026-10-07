@@ -12,7 +12,13 @@ use std::{cell::RefCell, rc::Rc};
 #[test]
 fn authoritative_reference_lifetimes_short_names_and_cursor_queries_match_source() {
     let data: Value = serde_json::from_str(include_str!("support/references-oracle.json")).unwrap();
-    assert_eq!(json!(*BRIDGE_TOOLS), data["bridgeTools"]);
+    // The source fixture predates the two guarded native-editing tools.
+    let native: Vec<_> = BRIDGE_TOOLS.iter().filter(|name| name.starts_with("live_native_editing_")).collect();
+    assert_eq!(json!(native), json!(["live_native_editing_preview", "live_native_editing_apply"]));
+    assert_eq!(
+        json!(BRIDGE_TOOLS.iter().filter(|name| !name.starts_with("live_native_editing_")).collect::<Vec<_>>()),
+        data["bridgeTools"]
+    );
     let mut book = References::default();
     for case in data["cases"].as_array().unwrap() {
         let args = &case["args"];
