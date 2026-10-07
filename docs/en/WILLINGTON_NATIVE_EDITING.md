@@ -1,14 +1,16 @@
-# Willington native editing candidate
+# Willington native editing
 
 This is a **developer guide, not a declaration of shipped Kumi support**.
-[Willington PR #11](https://github.com/xonedsp/willington/pull/11) adds native
-bindings for **Live 12.4.15b5 macOS ARM64**. Kumi does not bundle the candidate,
-and `/willington` does not install or enable it. Other Live builds and Windows
-are not supported by this candidate.
+[Willington PR #12](https://github.com/xonedsp/willington/pull/12) promoted native
+editing for **Live 12.4.15b5 macOS ARM64** into validated automatic loading and
+normal matrix bundles. Kumi has not yet imported that bundle or released the
+runtime integration; `/willington` does not currently enable these capabilities.
+Other Live builds and Windows are not supported by this component.
 
 For disposable-fixture development, follow the upstream
-[build and installation instructions](https://github.com/xonedsp/willington/blob/feat/native-editing/integrations/WillingtonEditing/README.md).
-Installation requires an explicit verified library and deliberate write enablement;
+[build and installation instructions](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md).
+With the promoted package installed, `api.install()` selects and verifies the
+exact-build library automatically. Writes remain disabled until explicitly enabled;
 transport must be stopped. After installation, the methods can be called through
 `run_python` (`live_run_python` at the host boundary) when the full policy permits
 Python. An absent method or exact-build refusal means unavailable, regardless of
@@ -86,9 +88,12 @@ Kumi history: do not alter their contents or fall back to Live undo after a
 signature refusal. Pending automation transforms are refused. UI selection and
 event-object identity are outside the snapshot contract.
 
+
+Snapshots also expire when an original owner is deleted or evicted from the adapter's 128-owner FIFO cache. Pointer reuse does not preserve ownership.
+
 ## Evidence and release boundary
 
-Upstream [fixture evidence](https://github.com/xonedsp/willington/blob/feat/native-editing/evidence/native-editing/b5/README.md)
+Upstream [fixture evidence](https://github.com/xonedsp/willington/blob/main/evidence/native-editing/b5/README.md)
 covers readback, native undo/redo, save/reopen, Max calls, MPE playback and notes
 notifications, Arrangement playback, group routing, and UI scene scheduling.
 The pending-transform refusal was tested through its native flag controller,
@@ -96,8 +101,11 @@ not an active UI drag. This is upstream evidence, not acceptance of Kumi tools.
 
 Kumi's `scripts/vendor-willington.py` imports only a successful Bundle run from a
 push to Willington main and verifies artifact/bundle digests and runtime inventory.
-Keep that provenance chain and the maintainer's owner-PR gate intact. Do not copy
-candidate binaries into the release vendor tree or advertise released capabilities.
-Runtime hooks belong in a separate full-review PR after the carrying release is
-vendored, with exact-library self-test receipts, real-Live evidence and a bridge
-version bump. This documentation PR adds no runtime hooks or preview/apply/history tools.
+The promoted bundle is from [run 37556816568](https://github.com/xonedsp/willington/actions/runs/37556816568), commit `cf021fa`.
+Keep that provenance chain and the maintainer's owner-PR gate intact. The vendor
+update must be an owner-authored, vendor-only PR from an upstream `willington/`
+branch; the runtime fork PR cannot carry it.
+[Runtime PR #249](https://github.com/user1303836/kumi/pull/249) is separate and
+requires full review, exact-library self-test receipts, real-Live provider evidence
+and a coordinated protocol release. Release automation assigns versions.
+This documentation PR adds no runtime hooks or preview/apply/history tools.

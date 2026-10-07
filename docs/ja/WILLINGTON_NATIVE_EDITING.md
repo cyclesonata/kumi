@@ -1,9 +1,9 @@
-# Willington ネイティブ編集の候補
+# Willington ネイティブ編集
 
 これは**開発者向けガイドであり、Kumi の出荷済み機能の宣言ではありません**。
-[Willington PR #11](https://github.com/xonedsp/willington/pull/11) は、**Live 12.4.15b5 macOS ARM64** 向けのネイティブバインディングを追加します。Kumi はこの候補を同梱しておらず、`/willington` でもインストールや有効化はできません。ほかの Live ビルドと Windows は、この候補の対象外です。
+[Willington PR #12](https://github.com/xonedsp/willington/pull/12) により、**Live 12.4.15b5 macOS ARM64** のネイティブ編集が検証済みプロファイルに昇格し、自動選択と通常のマトリクスバンドルに含まれるようになりました。Kumi はまだこのバンドルを取り込んでおらず、ランタイム統合もリリースしていません。現在の `/willington` はこれらの機能を有効にしません。ほかの Live ビルドと Windows は、このコンポーネントの対象外です。
 
-使い捨てのテスト用 Set での開発では、上流の[ビルドとインストール手順](https://github.com/xonedsp/willington/blob/feat/native-editing/integrations/WillingtonEditing/README.md)に従ってください。検証済みライブラリの明示的な指定と、書き込みの意図的な有効化が必要です。トランスポートは停止している必要があります。インストール後、full ポリシーが Python を許可していれば、`run_python`（ホスト側では `live_run_python`）からメソッドを呼べます。メソッドがない場合やビルドの検証で拒否された場合は、Kumi の Willington スイッチにかかわらず利用できません。
+使い捨てのテスト用 Set での開発では、上流の[ビルドとインストール手順](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)に従ってください。昇格済みパッケージをインストールすると、`api.install()` がビルドに一致するライブラリを自動で選択・検証します。書き込みは明示的に有効にするまで無効で、トランスポートは停止している必要があります。インストール後、full ポリシーが Python を許可していれば、`run_python`（ホスト側では `live_run_python`）からメソッドを呼べます。メソッドがない場合やビルドの検証で拒否された場合は、Kumi の Willington スイッチにかかわらず利用できません。
 
 Python 呼び出しは Kumi の `HISTORY` に**記録されません**。ネイティブメソッドには独自の Live の取り消し境界があり、1 本のスクリプト内の複数の呼び出しが複数の取り消しステップになることがあります。全体の Follow Action スイッチは Live の取り消しに入りません。失敗したスクリプトの補償として、無条件に `song.undo()` を呼ばないでください。
 
@@ -41,8 +41,10 @@ MIDI クリップを読み直して得た安定したノート ID を使いま�
 
 スナップショットは署名され、元のパラメーターとアダプターのインスタンスに結び付いています。アダプターの再インストールや Live の再起動で無効になります。永続的な Kumi の履歴には使えません。内容を書き換えたり、署名の拒否後に Live の取り消しで代用したりしないでください。未完了のオートメーション変形がある場合は拒否されます。UI の選択とイベントオブジェクトの同一性は保証範囲外です。
 
+元の所有オブジェクトが削除された場合、またはアダプターの 128 所有者の FIFO キャッシュから追い出された場合も、スナップショットは失効します。ポインターの再利用で所有権が引き継がれることはありません。
+
 ## 検証とリリースの境界
 
-上流の[テスト用 Set の検証記録](https://github.com/xonedsp/willington/blob/feat/native-editing/evidence/native-editing/b5/README.md)には、読み戻し、ネイティブの取り消し/やり直し、保存と再オープン、Max 呼び出し、MPE 再生とノート通知、Arrangement 再生、グループのルーティング、UI からのシーン起動が含まれます。未完了変形の拒否はネイティブのフラグコントローラーでテストしており、実際の UI ドラッグではありません。これは上流の証拠であり、Kumi のツールの受け入れ検証ではありません。
+上流の[テスト用 Set の検証記録](https://github.com/xonedsp/willington/blob/main/evidence/native-editing/b5/README.md)には、読み戻し、ネイティブの取り消し/やり直し、保存と再オープン、Max 呼び出し、MPE 再生とノート通知、Arrangement 再生、グループのルーティング、UI からのシーン起動が含まれます。未完了変形の拒否はネイティブのフラグコントローラーでテストしており、実際の UI ドラッグではありません。これは上流の証拠であり、Kumi のツールの受け入れ検証ではありません。
 
-Kumi の `scripts/vendor-willington.py` は、Willington main への push で成功した Bundle 実行だけを取り込み、成果物とバンドルのダイジェスト、ランタイムのファイル一覧を検証します。この来歴確認とメンテナーの owner-PR ゲートを維持してください。候補のバイナリをリリース用 vendor ツリーへコピーしたり、出荷済み機能として公開したりしないでください。ランタイムのフックは、対象リリースの取り込み後、別の完全レビュー対象 PR で扱い、ライブラリそのものに対応するセルフテストのレシート、実際の Live での検証、ブリッジのバージョン更新が必要です。このドキュメント PR はランタイムのフックや preview/apply/history ツールを追加しません。
+Kumi の `scripts/vendor-willington.py` は、Willington main への push で成功した Bundle 実行だけを取り込み、成果物とバンドルのダイジェスト、ランタイムのファイル構成を検証します。昇格済みバンドルは [run 37556816568](https://github.com/xonedsp/willington/actions/runs/37556816568)、コミット `cf021fa` です。この来歴とメンテナーの所有者 PR ゲートを維持してください。ベンダー更新は、上流の `willington/` ブランチから所有者が作成し、ベンダーファイルだけを変更する PR で行います。ランタイムのフォーク PR に含めることはできません。[ランタイム PR #249](https://github.com/user1303836/kumi/pull/249) は別の変更で、完全レビュー、実際のライブラリに一致するセルフテストの証明、実機 Live のプロバイダー検証、プロトコルをそろえたリリースが必要です。バージョンはリリース自動化が設定します。この文書 PR はランタイムフックや preview/apply/history ツールを追加しません。

@@ -1,8 +1,8 @@
-# Willington 原生编辑候选版本
+# Willington 原生编辑
 
-这是**开发者指南，不代表 Kumi 已发布这些功能**。[Willington PR #11](https://github.com/xonedsp/willington/pull/11) 为 **Live 12.4.15b5 macOS ARM64** 添加原生绑定。Kumi 不捆绑此候选版本，`/willington` 也不会安装或启用它。此候选版本不支持其他 Live 构建版本或 Windows。
+这是**开发者指南，不代表 Kumi 已发布这些功能**。[Willington PR #12](https://github.com/xonedsp/willington/pull/12) 已将 **Live 12.4.15b5 macOS ARM64** 的原生编辑提升为已验证配置，支持自动选择并纳入常规矩阵包。Kumi 尚未导入该包，也未发布运行时集成；当前的 `/willington` 不会启用这些功能。此组件不支持其他 Live 构建版本或 Windows。
 
-在可丢弃的测试工程中开发时，请遵循上游的[构建与安装说明](https://github.com/xonedsp/willington/blob/feat/native-editing/integrations/WillingtonEditing/README.md)。安装时必须明确指定已验证的库，并主动启用写入；播放必须停止。安装后，如果 full 策略允许 Python，就可以通过 `run_python`（在主机接口中为 `live_run_python`）调用这些方法。如果方法不存在或精确构建检查拒绝加载，则表示不可用，无论 Kumi 的 Willington 开关处于什么状态。
+在可丢弃的测试工程中开发时，请遵循上游的[构建与安装说明](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)。安装提升后的包后，`api.install()` 会自动选择并验证与精确构建匹配的库。写入默认关闭，必须明确启用；播放必须停止。安装后，如果 full 策略允许 Python，就可以通过 `run_python`（在主机接口中为 `live_run_python`）调用这些方法。如果方法不存在或精确构建检查拒绝加载，则表示不可用，无论 Kumi 的 Willington 开关处于什么状态。
 
 Python 调用**不会**创建 Kumi `HISTORY` 记录。原生方法各有自己的 Live 撤销边界：一个脚本内的多次调用可能产生多个撤销步骤。全局跟随动作开关不进入 Live 撤销记录。不要盲目调用 `song.undo()` 来补偿失败的脚本。
 
@@ -18,7 +18,7 @@ Python 调用**不会**创建 Kumi `HISTORY` 记录。原生方法各有自己�
 
 `scene.get_follow_actions()` 返回 JSON；`scene.set_follow_action(field, value)` 设置 `enabled`、`action_a`、`action_b`、`chance_a`、`chance_b`、`jump_a`、`jump_b`、`time`、`linked` 或 `loop_count`。动作范围为 0–9，概率范围为 0–100，且相互联动、总和为 100。跳转目标为从 1 开始的场景编号（0 表示未设置），最大 8388608。时间以四分音符拍数计，最小 0.25；循环次数为 1–1073741823。关联计时使用最长的片段及循环次数。应保留完整状态并在写入后重新读取。
 
-`song.get_follow_actions_enabled()` 读取全局开关；`song.set_follow_actions_enabled(True)` 或 `False` 修改它。保留原来的布尔值并明确恢复。此候选版本不提供场景/全局观察者 API。测试通过 UI 启动验证了调度，但该实验中的 `Scene.fire()` 未能重现 UI 调度行为。
+`song.get_follow_actions_enabled()` 读取全局开关；`song.set_follow_actions_enabled(True)` 或 `False` 修改它。保留原来的布尔值并明确恢复。此组件不提供场景/全局观察者 API。测试通过 UI 启动验证了调度，但该实验中的 `Scene.fire()` 未能重现 UI 调度行为。
 
 ## 逐音符 MPE
 
@@ -40,8 +40,10 @@ Python 调用**不会**创建 Kumi `HISTORY` 记录。原生方法各有自己�
 
 快照带签名，并绑定原来的参数和适配器实例。重新安装适配器或重启 Live 会使其失效。它不是可持久保存的 Kumi 历史：不要修改内容，也不要在签名验证拒绝后改用 Live 撤销。存在尚未完成的自动化变换时会拒绝操作。UI 选择和事件对象身份不属于快照保证范围。
 
+原始所有者被删除或从适配器的 128 个所有者 FIFO 缓存中被淘汰时，快照也会失效。指针复用不会保留所有权。
+
 ## 验证与发布边界
 
-上游[测试工程验证记录](https://github.com/xonedsp/willington/blob/feat/native-editing/evidence/native-editing/b5/README.md)涵盖读取确认、原生撤销/重做、保存和重新打开、Max 调用、MPE 播放和音符通知、Arrangement 播放、分组路由以及 UI 场景调度。待完成变换的拒绝通过原生标志控制器测试，而不是实际的 UI 拖动。这是上游证据，不是 Kumi 工具的验收结果。
+上游[测试工程验证记录](https://github.com/xonedsp/willington/blob/main/evidence/native-editing/b5/README.md)涵盖读取确认、原生撤销/重做、保存和重新打开、Max 调用、MPE 播放和音符通知、Arrangement 播放、分组路由以及 UI 场景调度。待完成变换的拒绝通过原生标志控制器测试，而不是实际的 UI 拖动。这是上游证据，不是 Kumi 工具的验收结果。
 
-Kumi 的 `scripts/vendor-willington.py` 只导入由推送到 Willington main 触发且成功完成的 Bundle 构建，并验证构建产物及捆绑包摘要和运行时文件清单。应保留该来源验证链以及维护者的 owner-PR 审批门槛。不要把候选二进制文件复制进发布用 vendor 目录，也不要将其宣称为已发布能力。运行时接入应在包含该组件的发行版被正式导入后，放入另一份需要完整审查的 PR，并提供对应确切库文件的自检回执、真实 Live 验证和桥接版本更新。本篇文档 PR 不添加运行时接入或 preview/apply/history 工具。
+Kumi 的 `scripts/vendor-willington.py` 只导入 Willington main 的 push 所产生的成功 Bundle 构建，并验证产物、包摘要和运行时文件清单。提升后的包来自 [run 37556816568](https://github.com/xonedsp/willington/actions/runs/37556816568)，提交为 `cf021fa`。必须保留这条来源验证链及维护者的所有者 PR 门禁。供应文件更新必须由所有者从上游 `willington/` 分支发起，且 PR 只能修改供应文件；运行时 fork PR 不能包含这些文件。[运行时 PR #249](https://github.com/user1303836/kumi/pull/249) 是独立变更，需要完整审查、匹配实际库的自测凭据、真实 Live 提供器验证以及同步更新协议的发布。版本由发布自动化设置。本次文档 PR 不添加运行时钩子或 preview/apply/history 工具。
