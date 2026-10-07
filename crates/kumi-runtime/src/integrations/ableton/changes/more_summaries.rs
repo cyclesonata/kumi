@@ -116,6 +116,8 @@ pub(super) fn more(
                             })
                             .map(str::to_owned)
                             .unwrap_or_else(|| text(Some(value)))
+                    } else if key == "time" {
+                        finite(Some(value)).map(|n| format!("{} beats", rounded(n))).unwrap_or_else(|| text(Some(value)))
                     } else {
                         text(Some(value))
                     };

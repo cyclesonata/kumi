@@ -181,8 +181,12 @@ async fn a_repair_that_fails_before_moving_anything_aside_leaves_the_remote_scri
 #[tokio::test(flavor = "current_thread")]
 async fn repair_brings_the_producers_willington_files_into_the_reinstalled_remote_script() {
     let bindings = "remote-script/AbletonMcpBridge/willington/WillingtonBindings/__init__.py";
-    let f = Fixture::with_files(&[(bindings, b"def install(): pass\n")]);
+    let editing = "remote-script/AbletonMcpBridge/willington/WillingtonEditing/__init__.py";
+    let f = Fixture::with_files(&[(bindings, b"def install(): pass\n"), (editing, b"def install(): pass\n")]);
     run_lifecycle(&f.options).await.unwrap();
+    let editing_receipt = f.remote().join(WILLINGTON_EDITING_RECEIPT);
+    let editing_evidence = br#"{"status":"passed","library_sha256":"editing"}"#;
+    write_owner_file(&editing_receipt, &f.options.remote_scripts_directory, editing_evidence).unwrap();
     let switch = f.remote().join(WILLINGTON_CONFIG);
     let on = br#"{"version":1,"followActions":true,"deviceTools":true,"rackZones":true,"enableWrites":true}"#;
     write_owner_file(&switch, &f.options.remote_scripts_directory, on).unwrap();
@@ -196,6 +200,8 @@ async fn repair_brings_the_producers_willington_files_into_the_reinstalled_remot
     assert_eq!(fs::read(&switch).unwrap(), on);
     assert_eq!(secret_permissions(&switch), SecretPermissions::OwnerOnly);
     assert_eq!(fs::read(&receipt).unwrap(), br#"{"status": "passed", "library_sha256": "0"}"#);
+    assert_eq!(fs::read(&editing_receipt).unwrap(), editing_evidence);
+    assert_eq!(secret_permissions(&editing_receipt), SecretPermissions::OwnerOnly);
     assert_eq!(integrity(&f).await, true);
 }
 #[tokio::test(flavor = "current_thread")]

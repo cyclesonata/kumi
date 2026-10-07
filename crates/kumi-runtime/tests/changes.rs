@@ -248,11 +248,11 @@ fn every_change_kind_has_a_history_summary() {
 fn native_titles_use_visible_targets_and_only_changed_scene_settings() {
     kumi_runtime::integrations::ableton::more_changes::set_meter(4.0, 4.0);
     let scene = CHANGES.iter().find(|kind| kind.tool == "set_scene_follow_actions").unwrap();
-    let preview = json!({"prior":{"value":{"action_a":4,"chance_a":100,"chance_b":0,"loop_count":1}},
-        "proposed":{"value":{"action_a":4,"chance_a":35,"chance_b":65,"loop_count":2}}});
+    let preview = json!({"prior":{"value":{"action_a":4,"chance_a":100,"chance_b":0,"loop_count":1,"time":4}},
+        "proposed":{"value":{"action_a":4,"chance_a":35,"chance_b":65,"loop_count":2,"time":0.3333333333333333}}});
     assert_eq!(
         scene.summarize(preview.as_object().unwrap(), json!({"ref":"7:scene:1"}).as_object().unwrap(), &|_| None, None).title,
-        "Scene 2 Follow Actions: loop count 2, chance 35% / 65%"
+        "Scene 2 Follow Actions: time 0.33 beats, loop count 2, chance 35% / 65%"
     );
     let note = CHANGES.iter().find(|kind| kind.tool == "set_note_expression").unwrap();
     let bass = |value: &Value| (value == "7:track:2").then(|| serde_json::from_value(json!({"name":"Bass"})).unwrap());
