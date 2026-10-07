@@ -55,13 +55,14 @@ impl McpHost {
             if !read["next"].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 1048576) {
                 return Err(LiveError::error("Missing native editing proposal"));
             }
+            let proposed: Value = serde_json::from_str(read["next"].as_str().unwrap()).map_err(|_| LiveError::error("Invalid native editing proposal"))?;
             let mut payload = device_parameter::fields(p, SELECTOR);
             payload["next"] = read["next"].clone();
             payload["expectedStateRevision"] = read["stateRevision"].clone();
             let t = json!({"id":tempo::transaction_id("nativeedit"),"epoch":status.epoch,"kind":"native-editing",
                 "fence":read["stateRevision"],"payload":payload,"prior":read["state"],"state":"previewed","expiresAt":now_ms_f64()+TRANSACTION_TTL_MS});
             self.retain_bounded_transaction(&self.clip_lifecycle_transactions, t.clone(), "native editing")?;
-            Ok(success_text(id, &json!({"transactionId":t["id"],"epoch":t["epoch"],"prior":summary,"proposed":p["edit"],
+            Ok(success_text(id, &json!({"transactionId":t["id"],"epoch":t["epoch"],"prior":summary,"proposed":proposed,
                 "undoable":p["kind"] != "group-tracks","confirmation":"apply","expiresAt":t["expiresAt"]})))
         }.await;
         Ok(result.unwrap_or_else(|e| adapter_tool_error(id, &e, "Native preview requires complete current readback and stopped playback.")))
@@ -115,6 +116,9 @@ impl McpHost {
             record.borrow_mut()["created"] = result.clone();
             record.borrow_mut()["state"] = json!("applied");
             let mut body = json!({"transactionId":t["id"],"state":"applied"});
+            if t["payload"]["kind"] == "group-tracks" {
+                body["created"] = json!([{"ref":summary["createdRef"],"kind":"track"}]);
+            }
             body["after"] = summary;
             body["undoable"] = json!(t["payload"]["kind"] != "group-tracks");
             body["idempotent"] = json!(false);
@@ -172,7 +176,6 @@ impl McpHost {
                 transaction_id: t["id"].as_str().map(str::to_owned),
                 idempotency_key: p["idempotencyKey"].as_str().map(str::to_owned),
             };
-            record.borrow_mut()["undoKey"] = p["idempotencyKey"].clone();
             let selector = device_parameter::fields(&t["payload"], SELECTOR);
             if reconcile && !steps.is_empty() {
                 self.replay_undo_recovery(&record, &*adapter, &context).await?;

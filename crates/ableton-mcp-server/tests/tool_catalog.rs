@@ -39,8 +39,6 @@ fn check_visibility_cases(chunk: usize, chunks: usize) {
         let rows: Vec<_> = resolve_tool_visibility(status, policy)
             .unwrap()
             .iter()
-            // The frozen TypeScript oracle predates native editing; its negotiation is tested separately below.
-            .filter(|r| !matches!(r.entry.name.as_str(), "live_native_editing_preview" | "live_native_editing_apply"))
             .map(|r| json!({"name":r.entry.name,"executable":r.executable,"policyAllowed":r.policy_allowed,"visible":r.visible}))
             .collect();
         let result = json!({"rows":rows,"descriptors":visible_tool_descriptors(status, policy).unwrap()});

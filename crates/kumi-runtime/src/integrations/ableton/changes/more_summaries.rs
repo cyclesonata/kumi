@@ -90,6 +90,20 @@ pub(super) fn more(
     let field = |key: &str| coalesce(proposed_or_input.get(key), input.get(key));
     let clip_track = || owner(coalesce(preview.get("clipRef"), input.get("clipRef")), track);
     let summary = match kind.tool.as_str() {
+        "group_tracks" => ChangeSummary::title(format!("Grouped {} tracks", array(input.get("trackRefs")).len())),
+        "set_scene_follow_actions" => {
+            ChangeSummary::title(format!("Scene Follow Actions: {}", stringify(&Value::Object(proposed.clone()))))
+        }
+        "set_global_follow_actions" => ChangeSummary::title(if proposed.get("value") == Some(&json!(true)) {
+            "Enabled global Follow Actions"
+        } else {
+            "Disabled global Follow Actions"
+        }),
+        "set_note_expression" => with_track(
+            format!("Changed {} on note {}", text(input.get("dimension")), text(input.get("noteId"))),
+            owner(input.get("ref"), track),
+        ),
+        "edit_arrangement_automation" => with_track("Changed Arrangement automation", owner(input.get("ref"), track)),
         "set_transport" => {
             let loop_prior = record(prior.get("loop"));
             let mut parts = vec![];

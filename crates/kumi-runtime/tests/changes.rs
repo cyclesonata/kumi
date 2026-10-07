@@ -94,15 +94,11 @@ fn change_schemas_outputs_permanence_and_human_messages_match_source() {
         assert_eq!(serde_json::to_value(hex_color(&case["value"])).unwrap(), case["color"]);
         assert_eq!(format_number(value, None), case["format"]);
     }
-    assert_eq!(serde_json::to_value(CHANGES.iter().filter(|k| k.tool != "edit_native").collect::<Vec<_>>()).unwrap(), data["kinds"]);
+    assert_eq!(serde_json::to_value(&*CHANGES).unwrap(), data["kinds"]);
     assert_eq!(*SAMPLE_INPUT, data["sampleInput"].as_object().unwrap().clone());
     assert_eq!(*REFERENCE_FIELDS, serde_json::from_value::<Vec<String>>(data["referenceFields"].clone()).unwrap());
     assert_eq!(
-        HOST_TOOLS
-            .iter()
-            .filter(|name| !matches!(name.as_str(), "live_native_editing_preview" | "live_native_editing_apply"))
-            .cloned()
-            .collect::<HashSet<_>>(),
+        HOST_TOOLS.iter().cloned().collect::<HashSet<_>>(),
         serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap()
     );
     assert_eq!(*UNDO_DESCRIPTION, data["undoDescription"]);
@@ -230,11 +226,20 @@ fn an_arrangement_copy_says_so_and_another_track_is_named() {
 
 #[test]
 fn native_editing_maps_to_guarded_tools_and_discloses_group_history_limit() {
-    let kind = CHANGES.iter().find(|kind| kind.tool == "edit_native").unwrap();
+    let kind = CHANGES.iter().find(|kind| kind.tool == "group_tracks").unwrap();
     assert_eq!(kind.preview, "live_native_editing_preview");
     assert_eq!(kind.apply, "live_native_editing_apply");
     assert!(HOST_TOOLS.contains(&kind.preview));
     assert!(HOST_TOOLS.contains(&kind.apply));
     assert!(kind.replaced(json!({"undoable":false}).as_object().unwrap()).unwrap().contains("no Kumi history inverse"));
     assert!(kind.replaced(json!({"undoable":true}).as_object().unwrap()).is_none());
+}
+
+#[test]
+fn every_change_kind_has_a_history_summary() {
+    let empty = serde_json::Map::new();
+    for kind in CHANGES.iter() {
+        let summary = kind.summarize(&empty, &empty, &|_| None, None);
+        assert!(!summary.title.is_empty(), "{} needs a HISTORY title", kind.tool);
+    }
 }
