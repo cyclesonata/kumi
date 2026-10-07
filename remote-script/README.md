@@ -267,3 +267,42 @@ python -m unittest discover -s . -p 'test_*.py'
 On Windows, `py -3.11` works in place of `python`. These tests run against a
 fake Live; they don't prove a real Live version, a Control Surface installed in
 Live, or what a Set does.
+
+### End-to-end native editing fixture
+
+For explicit maintainer validation in the same disposable Set used by the
+self-test, `native_editing_live_fixture.py` starts a separate authenticated
+loopback bridge from a staged `AbletonMcpBridge` package. Supply the official
+verified Willington files and a passing local receipt; its owner-only
+`willington.json` must request editing writes. On Live's main thread:
+
+```python
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location(
+    "editing_e2e_fixture", "/absolute/kumi/remote-script/native_editing_live_fixture.py")
+fixture = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = fixture
+spec.loader.exec_module(fixture)
+fixture.start(song, "/absolute/staged/AbletonMcpBridge", "/private/tmp/kumi-editing-e2e.json")
+```
+
+Then, from the source checkout:
+
+```sh
+KUMI_EDITING_LIVE_CONFIG=/private/tmp/kumi-editing-e2e.json \
+KUMI_EDITING_LIVE_REPORT=/private/tmp/kumi-editing-e2e-report.json \
+cargo test -p kumi --test native_editing_live -- --ignored
+```
+
+Always finish on Live's main thread, including after a test failure:
+
+```python
+import sys
+sys.modules["editing_e2e_fixture"].stop(song)
+```
+
+The Rust fixture uses `make_changes`, the public MCP host, the authenticated
+Remote Script's authority/idempotency path, and HISTORY undo. Group creation
+checks HISTORY refusal; cleanup explicitly ungroups it. Cleanup also restores
+the original Set state, provider and display hook and deletes the endpoint
+secret file. This does not test model inference, a released installer or chat UI.
