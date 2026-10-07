@@ -1132,6 +1132,7 @@ class LiveObjectMapper:
             "provenance": self.provenance,
             "environment": self._environment_probe(),
             "willingtonKinds": (["macro-name", "macro-mapping", "variation-name"] if getattr(self, "willington_device_writes", False) else []) + (["selector-zone", "key-zone", "velocity-zone"] if getattr(self, "willington_zone_writes", False) else []),
+            "nativeEditingKinds": (["group-tracks", "arrangement-automation", "scene-follow", "global-follow", "note-expression"] if getattr(self, "willington_editing_writes", False) else []),
         }
 
     def _environment_probe(self) -> dict[str, Any]:
