@@ -160,6 +160,8 @@ Willington 有用于以下操作的原生方法，但在能够安全撤销之前
 {"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
 ```
 
+已安装的桥接包不包含此脚本。请克隆 [Kumi](https://github.com/user1303836/kumi)，检出与已安装 Kumi 版本一致的发布标签，并使用该源码中的 `remote-script/native_editing_self_test.py`。将下面的 `/absolute/kumi` 替换为源码目录的绝对路径。开发期间应使用对应的功能分支，而不是发布标签。
+
 ```python
 import importlib.util, sys, Live
 spec = importlib.util.spec_from_file_location(

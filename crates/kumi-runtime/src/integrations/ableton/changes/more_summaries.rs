@@ -92,17 +92,63 @@ pub(super) fn more(
     let summary = match kind.tool.as_str() {
         "group_tracks" => ChangeSummary::title(format!("Grouped {} tracks", array(input.get("trackRefs")).len())),
         "set_scene_follow_actions" => {
-            ChangeSummary::title(format!("Scene Follow Actions: {}", stringify(&Value::Object(proposed.clone()))))
+            let before = record(prior.get("value"));
+            let after = record(proposed.get("value"));
+            let mut parts = vec![];
+            for (key, label) in [
+                ("enabled", "enabled"),
+                ("action_a", "action A"),
+                ("action_b", "action B"),
+                ("jump_a", "jump A"),
+                ("jump_b", "jump B"),
+                ("time", "time"),
+                ("linked", "linked"),
+                ("loop_count", "loop count"),
+            ] {
+                if let Some(value) = after.get(key).filter(|value| Some(*value) != before.get(key)) {
+                    let value = if key.starts_with("action_") {
+                        finite(Some(value))
+                            .and_then(|n| {
+                                index_name(
+                                    n,
+                                    &["No Action", "Stop", "Play Again", "Previous", "Next", "First", "Last", "Any", "Other", "Jump"],
+                                )
+                            })
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| text(Some(value)))
+                    } else {
+                        text(Some(value))
+                    };
+                    parts.push(format!("{label} {value}"));
+                }
+            }
+            if ["chance_a", "chance_b"].iter().any(|key| after.get(*key).is_some() && after.get(*key) != before.get(*key)) {
+                parts.push(format!("chance {}% / {}%", text(after.get("chance_a")), text(after.get("chance_b"))));
+            }
+            let scene = input
+                .get("ref")
+                .and_then(Value::as_str)
+                .and_then(|r| r.split(":scene:").nth(1))
+                .and_then(|n| n.parse::<usize>().ok())
+                .map(|n| format!("Scene {}", n + 1))
+                .unwrap_or_else(|| "Scene".into());
+            ChangeSummary::title(format!("{scene} Follow Actions: {}", parts_text(parts, "changed")))
         }
         "set_global_follow_actions" => ChangeSummary::title(if proposed.get("value") == Some(&json!(true)) {
             "Enabled global Follow Actions"
         } else {
             "Disabled global Follow Actions"
         }),
-        "set_note_expression" => with_track(
-            format!("Changed {} on note {}", text(input.get("dimension")), text(input.get("noteId"))),
-            owner(input.get("ref"), track),
-        ),
+        "set_note_expression" => {
+            let note = record(prior.get("note"));
+            let target = match (finite(note.get("pitch")), finite(note.get("start_time"))) {
+                (Some(pitch), Some(start)) => format!("{} at {}", note_name(pitch), bars(start)),
+                _ => "a note".into(),
+            };
+            let clip_track = owner(input.get("ref"), track);
+            let location = clip_track.as_ref().map(|t| format!(" in {}", t.name)).unwrap_or_default();
+            with_track(format!("Changed {} on {target}{location}", text(input.get("dimension"))), clip_track)
+        }
         "edit_arrangement_automation" => with_track("Changed Arrangement automation", owner(input.get("ref"), track)),
         "set_transport" => {
             let loop_prior = record(prior.get("loop"));

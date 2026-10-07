@@ -287,6 +287,8 @@ Use a disposable stopped Set named `Willington Native Editing`, with two ungroup
 {"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
 ```
 
+The runner is not included in the installed bridge bundle. Clone [Kumi](https://github.com/user1303836/kumi), check out the tag matching your installed Kumi release, and use `remote-script/native_editing_self_test.py` from that checkout. Set `/absolute/kumi` below to the absolute checkout directory. During development, use the matching feature branch instead of a release tag.
+
 ```python
 import importlib.util, sys, Live
 spec = importlib.util.spec_from_file_location(

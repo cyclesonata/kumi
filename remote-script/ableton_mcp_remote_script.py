@@ -9134,6 +9134,7 @@ class LiveObjectMapper:
         if kind in ('arrangement-automation', 'note-expression'): summary.update(exists=value['exists'], eventCount=len(value['events']))
         elif kind == 'group-tracks': summary['trackCount'] = len(selector['trackRefs'])
         else: summary['value'] = value
+        if kind == 'note-expression': summary['note'] = {key: state['note'][key] for key in ('pitch', 'start_time')}
         result = {'state': encoded, 'stateRevision': hashlib.sha256(encoded.encode()).hexdigest(), 'summary': self._bounded_canonical(summary)}
         if 'edit' in args:
             if self.song.is_playing: raise ValueError('native editing requires stopped playback')

@@ -71,6 +71,12 @@ class NativeEditingTests(unittest.TestCase):
                 restored=self.undo(selector,before,after)
                 self.assertEqual(before['stateRevision'],restored['stateRevision'])
 
+    def test_expression_summary_exposes_visible_note_coordinates(self):
+        selector = {'kind':'note-expression','ref':self.clip_ref,'noteId':1,'dimension':'pressure'}
+        summary = json.loads(self.read(selector, {'exists':True,'events':[]})['summary'])
+        self.assertEqual(summary['note'], {'pitch':60, 'start_time':0.})
+        self.assertNotIn('note_id', summary['note'])
+
     def test_note_lane_absence_empty_curves_and_note_edit_fence(self):
         selector={'kind':'note-expression','ref':self.clip_ref,'noteId':1,'dimension':'pressure'}
         for events in ([], [[0.,42.,.2,.3,.7,.8],[1.,64.,.5,.5,.5,.5]]):

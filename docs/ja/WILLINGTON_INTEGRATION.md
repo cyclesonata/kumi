@@ -160,6 +160,8 @@ Kumi は、`WillingtonEditing` がインストールされ、**Live 12.4.15b5 ma
 {"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
 ```
 
+ランナーはインストール済みブリッジには含まれません。[Kumi](https://github.com/user1303836/kumi) をクローンし、インストールした Kumi リリースと一致するタグをチェックアウトして、その `remote-script/native_editing_self_test.py` を使用してください。以下の `/absolute/kumi` をチェックアウト先の絶対パスに置き換えます。開発中はリリースタグの代わりに対応する機能ブランチを使用します。
+
 ```python
 import importlib.util, sys, Live
 spec = importlib.util.spec_from_file_location(
