@@ -1,0 +1,63 @@
+{
+  "receipt": {
+    "component": "WillingtonEditing",
+    "status": "passed",
+    "library_sha256": "21c4799d9de5f07ade1869da067896b6067a8258dd06ea1f00c9d82265c7fe01",
+    "checks": [
+      {
+        "kind": "global-follow",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "note-expression",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "arrangement-automation",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "group-tracks",
+        "applied": true,
+        "topologyRestored": true,
+        "cleanup": "explicit native ungroup; no Kumi history inverse"
+      }
+    ]
+  },
+  "library": ".runtime/kumi-editing-provider-fixture/AbletonMcpBridge",
+  "provider": "PR 249 staged installed layout with official main bundle, not a shipped Kumi release",
+  "noReceiptRefused": true,
+  "validReceiptEnabled": true,
+  "staleReceiptRefused": true,
+  "nativeEditingKinds": [
+    "group-tracks",
+    "arrangement-automation",
+    "scene-follow",
+    "global-follow",
+    "note-expression"
+  ],
+  "writesEnabled": false,
+  "transportStopped": true,
+  "logs": [
+    "Willington native editing writes unavailable: owner-only native editing self-test receipt is required",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: none",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: Native Editing",
+    "Willington native editing writes unavailable: current-library native editing self-test is required",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: none"
+  ],
+  "liveVersion": "12.4.15b5",
+  "platform": "macOS ARM64",
+  "willingtonCommit": "cf021fa151bda8e97995bd0042d0f23881d8fd27",
+  "bundleRun": "https://github.com/xonedsp/willington/actions/runs/37556816568",
+  "bundleSha256": "71bacc334e3bfc1fc786c537cb17e7516ca891765645ee54d9d0e1b6f4b8bbe9",
+  "fixture": "Willington Native Editing",
+  "scope": "Actual Live, production provider class and platform-filtered installed layout; not an installed Kumi release or end-to-end chat test. Vendor import still requires the owner-only PR."
+}
