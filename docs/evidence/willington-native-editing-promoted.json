@@ -6,21 +6,142 @@
     "checks": [
       {
         "kind": "global-follow",
+        "edit": {
+          "enabled": false
+        },
+        "observed": false,
         "applied": true,
         "restoredExact": true
       },
       {
         "kind": "scene-follow",
+        "edit": {
+          "chance_a": 35,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 35,
+          "chance_b": 65,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
         "applied": true,
         "restoredExact": true
       },
       {
         "kind": "note-expression",
+        "edit": {
+          "exists": true,
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ]
+        },
+        "observed": {
+          "dimension": "pressure",
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ],
+          "exists": true,
+          "time_origin": "note_start",
+          "unit": "midi"
+        },
         "applied": true,
         "restoredExact": true
       },
       {
         "kind": "arrangement-automation",
+        "edit": {
+          "action": "insert",
+          "event": [
+            60,
+            0.55,
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "observed": {
+          "snapshotCaptured": true
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": false
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": false,
+          "loop_count": 1,
+          "time": 4
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": true,
+          "loop_count": 3
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 3,
+          "time": 4
+        },
         "applied": true,
         "restoredExact": true
       },
@@ -44,8 +165,6 @@
     "global-follow",
     "note-expression"
   ],
-  "writesEnabled": false,
-  "transportStopped": true,
   "logs": [
     "Willington native editing writes unavailable: owner-only native editing self-test receipt is required",
     "Willington extensions initialized; active providers: Native Editing; writes enabled: none",
@@ -59,5 +178,7 @@
   "bundleRun": "https://github.com/xonedsp/willington/actions/runs/37556816568",
   "bundleSha256": "71bacc334e3bfc1fc786c537cb17e7516ca891765645ee54d9d0e1b6f4b8bbe9",
   "fixture": "Willington Native Editing",
-  "scope": "Actual Live, production provider class and platform-filtered installed layout; not an installed Kumi release or end-to-end chat test. Vendor import still requires the owner-only PR."
+  "scope": "Actual Live, production provider class and platform-filtered installed layout; not an installed Kumi release or end-to-end chat test. Vendor import still requires the owner-only PR.",
+  "writesEnabledAfterCleanup": false,
+  "transportStoppedAfterCleanup": true
 }

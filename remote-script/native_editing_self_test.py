@@ -61,12 +61,17 @@ def run(provider, module, song):
     parameter_ref = mapper.refs.put("parameter", parameter, "mixer:1:volume")
     cases = [
         ({"kind": "global-follow"}, {"enabled": not song.get_follow_actions_enabled()}),
-        ({"kind": "scene-follow", "ref": scene_ref}, {"chance_a": 35, "loop_count": 2}),
+        ({"kind": "scene-follow", "ref": scene_ref}, {"chance_a": 35, "loop_count": 2, "time": 1/3}),
         ({"kind": "note-expression", "ref": clip_ref, "noteId": 1, "dimension": "pressure"},
-         {"exists": True, "events": [[0, 47.25, .2, .3, .7, .8], [1, 92.125, .5, .5, .5, .5]]}),
+         {"exists": True, "events": [[.1, 47.25, .2, .3, .7, .8], [1.1, 92.125, .5, .5, .5, .5]]}),
         ({"kind": "arrangement-automation", "ref": track_ref, "targetRef": parameter_ref},
          {"action": "insert", "event": [60, .55, .5, .5, .5, .5]}),
     ]
+    linked = json.loads(scene.get_follow_actions())["linked"]
+    cases.extend([
+        ({"kind": "scene-follow", "ref": scene_ref}, {"linked": not linked}),
+        ({"kind": "scene-follow", "ref": scene_ref}, {"linked": True, "loop_count": 3}),
+    ])
     try:
         native.enable(True)
         mapper.willington_editing_writes = True
@@ -96,7 +101,7 @@ def run(provider, module, song):
                     track.restore_arrangement_snapshot(parameter, json.dumps(value))
             current = mapper.invoke("willington.editing.read", selector)
             assert current["stateRevision"] == before["stateRevision"]
-            checks.append({"kind": kind, "applied": True, "restoredExact": True})
+            checks.append({"kind": kind, "edit": edit, "observed": json.loads(after["state"])["value"] if kind != "arrangement-automation" else {"snapshotCaptured": True}, "applied": True, "restoredExact": True})
         selected = before_tracks[:2]
         selector = {"kind": "group-tracks", "trackRefs": [
             mapper.refs.put("track", t, str(i)) for i, t in enumerate(selected)]}
