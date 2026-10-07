@@ -1,18 +1,15 @@
 # Willington native editing
 
+English · [简体中文](../zh-CN/WILLINGTON_NATIVE_EDITING.md) · [日本語](../ja/WILLINGTON_NATIVE_EDITING.md)
+
+Willington's repository is private; the upstream links in this guide require access.
+
 This is a **developer guide, not a declaration of shipped Kumi support**.
 [Willington PR #12](https://github.com/xonedsp/willington/pull/12) promoted native
 editing for **Live 12.4.15b5 macOS ARM64** into validated automatic loading and
 normal matrix bundles. Kumi has not yet imported that bundle or released the
 runtime integration; `/willington` does not currently enable these capabilities.
 Other Live builds and Windows are not supported by this component.
-
-In pending [Kumi PR #249](https://github.com/user1303836/kumi/pull/249),
-`/willington` requests editing only with an owner-only `self-test.json` matching
-an installed library; the provider checks the actual selected library again.
-Its developer fixture runner tests all five editing kinds before issuing that
-receipt and leaves writes disabled afterward. Receipt provisioning is explicit,
-not automatic for end users. The owner-only bundle import remains a prerequisite.
 
 For disposable-fixture development, follow the upstream
 [build and installation instructions](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md).
@@ -93,10 +90,9 @@ Snapshots are signed and bound to the originating parameter and adapter instance
 Reinstalling the adapter or restarting Live invalidates them. They are not durable
 Kumi history: do not alter their contents or fall back to Live undo after a
 signature refusal. Pending automation transforms are refused. UI selection and
-event-object identity are outside the snapshot contract.
-
-
-Snapshots also expire when an original owner is deleted or evicted from the adapter's 128-owner FIFO cache. Pointer reuse does not preserve ownership.
+event-object identity are outside the snapshot contract. Snapshots also expire
+when an original owner is deleted or evicted from the adapter's 128-owner FIFO
+cache. Pointer reuse does not preserve ownership.
 
 ## Evidence and release boundary
 
@@ -106,13 +102,4 @@ notifications, Arrangement playback, group routing, and UI scene scheduling.
 The pending-transform refusal was tested through its native flag controller,
 not an active UI drag. This is upstream evidence, not acceptance of Kumi tools.
 
-Kumi's `scripts/vendor-willington.py` imports only a successful Bundle run from a
-push to Willington main and verifies artifact/bundle digests and runtime inventory.
-The promoted bundle is from [run 37556816568](https://github.com/xonedsp/willington/actions/runs/37556816568), commit `cf021fa`.
-Keep that provenance chain and the maintainer's owner-PR gate intact. The vendor
-update must be an owner-authored, vendor-only PR from an upstream `willington/`
-branch; the runtime fork PR cannot carry it.
-[Runtime PR #249](https://github.com/user1303836/kumi/pull/249) is separate and
-requires full review, exact-library self-test receipts, real-Live provider evidence
-and a coordinated protocol release. Release automation assigns versions.
-This documentation PR adds no runtime hooks or preview/apply/history tools.
+Kumi takes Willington's files only through [a Willington update](DEVELOPER_GUIDE.md#willingtons-files).

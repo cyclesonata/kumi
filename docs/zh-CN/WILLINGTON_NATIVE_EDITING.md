@@ -1,8 +1,10 @@
 # Willington 原生编辑
 
-这是**开发者指南，不代表 Kumi 已发布这些功能**。[Willington PR #12](https://github.com/xonedsp/willington/pull/12) 已将 **Live 12.4.15b5 macOS ARM64** 的原生编辑提升为已验证配置，支持自动选择并纳入常规矩阵包。Kumi 尚未导入该包，也未发布运行时集成；当前的 `/willington` 不会启用这些功能。此组件不支持其他 Live 构建版本或 Windows。
+[English](../en/WILLINGTON_NATIVE_EDITING.md) · 简体中文 · [日本語](../ja/WILLINGTON_NATIVE_EDITING.md)
 
-在尚未合并的 [Kumi PR #249](https://github.com/user1303836/kumi/pull/249) 中，只有存在仅所有者可访问、且与已安装库匹配的 `self-test.json` 时，`/willington` 才会请求编辑。提供器会再次核对实际选中的库。开发者测试脚本验证全部五类编辑后才生成此记录，并在结束时关闭写入。生成记录需要明确执行，不会为最终用户自动运行。仍须先通过所有者专用 PR 导入该包。
+Willington 的仓库是私有的；本指南中的上游链接需要访问权限。
+
+这是**开发者指南，不代表 Kumi 已发布这些功能**。[Willington PR #12](https://github.com/xonedsp/willington/pull/12) 已将 **Live 12.4.15b5 macOS ARM64** 的原生编辑提升为已验证配置，支持自动选择并纳入常规矩阵包。Kumi 尚未导入该包，也未发布运行时集成；当前的 `/willington` 不会启用这些功能。此组件不支持其他 Live 构建版本或 Windows。
 
 在可丢弃的测试工程中开发时，请遵循上游的[构建与安装说明](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)。安装提升后的包后，`api.install()` 会自动选择并验证与精确构建匹配的库。写入默认关闭，必须明确启用；播放必须停止。安装后，如果 full 策略允许 Python，就可以通过 `run_python`（在主机接口中为 `live_run_python`）调用这些方法。如果方法不存在或精确构建检查拒绝加载，则表示不可用，无论 Kumi 的 Willington 开关处于什么状态。
 
@@ -48,4 +50,4 @@ Python 调用**不会**创建 Kumi `HISTORY` 记录。原生方法各有自己�
 
 上游[测试工程验证记录](https://github.com/xonedsp/willington/blob/main/evidence/native-editing/b5/README.md)涵盖读取确认、原生撤销/重做、保存和重新打开、Max 调用、MPE 播放和音符通知、Arrangement 播放、分组路由以及 UI 场景调度。待完成变换的拒绝通过原生标志控制器测试，而不是实际的 UI 拖动。这是上游证据，不是 Kumi 工具的验收结果。
 
-Kumi 的 `scripts/vendor-willington.py` 只导入 Willington main 的 push 所产生的成功 Bundle 构建，并验证产物、包摘要和运行时文件清单。提升后的包来自 [run 37556816568](https://github.com/xonedsp/willington/actions/runs/37556816568)，提交为 `cf021fa`。必须保留这条来源验证链及维护者的所有者 PR 门禁。供应文件更新必须由所有者从上游 `willington/` 分支发起，且 PR 只能修改供应文件；运行时 fork PR 不能包含这些文件。[运行时 PR #249](https://github.com/user1303836/kumi/pull/249) 是独立变更，需要完整审查、匹配实际库的自测凭据、真实 Live 提供器验证以及同步更新协议的发布。版本由发布自动化设置。本次文档 PR 不添加运行时钩子或 preview/apply/history 工具。
+Kumi 仅通过 [Willington 更新流程](DEVELOPER_GUIDE.md#willington-的文件)导入 Willington 的文件。
