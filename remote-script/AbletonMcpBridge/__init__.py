@@ -305,12 +305,10 @@ class _WillingtonProvider:
         self.follow = None
         self.devices = None
         self.zones = None
-        self.editing = None
         self.live = None
         self.mapper.willington_follow_writes = False
         self.mapper.willington_device_writes = False
         self.mapper.willington_zone_writes = False
-        self.mapper.willington_editing_writes = False
         path = Path(__file__).with_name("willington.json")
         if not path.exists(): return
         try:
@@ -318,7 +316,7 @@ class _WillingtonProvider:
                 raise ValueError("unsafe extension configuration")
             config = json.loads(path.read_text())
             required = {"version", "followActions", "deviceTools", "enableWrites"}
-            if not isinstance(config, dict) or not required <= set(config) <= required | {"rackZones", "editing"} or type(config["version"]) is not int or config["version"] != 1 or any(type(config[key]) is not bool for key in ("followActions", "deviceTools", "enableWrites")) or any(type(config.get(key, False)) is not bool for key in ("rackZones", "editing")):
+            if not isinstance(config, dict) or not required <= set(config) <= required | {"rackZones"} or type(config["version"]) is not int or config["version"] != 1 or any(type(config[key]) is not bool for key in ("followActions", "deviceTools", "enableWrites")) or type(config.get("rackZones", False)) is not bool:
                 raise ValueError("invalid extension configuration")
             import Live
             if getattr(Live, "_kumi_willington_owner", None) is not None:
@@ -330,8 +328,6 @@ class _WillingtonProvider:
             chain_class = getattr(getattr(Live, "Chain", None), "Chain", None)
             if callable(getattr(chain_class, "get_zone", None)) or callable(getattr(chain_class, "set_zone", None)):
                 raise ValueError("rack zone bindings already installed")
-            if any(any(getattr(cls, name, None) is method for cls, name, method in getattr(item, "patches", ())) for item in getattr(Live, "_willington_editing_libraries", ())):
-                raise ValueError("standalone editing surface already installed")
             self.live = Live
             Live._kumi_willington_owner = self
             # Kumi's own copy of Willington, inside this package where Live lists no Control Surfaces, for
@@ -375,15 +371,6 @@ class _WillingtonProvider:
                 self.devices = install_component("WillingtonDeviceTools", "WillingtonDeviceTools.api")
             if config.get("rackZones", False):
                 self.zones = install_component("WillingtonRackZones", "WillingtonRackZones.api")
-            if config.get("editing", False):
-                try:
-                    self.editing = install_component("WillingtonEditing", "WillingtonEditing.api")
-                except ModuleNotFoundError as error:
-                    # Older verified bundles do not carry this optional component.
-                    # A missing dependency inside an installed component is an error.
-                    if error.name not in ("WillingtonEditing", "WillingtonEditing.api"):
-                        raise
-                    if callable(log): log("Willington native editing is not installed")
             if config["enableWrites"]:
                 # Follow bindings require evidence for this exact compiled library,
                 # matching the standalone adapter's operator enablement contract.
@@ -407,14 +394,10 @@ class _WillingtonProvider:
                 if self.zones is not None:
                     self.zones.enable(True)
                     self.mapper.willington_zone_writes = True
-                if self.editing is not None:
-                    self.editing.enable(True)
-                    self.mapper.willington_editing_writes = True
             if callable(log):
                 components = (("Follow Actions", self.follow, self.mapper.willington_follow_writes),
                               ("Device Tools", self.devices, self.mapper.willington_device_writes),
-                              ("Rack Zones", self.zones, self.mapper.willington_zone_writes),
-                              ("Native Editing", self.editing, self.mapper.willington_editing_writes))
+                              ("Rack Zones", self.zones, self.mapper.willington_zone_writes))
                 active = [name for name, provider, _ in components if provider is not None]
                 writable = [name for name, _, enabled in components if enabled]
                 log("Willington extensions initialized; active providers: " + (", ".join(active) or "none")
@@ -428,7 +411,6 @@ class _WillingtonProvider:
         self.mapper.willington_follow_writes = False
         self.mapper.willington_device_writes = False
         self.mapper.willington_zone_writes = False
-        self.mapper.willington_editing_writes = False
         try:
             if self.follow is not None: self.follow.willington_enable_writes(False)
         finally:
@@ -438,12 +420,9 @@ class _WillingtonProvider:
                 try:
                     if self.zones is not None: self.zones.uninstall()
                 finally:
-                    try:
-                        if self.editing is not None: self.editing.uninstall()
-                    finally:
-                        if self.live is not None and getattr(self.live, "_kumi_willington_owner", None) is self:
-                            self.live._kumi_willington_owner = None
-                        self.follow = self.devices = self.zones = self.editing = None
+                    if self.live is not None and getattr(self.live, "_kumi_willington_owner", None) is self:
+                        self.live._kumi_willington_owner = None
+                    self.follow = self.devices = self.zones = None
 
 
 _WILLINGTON_CHECK_SECONDS = 1.0

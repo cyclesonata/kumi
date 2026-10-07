@@ -286,19 +286,16 @@ class _ProviderFixture:
             willington_enable_writes=lambda value: self.calls.append(('follow', value)))
         self.devices = self.patchable('devices', self.device_class, ('willington_test_method',))
         self.zones = self.patchable('zones', self.chain_class, ('get_zone', 'set_zone'))
-        self.editing = self.patchable('editing', self.device_class, ('native_editing_test',))
         bindings = types.ModuleType('WillingtonBindings')
         bindings.__file__ = str(root / 'bindings.py'); bindings.install = self.install_follow
         devices_api = types.ModuleType('WillingtonDeviceTools.api'); devices_api.install = self.install_devices
         zones_api = types.ModuleType('WillingtonRackZones.api'); zones_api.install = self.install_zones
-        editing_api = types.ModuleType('WillingtonEditing.api'); editing_api.install = self.install_editing
         runtime = types.ModuleType('WillingtonRuntime'); runtime.ComponentUnavailableError = ComponentUnavailableError
         self.modules = {'Live': self.live, 'WillingtonBindings': bindings,
             'WillingtonDeviceTools': types.ModuleType('WillingtonDeviceTools'),
             'WillingtonDeviceTools.api': devices_api,
             'WillingtonRackZones': types.ModuleType('WillingtonRackZones'),
-            'WillingtonRackZones.api': zones_api, 'WillingtonRuntime': runtime,
-            'WillingtonEditing': types.ModuleType('WillingtonEditing'), 'WillingtonEditing.api': editing_api}
+            'WillingtonRackZones.api': zones_api, 'WillingtonRuntime': runtime}
         self.write_receipt()
 
     def write_config(self, config):
@@ -334,13 +331,12 @@ class _ProviderFixture:
             method = lambda *args: None
             setattr(native.fixture_class, name, method)
             native.patches.append((native.fixture_class, name, method))
-        attribute = '_willington_' + {'devices': 'device', 'zones': 'zone', 'editing': 'editing'}[label] + '_libraries'
+        attribute = '_willington_' + ('device' if label == 'devices' else 'zone') + '_libraries'
         setattr(self.live, attribute, [native])
         return native
 
     def install_devices(self): return self.install_patches('devices', self.devices)
     def install_zones(self): return self.install_patches('zones', self.zones)
-    def install_editing(self): return self.install_patches('editing', self.editing)
 
     def fail_install(self, component, error):
         position = self.components.index(component)
@@ -372,93 +368,11 @@ def _provider_fixture(config=None, modules=None):
 
 
 class ProviderTests(unittest.TestCase):
-    def test_native_editing_status_does_not_advertise_device_transactions(self):
-        mapper = LiveObjectMapper(FakeSong())
-        self.assertEqual(mapper.status()['nativeEditingKinds'], [])
-        mapper.willington_editing_writes = True
-        status = mapper.status()
-        self.assertEqual(status['nativeEditingKinds'], ['group-tracks', 'arrangement-automation', 'scene-follow', 'global-follow', 'note-expression'])
-        self.assertEqual(status['willingtonKinds'], [])
-        self.assertFalse(mapper._operation_supported('willington.device.set'))
-
     def assert_closed(self, fixture, provider):
-        for name in ('willington_follow_writes', 'willington_device_writes', 'willington_zone_writes', 'willington_editing_writes'):
+        for name in ('willington_follow_writes', 'willington_device_writes', 'willington_zone_writes'):
             self.assertFalse(getattr(fixture.mapper, name))
-        for name in ('follow', 'devices', 'zones', 'editing'): self.assertIsNone(getattr(provider, name))
+        for name in ('follow', 'devices', 'zones'): self.assertIsNone(getattr(provider, name))
         self.assertIsNone(getattr(fixture.live, '_kumi_willington_owner', None))
-
-    def test_editing_lifecycle_opt_in_and_reconnect(self):
-        for writes in (False, True):
-            with self.subTest(writes=writes), _provider_fixture({'editing': True, 'enableWrites': writes}) as fixture:
-                for _ in range(2):
-                    provider = fixture.construct()
-                    self.assertIs(provider.editing, fixture.editing)
-                    self.assertEqual(fixture.mapper.willington_editing_writes, writes)
-                    self.assertTrue(fixture.editing.patches)
-                    provider.close()
-                    self.assertFalse(fixture.editing.patches)
-                    self.assert_closed(fixture, provider)
-        with _provider_fixture({'enableWrites': True}) as fixture:
-            fixture.construct()
-            self.assertNotIn(('editing', 'install'), fixture.calls)
-            self.assertFalse(fixture.mapper.willington_editing_writes)
-
-    def test_editing_unavailable_or_absent_preserves_other_components(self):
-        for failure in (ComponentUnavailableError('candidate is not validated'),
-                        ModuleNotFoundError('not installed', name='WillingtonEditing')):
-            with self.subTest(failure=failure), _provider_fixture({'editing': True, 'deviceTools': True, 'enableWrites': True}) as fixture:
-                def refuse(): raise failure
-                fixture.modules['WillingtonEditing.api'].install = refuse
-                provider = fixture.construct()
-                self.assertTrue(fixture.mapper.willington_device_writes)
-                self.assertFalse(fixture.mapper.willington_editing_writes)
-                self.assertIsNone(provider.editing)
-
-    def test_editing_integrity_and_enable_failures_clear_capabilities(self):
-        for phase in ('install', 'enable'):
-            with self.subTest(phase=phase), _provider_fixture({'editing': True, 'deviceTools': True, 'enableWrites': True}) as fixture:
-                def fail(*args): raise RuntimeError('integrity failure')
-                if phase == 'install': fixture.modules['WillingtonEditing.api'].install = fail
-                else: fixture.editing.enable = fail
-                provider = fixture.construct()
-                self.assert_closed(fixture, provider)
-                self.assertFalse(fixture.editing.patches)
-                self.assertFalse(fixture.devices.patches)
-
-    def test_editing_missing_dependency_does_not_masquerade_as_absent_package(self):
-        with _provider_fixture({'editing': True, 'deviceTools': True, 'enableWrites': True}) as fixture:
-            def fail(): raise ModuleNotFoundError('missing dependency', name='broken_dependency')
-            fixture.modules['WillingtonEditing.api'].install = fail
-            provider = fixture.construct()
-            self.assert_closed(fixture, provider)
-            self.assertTrue(any('missing dependency' in line for line in fixture.logs))
-
-    def test_standalone_editing_is_not_taken_over(self):
-        with _provider_fixture({'editing': True, 'enableWrites': True}) as fixture:
-            fixture.install_editing()
-            provider = fixture.construct()
-            self.assert_closed(fixture, provider)
-            self.assertTrue(fixture.editing.patches)
-            fixture.editing.uninstall()
-
-    def test_editing_teardown_runs_even_when_another_component_fails(self):
-        with _provider_fixture({'editing': True, 'rackZones': True, 'enableWrites': True}) as fixture:
-            provider = fixture.construct()
-            original = fixture.zones.uninstall
-            def fail():
-                original()
-                raise RuntimeError('zone teardown failed')
-            fixture.zones.uninstall = fail
-            with self.assertRaisesRegex(RuntimeError, 'zone teardown failed'): provider.close()
-            self.assert_closed(fixture, provider)
-            self.assertFalse(fixture.editing.patches)
-
-    def test_editing_opt_in_requires_a_boolean(self):
-        for value in ('true', 1, None, {}):
-            with self.subTest(value=value), _provider_fixture({'editing': value, 'enableWrites': True}) as fixture:
-                provider = fixture.construct()
-                self.assert_closed(fixture, provider)
-                self.assertEqual(fixture.calls, [])
 
     def test_absent_invalid_and_duplicate_owner_fail_closed(self):
         with _provider_fixture() as fixture:
