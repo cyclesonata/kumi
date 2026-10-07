@@ -64,12 +64,12 @@
 | --- | --- |
 | 通过 Live 的脚本保存、打开或导出工程；Collect All and Save | 改为通过 Live 自己的菜单：保存、新建工程、Collect All and Save、导出；另存为和打开工程限 Windows。已保存工程的经验证备份；把单个文件导入项目。 |
 | 导出混音或分轨（stems）；冻结和合并（flatten） | 对音频轨道自身片段的离线渲染；通过 Resampling 录音 |
-| 创建编组轨道 | — |
-| 编辑编曲视图中的自动化 | 读取它；Session 片段中的包络 |
+| 创建编组轨道 | [通过 Willington 原生编辑](WILLINGTON_INTEGRATION.md#原生编辑及其自测)，要求自测通过；仅支持 b5 macOS ARM64 |
+| 编辑编曲视图中的自动化 | [通过 Willington 原生编辑](WILLINGTON_INTEGRATION.md#原生编辑及其自测)，要求自测通过；仅支持 b5 macOS ARM64 |
 | 把宏或调制器映射到参数 | Wavetable 和 Drift 的调制矩阵；通过 Willington 进行宏和调制器映射 |
-| Follow Actions | 通过 Willington |
+| Follow Actions | 通过 Willington 提供 Session 片段 Follow Actions；场景/全局操作：[通过 Willington 原生编辑](WILLINGTON_INTEGRATION.md#原生编辑及其自测)，要求自测通过；仅支持 b5 macOS ARM64 |
 | comp 编辑，删除或试听 take lane | 读取 lane 和 comp、重命名 lane、把音频放进 lane |
-| 逐音符 MPE（压力、滑音、逐音符调音） | 概率、力度偏差、释放力度、静音 |
+| 逐音符 MPE（压力、滑音、逐音符调音） | [通过 Willington 原生编辑](WILLINGTON_INTEGRATION.md#原生编辑及其自测)，要求自测通过；仅支持 b5 macOS ARM64 |
 | 插件自身的窗口或隐藏状态 | 它的参数、预设，以及打开或关闭它的窗口 |
 | 轨道播放时的音频 | 通过 Resampling 捕获；离线渲染 |
 | Browser 相似度搜索、Packs、Cloud | Live 的库数据库：标签、类型、插件列表 |

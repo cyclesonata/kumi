@@ -157,3 +157,51 @@ async fn without_willington_in_the_bridge_there_is_nothing_to_switch() {
     assert!((control.set)(true).await.unwrap_err().contains("doesn't carry Willington"));
     assert!(!folder.path().join("AbletonMcpBridge/willington.json").exists());
 }
+
+#[test]
+fn native_editing_requires_an_owner_only_receipt_for_the_loaded_package() {
+    use ableton_mcp_server::delivery::write_owner_file;
+    use kumi::willington::TURNED_ON_WITH_EDITING;
+    let folder = tempfile::tempdir().unwrap();
+    let scripts = folder.path();
+    put(&scripts.join("AbletonMcpBridge/__init__.py"), "");
+    put(&scripts.join("AbletonMcpBridge/willington/WillingtonRuntime/__init__.py"), "");
+    let editing = scripts.join("AbletonMcpBridge/willington/WillingtonEditing");
+    put(&editing.join("build/profile/libediting.dylib"), "actual library");
+    let receipt = editing.join("self-test.json");
+    let digest = hex::encode(Sha256::digest(b"actual library"));
+    let control = Willington::in_remote_scripts(scripts).unwrap();
+    for (component, status, hash) in
+        [("Other", "passed", digest.as_str()), ("WillingtonEditing", "failed", digest.as_str()), ("WillingtonEditing", "passed", "stale")]
+    {
+        let data = json!({"component":component,"status":status,"library_sha256":hash}).to_string();
+        write_owner_file(&receipt, scripts, data.as_bytes()).unwrap();
+        assert_eq!(control.set(true).unwrap(), TURNED_ON);
+    }
+    let data = json!({"component":"WillingtonEditing","status":"passed","library_sha256":digest}).to_string();
+    write_owner_file(&receipt, scripts, data.as_bytes()).unwrap();
+    assert_eq!(control.set(true).unwrap(), TURNED_ON_WITH_EDITING);
+    let switch = scripts.join("AbletonMcpBridge/willington.json");
+    assert_eq!(serde_json::from_slice::<Value>(&fs::read(&switch).unwrap()).unwrap()["editing"], true);
+    put(&switch, r#"{"enableWrites":true,"editing":true}"#);
+    assert!(control.on(), "editing alone counts as on");
+    assert_eq!(control.set(false).unwrap(), TURNED_OFF);
+    // A manually installed package takes precedence over the bundled receipt.
+    put(&scripts.join("WillingtonEditing/__init__.py"), "");
+    assert_eq!(control.set(true).unwrap(), TURNED_ON);
+    fs::remove_dir_all(scripts.join("WillingtonEditing")).unwrap();
+    write_owner_file(&receipt, scripts, " ".repeat(8193).as_bytes()).unwrap();
+    assert_eq!(control.set(true).unwrap(), TURNED_ON);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        write_owner_file(&receipt, scripts, data.as_bytes()).unwrap();
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(control.set(true).unwrap(), TURNED_ON);
+        fs::remove_file(&receipt).unwrap();
+        let target = editing.join("other.json");
+        write_owner_file(&target, scripts, data.as_bytes()).unwrap();
+        symlink(&target, &receipt).unwrap();
+        assert_eq!(control.set(true).unwrap(), TURNED_ON);
+    }
+}

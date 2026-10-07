@@ -1,0 +1,341 @@
+{
+  "receipt": {
+    "component": "WillingtonEditing",
+    "status": "passed",
+    "library_sha256": "21c4799d9de5f07ade1869da067896b6067a8258dd06ea1f00c9d82265c7fe01",
+    "checks": [
+      {
+        "kind": "global-follow",
+        "edit": {
+          "enabled": false
+        },
+        "observed": false,
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "chance_a": 35,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 35,
+          "chance_b": 65,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 2,
+          "time": 0.3333333333333333
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "note-expression",
+        "edit": {
+          "exists": true,
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ]
+        },
+        "observed": {
+          "dimension": "pressure",
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ],
+          "exists": true,
+          "time_origin": "note_start",
+          "unit": "midi"
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "arrangement-automation",
+        "edit": {
+          "action": "insert",
+          "event": [
+            60,
+            0.55,
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "observed": {
+          "snapshotCaptured": true
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": false
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": false,
+          "loop_count": 1,
+          "time": 4
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "edit": {
+          "linked": true,
+          "loop_count": 3
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 3,
+          "time": 4
+        },
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "group-tracks",
+        "applied": true,
+        "topologyRestored": true,
+        "cleanup": "explicit native ungroup; no Kumi history inverse"
+      }
+    ]
+  },
+  "library": ".runtime/kumi-editing-provider-fixture/AbletonMcpBridge",
+  "provider": "PR 249 staged installed layout with official main bundle, not a shipped Kumi release",
+  "noReceiptRefused": true,
+  "validReceiptEnabled": true,
+  "staleReceiptRefused": true,
+  "nativeEditingKinds": [
+    "group-tracks",
+    "arrangement-automation",
+    "scene-follow",
+    "global-follow",
+    "note-expression"
+  ],
+  "logs": [
+    "Willington native editing writes unavailable: owner-only native editing self-test receipt is required",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: none",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: Native Editing",
+    "Willington native editing writes unavailable: current-library native editing self-test is required",
+    "Willington extensions initialized; active providers: Native Editing; writes enabled: none"
+  ],
+  "liveVersion": "12.4.15b5",
+  "platform": "macOS ARM64",
+  "willingtonCommit": "cf021fa151bda8e97995bd0042d0f23881d8fd27",
+  "bundleRun": "https://github.com/xonedsp/willington/actions/runs/37556816568",
+  "bundleSha256": "71bacc334e3bfc1fc786c537cb17e7516ca891765645ee54d9d0e1b6f4b8bbe9",
+  "fixture": "Willington Native Editing",
+  "scope": "Actual Live with the official library from the prepared verified vendor import, in a staged installed layout. Includes production provider receipt checks and Kumi make_changes -> public MCP host -> authenticated Remote Script authority/idempotency -> HISTORY undo. No model inference, chat UI or released-installer claim. The owner-only vendor PR is still required.",
+  "writesEnabledAfterCleanup": false,
+  "transportStoppedAfterCleanup": true,
+  "kumiToolPath": {
+    "scope": "Kumi make_changes -> public MCP host -> authenticated Remote Script -> official native library; HISTORY undo for reversible kinds",
+    "checks": [
+      {
+        "tool": "set_global_follow_actions",
+        "edit": {
+          "enabled": false
+        },
+        "observed": false,
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "set_scene_follow_actions",
+        "edit": {
+          "chance_a": 35,
+          "time": 0.3333333333333333
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 35,
+          "chance_b": 65,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 1,
+          "time": 0.3333333333333333
+        },
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "set_note_expression",
+        "edit": {
+          "exists": true,
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ]
+        },
+        "observed": {
+          "dimension": "pressure",
+          "events": [
+            [
+              0.1,
+              47.25,
+              0.2,
+              0.3,
+              0.7,
+              0.8
+            ],
+            [
+              1.1,
+              92.125,
+              0.5,
+              0.5,
+              0.5,
+              0.5
+            ]
+          ],
+          "exists": true,
+          "time_origin": "note_start",
+          "unit": "midi"
+        },
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "edit_arrangement_automation",
+        "edit": {
+          "action": "insert",
+          "event": [
+            60,
+            0.55,
+            0.5,
+            0.5,
+            0.5,
+            0.5
+          ]
+        },
+        "observed": {
+          "snapshotCaptured": true
+        },
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "set_scene_follow_actions",
+        "edit": {
+          "linked": false
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": false,
+          "loop_count": 1,
+          "time": 4
+        },
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "set_scene_follow_actions",
+        "edit": {
+          "linked": true,
+          "loop_count": 3
+        },
+        "observed": {
+          "action_a": 9,
+          "action_b": 0,
+          "chance_a": 100,
+          "chance_b": 0,
+          "enabled": false,
+          "jump_a": 2,
+          "jump_b": 0,
+          "linked": true,
+          "loop_count": 3,
+          "time": 4
+        },
+        "historyUndoRestoredExact": true
+      },
+      {
+        "tool": "group_tracks",
+        "applied": true,
+        "historyUndoRefused": true,
+        "cleanup": "operator fixture native ungroup"
+      }
+    ],
+    "cleanup": {
+      "restoredExact": true,
+      "transportStopped": true
+    },
+    "harness": [
+      "crates/kumi/tests/native_editing_live.rs",
+      "remote-script/native_editing_live_fixture.py"
+    ],
+    "validatedKumiCommit": "6caab10154bfa2f6cd854397df953ca1846485ee",
+    "validatedMainCommit": "2b901dab0158e675fc3367c1ca13fc9d41465a3c",
+    "validatedAfterPR": 247,
+    "validatedDate": "2026-10-07"
+  }
+}

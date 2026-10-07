@@ -167,3 +167,37 @@ fn all_profiles_filter_negotiated_surface_and_performance_retains_recovery() {
     }
     assert!(read.len() < edit.len() && read.len() < performance.len() && performance.len() < full.len() && edit.len() < full.len());
 }
+
+#[test]
+fn native_editing_requires_negotiated_kinds_operations_and_edit_policy() {
+    let mut status: LiveStatus = serde_json::from_value(oracle()["statuses"][1].clone()).unwrap();
+    status.connected = true;
+    status.capabilities.push(ableton_mcp_server::live::LiveCapability::SessionRead);
+    status.operations.get_or_insert_default().extend(["willington.editing.read".into(), "willington.editing.set".into()]);
+    let native = |status: &LiveStatus, profile: &str| {
+        visible_tool_descriptors(status, &ToolPolicySpec { profile: profile.into(), ..Default::default() })
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.name.starts_with("live_native_editing_"))
+            .collect::<Vec<_>>()
+    };
+    assert!(native(&status, "full").is_empty());
+    status.extra.insert("nativeEditingKinds".into(), json!([]));
+    assert!(native(&status, "full").is_empty());
+    status.extra.insert("nativeEditingKinds".into(), json!(["scene-follow", "note-expression"]));
+    for profile in ["full", "edit-no-audio"] {
+        let descriptors = native(&status, profile);
+        assert_eq!(
+            descriptors.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["live_native_editing_preview", "live_native_editing_apply"]
+        );
+        assert_eq!(descriptors[0].input_schema["properties"]["kind"]["enum"], json!(["scene-follow", "note-expression"]));
+    }
+    for profile in ["read-only", "performance"] {
+        assert!(native(&status, profile).is_empty());
+    }
+    status.operations.as_mut().unwrap().retain(|op| op != "willington.editing.set");
+    assert!(native(&status, "full").is_empty());
+    status.connected = false;
+    assert!(native(&status, "full").is_empty());
+}

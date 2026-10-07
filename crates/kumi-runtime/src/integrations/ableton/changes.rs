@@ -312,6 +312,16 @@ async fn resolve_parameters(given: &JsonObject, context: &dyn ChangeContext) -> 
     displayed(input, context).await
 }
 impl ChangeKind {
+    fn native_kind(&self) -> Option<&'static str> {
+        Some(match self.tool.as_str() {
+            "group_tracks" => "group-tracks",
+            "set_scene_follow_actions" => "scene-follow",
+            "set_global_follow_actions" => "global-follow",
+            "set_note_expression" => "note-expression",
+            "edit_arrangement_automation" => "arrangement-automation",
+            _ => return None,
+        })
+    }
     pub fn summarize(
         &self,
         preview: &JsonObject,
@@ -327,6 +337,14 @@ impl ChangeKind {
         self.methods.iter().any(|m| m == method)
     }
     pub async fn prepare(&self, input: &JsonObject, context: &dyn ChangeContext) -> Result<Result<JsonObject, String>, RuntimeError> {
+        if let Some(kind) = self.native_kind() {
+            let mut out = input.clone();
+            out.insert("kind".into(), json!(kind));
+            if kind == "group-tracks" {
+                out.insert("edit".into(), json!({"action":"group"}));
+            }
+            return Ok(Ok(out));
+        }
         let out = match self.tool.as_str() {
             "set_device_parameter" | "set_device_parameters" => return resolve_parameters(input, context).await,
             "load_sample" | "load_sample_to_pad" => {
@@ -544,7 +562,19 @@ pub struct Produced {
 impl ChangeKind {
     pub fn schema(&self, schema: &JsonObject) -> JsonObject {
         let mut schema = Value::Object(schema.clone());
-        if self.tool == "add_tracks_and_scenes" {
+        if let Some(kind) = self.native_kind() {
+            let fields: &[&str] = match kind {
+                "group-tracks" => &["trackRefs"],
+                "global-follow" => &["edit"],
+                "note-expression" => &["ref", "noteId", "dimension", "edit"],
+                "arrangement-automation" => &["ref", "targetRef", "edit"],
+                _ => &["ref", "edit"],
+            };
+            if let Some(properties) = schema["properties"].as_object_mut() {
+                properties.retain(|key, _| fields.contains(&key.as_str()));
+            }
+            schema["required"] = json!(fields);
+        } else if self.tool == "add_tracks_and_scenes" {
             for list in ["tracks", "scenes"] {
                 if let Some(index) = schema
                     .get_mut("properties")
@@ -606,7 +636,7 @@ impl ChangeKind {
     }
     pub fn produces(&self, applied: &JsonObject) -> Option<Produced> {
         let (reference, kind) = match self.tool.as_str() {
-            "add_tracks_and_scenes" => (
+            "add_tracks_and_scenes" | "group_tracks" => (
                 array(applied.get("created"))
                     .iter()
                     .find(|v| v.get("kind").and_then(Value::as_str) == Some("track") && v.get("ref").is_some_and(Value::is_string))
@@ -694,6 +724,9 @@ impl ChangeKind {
     /// Why Kumi can't take back part of an applied change, from its preview: an Arrangement move or new clip that
     /// replaced what was in its place.
     pub fn replaced(&self, preview: &JsonObject) -> Option<String> {
+        if self.tool == "group_tracks" && preview.get("undoable") == Some(&json!(false)) {
+            return Some("Group creation has no Kumi history inverse; Live's own undo can take it back if appropriate.".into());
+        }
         if self.tool == "add_arrangement_clip" && preview.get("replacesUnknown") == Some(&json!(true)) {
             return Some(
                 "Kumi couldn't tell what the new clip cut where it landed, so it leaves taking it back to Live's own undo.".into(),

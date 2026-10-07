@@ -28,6 +28,8 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 
 エディション：ブリッジは接続先の Live が提供するものを検出するので、エディションにないデバイスやコンテンツ（Standard と Intro は少なめです）は推測で扱われず、使えないままになります。Max for Live デバイスを作るには Max for Live（Suite、またはアドオンを追加した Standard）が必要です。Willington（そのファイルを収めたリリースからは Kumi のブリッジに入っていて、それまでは自分でインストールします。`/willington` でオンにするまではオフ）には、macOS ARM64 の Live 12.4.15b4 と b5 用（ラックのチェーンのゾーンは b5 のみ）と、Windows x64 の Live 12.4.15b5 用のバインディングがあります。[Willington](WILLINGTON_INTEGRATION.md)を参照してください。
 
+ネイティブ編集（グループ、Arrangement オートメーション、シーン/全体の Follow Actions、ノートごとの MPE）には、インストール済みの検証済み `WillingtonEditing`、実際のライブラリに一致するセルフテストの合格、明示的な有効化が必要です。Live 12.4.15b5 macOS ARM64 のみで、b4、Intel macOS、Windows は対象外です。[セルフテスト手順](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。
+
 ## Windows
 
 テスト済みの項目：CI 上の Windows PowerShell 5.1 での、インストーラー、`kumi update`、`kumi bridge`、`kumi uninstall`。そして Live 12.4.15 beta を入れた Windows 10 マシンでの、ユーザーフォルダーの外に移動した User Library への `kumi bridge`、Live での Remote Script の読み込み、Kumi の接続。CI の Windows ランナーは標準のフォルダー構成の管理者アカウントなので、一般のアカウントや移動したライブラリでしか起きない問題は確認できません。

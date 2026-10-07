@@ -12,7 +12,7 @@ use std::{cell::RefCell, rc::Rc};
 #[test]
 fn authoritative_reference_lifetimes_short_names_and_cursor_queries_match_source() {
     let data: Value = serde_json::from_str(include_str!("support/references-oracle.json")).unwrap();
-    assert_eq!(json!(*BRIDGE_TOOLS), data["bridgeTools"]);
+    assert_eq!(json!(&*BRIDGE_TOOLS), data["bridgeTools"]);
     let mut book = References::default();
     for case in data["cases"].as_array().unwrap() {
         let args = &case["args"];

@@ -181,8 +181,12 @@ async fn a_repair_that_fails_before_moving_anything_aside_leaves_the_remote_scri
 #[tokio::test(flavor = "current_thread")]
 async fn repair_brings_the_producers_willington_files_into_the_reinstalled_remote_script() {
     let bindings = "remote-script/AbletonMcpBridge/willington/WillingtonBindings/__init__.py";
-    let f = Fixture::with_files(&[(bindings, b"def install(): pass\n")]);
+    let editing = "remote-script/AbletonMcpBridge/willington/WillingtonEditing/__init__.py";
+    let f = Fixture::with_files(&[(bindings, b"def install(): pass\n"), (editing, b"def install(): pass\n")]);
     run_lifecycle(&f.options).await.unwrap();
+    let editing_receipt = f.remote().join(WILLINGTON_EDITING_RECEIPT);
+    let editing_evidence = br#"{"status":"passed","library_sha256":"editing"}"#;
+    write_owner_file(&editing_receipt, &f.options.remote_scripts_directory, editing_evidence).unwrap();
     let switch = f.remote().join(WILLINGTON_CONFIG);
     let on = br#"{"version":1,"followActions":true,"deviceTools":true,"rackZones":true,"enableWrites":true}"#;
     write_owner_file(&switch, &f.options.remote_scripts_directory, on).unwrap();
@@ -196,6 +200,8 @@ async fn repair_brings_the_producers_willington_files_into_the_reinstalled_remot
     assert_eq!(fs::read(&switch).unwrap(), on);
     assert_eq!(secret_permissions(&switch), SecretPermissions::OwnerOnly);
     assert_eq!(fs::read(&receipt).unwrap(), br#"{"status": "passed", "library_sha256": "0"}"#);
+    assert_eq!(fs::read(&editing_receipt).unwrap(), editing_evidence);
+    assert_eq!(secret_permissions(&editing_receipt), SecretPermissions::OwnerOnly);
     assert_eq!(integrity(&f).await, true);
 }
 #[tokio::test(flavor = "current_thread")]
@@ -253,6 +259,27 @@ async fn willingtons_self_test_receipt_is_not_drift_and_upgrades_keep_it_but_oth
     // The receipt for the bridge's copy of Willington, put beside it after the install, isn't drift.
     let receipt = f.remote().join(WILLINGTON_RECEIPT);
     fs::write(&receipt, br#"{"status": "passed", "library_sha256": "0"}"#).unwrap();
+    assert_eq!(integrity(&f).await, true);
+    // An upgrade keeps it with the new generation's copy.
+    run_lifecycle(&f.upgrade("1.1.0")).await.unwrap();
+    assert_eq!(fs::read(&receipt).unwrap(), br#"{"status": "passed", "library_sha256": "0"}"#);
+    assert_eq!(integrity(&f).await, true);
+    // Only these names are the producer's: any other new file in the bridge's copy is drift.
+    let other = receipt.with_file_name("status.json");
+    fs::write(&other, b"{}").unwrap();
+    assert_eq!(integrity(&f).await, false);
+    fs::remove_file(&other).unwrap();
+    fs::remove_file(&receipt).unwrap();
+    assert_eq!(integrity(&f).await, true);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn native_editings_self_test_receipt_is_not_drift_and_upgrades_keep_it_but_other_new_files_are() {
+    let bindings = "remote-script/AbletonMcpBridge/willington/WillingtonEditing/__init__.py";
+    let f = Fixture::with_files(&[(bindings, b"def install(): pass\n")]);
+    run_lifecycle(&f.options).await.unwrap();
+    // The receipt for the bridge's copy of Willington, put beside it after the install, isn't drift.
+    let receipt = f.remote().join(WILLINGTON_EDITING_RECEIPT);
+    write_owner_file(&receipt, receipt.parent().unwrap(), br#"{"status": "passed", "library_sha256": "0"}"#).unwrap();
     assert_eq!(integrity(&f).await, true);
     // An upgrade keeps it with the new generation's copy.
     run_lifecycle(&f.upgrade("1.1.0")).await.unwrap();

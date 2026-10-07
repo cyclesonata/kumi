@@ -333,3 +333,92 @@ async fn replay() {
         integration.close().await.unwrap();
     }
 }
+
+struct NativeGroupFixture {
+    calls: RefCell<Vec<String>>,
+}
+#[async_trait(?Send)]
+impl McpEndpoint for NativeGroupFixture {
+    fn pid(&self) -> Option<u32> {
+        None
+    }
+    fn server_info(&self) -> Option<Implementation> {
+        Some(serde_json::from_value(json!({"name":"fixture","version":"1.0.87"})).unwrap())
+    }
+    async fn list(&self, _: Option<&str>, _: Signal) -> Result<ListToolsResult, RuntimeError> {
+        Ok(serde_json::from_value(json!({"tools":(["live_status","live_native_editing_preview","live_native_editing_apply","live_mixer_preview","live_mixer_apply"].iter().map(|name|json!({"name":name,"inputSchema":{"type":"object"}})).collect::<Vec<_>>())})).unwrap())
+    }
+    async fn call(&self, name: &str, args: JsonObject, _: Signal) -> Result<CallToolResult, RuntimeError> {
+        self.calls.borrow_mut().push(name.into());
+        let body = match name {
+            "live_status" => json!({"connected":true,"adapter":"real-live","epoch":7}),
+            "live_native_editing_preview" => {
+                assert_eq!(args["kind"], "group-tracks");
+                assert_eq!(args["edit"], json!({"action":"group"}));
+                json!({"transactionId":"group1","epoch":7,"confirmation":"apply","undoable":false,"proposed":{"action":"group"}})
+            }
+            "live_native_editing_apply" => json!({"state":"applied","undoable":false,"created":[{"kind":"track","ref":"7:track:0"}]}),
+            _ => panic!("old reference must be refused before dispatch: {name}"),
+        };
+        Ok(serde_json::from_value(json!({"content":[{"type":"text","text":body.to_string()}],"structuredContent":body})).unwrap())
+    }
+    fn on_catalog_changed(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn on_disconnect(&self, _: Rc<dyn Fn()>) -> Box<dyn Fn()> {
+        Box::new(|| {})
+    }
+    fn stderr_status(&self) -> StderrStatus {
+        StderrStatus { bytes: 0, truncated: false }
+    }
+    async fn close(&self) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn native_group_make_changes_records_history_and_retires_shifted_track_names() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let endpoint = Rc::new(NativeGroupFixture { calls: RefCell::new(vec![]) });
+            let out = endpoint.clone();
+            let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+            options.connect = Some(Rc::new(move |_| {
+                let endpoint: Rc<dyn McpEndpoint> = out.clone();
+                async move { Ok(endpoint) }.boxed_local()
+            }));
+            let integration = Ableton::new(options);
+            let connection = integration.connection.clone();
+            connection.start(Signal::new()).await.unwrap();
+            connection.tools().unwrap().refresh(Signal::new()).await.unwrap();
+            connection.available.set(true);
+            connection.epoch.set(Some(7.));
+            let old = {
+                let mut book = connection.references.borrow_mut();
+                for reference in ["7:track:0", "7:track:1"] {
+                    book.refs.insert(reference.into(), "track".into());
+                }
+                book.short_ref("7:track:1")
+            };
+            let result = integration
+                .mutations
+                .make_changes(
+                    json!({"steps":[{"tool":"group_tracks","input":{"trackRefs":["7:track:0","7:track:1"]}}]}).as_object().unwrap().clone(),
+                    Signal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(!result.is_error, "{}", result.text);
+            assert_eq!(integration.history.entries.borrow().len(), 1);
+            let entry = integration.history.entries.borrow().values().next().unwrap().borrow().clone();
+            assert_eq!(entry.record.title, "Grouped 2 tracks");
+            assert!(!connection.references.borrow().refs.contains_key("7:track:1"));
+            let mixer = CHANGES.iter().find(|k| k.tool == "set_mixer").unwrap();
+            let refused = integration
+                .mutations
+                .change(mixer, json!({"trackRef":old,"volume":0.7}).as_object().unwrap().clone(), Signal::new(), true)
+                .await;
+            assert!(refused.is_error, "{}", refused.text);
+            assert!(!endpoint.calls.borrow().iter().any(|call| call == "live_mixer_preview"));
+        })
+        .await;
+}

@@ -3,7 +3,9 @@
 //! Remote Script, which the bridge reads again within a second of it changing, Live running.
 
 use crate::config::remote_scripts_dir;
-use ableton_mcp_server::delivery::{write_owner_file, REMOTE_SCRIPT_PACKAGE, WILLINGTON_CONFIG, WILLINGTON_FOLDER};
+use ableton_mcp_server::delivery::{
+    secret_permissions, write_owner_file, SecretPermissions, REMOTE_SCRIPT_PACKAGE, WILLINGTON_CONFIG, WILLINGTON_FOLDER,
+};
 use futures::future::{FutureExt, LocalBoxFuture};
 use kumi_common::time::now_ms_f64;
 use kumi_runtime::{integrations::ableton::willington::WillingtonSwitch, system::Env};
@@ -20,6 +22,8 @@ use std::{
 pub const OFF_AT_START: &str = "Willington bindings are OFF currently, type /willington to toggle them on";
 pub const TURNED_ON: &str = "Willington bindings are ON: Kumi can map rack macros with their ranges, name macros and variations, and set rack chain zones, on the Live versions Willington supports. /willington again turns them off.";
 pub const TURNED_ON_WITH_FOLLOW: &str = "Willington bindings are ON: Kumi can map rack macros with their ranges, name macros and variations, set rack chain zones and set Session clips' Follow Actions, on the Live versions Willington supports. /willington again turns them off.";
+pub const TURNED_ON_WITH_EDITING: &str = "Willington bindings are ON: rack bindings and native editing are requested on supported Live builds. Native editing includes groups, Arrangement automation, scene/global Follow Actions and per-note expression; the bridge verifies the exact-library receipt before exposing edits. /willington again turns them off.";
+pub const TURNED_ON_WITH_FOLLOW_AND_EDITING: &str = "Willington bindings are ON: rack bindings, Session clip Follow Actions and native editing are requested on supported Live builds. The bridge verifies each exact-library receipt before exposing edits. /willington again turns them off.";
 pub const TURNED_OFF: &str = "Willington bindings are OFF. /willington turns them on again.";
 /// Live can't unload Follow Actions' bindings once it has them.
 pub const TURNED_OFF_FOLLOW_STAYS: &str = "Willington bindings are OFF. Follow Actions' bindings, once Live has loaded them, stay until it restarts, with their edits off. /willington turns them on again.";
@@ -52,7 +56,7 @@ impl Willington {
     /// On while the switch asks for edits from at least one binding; anything else, a missing switch too, is off.
     pub fn on(&self) -> bool {
         read_json(&self.switch_file()).is_some_and(|value| {
-            value["enableWrites"] == true && ["followActions", "deviceTools", "rackZones"].iter().any(|key| value[*key] == true)
+            value["enableWrites"] == true && ["followActions", "deviceTools", "rackZones", "editing"].iter().any(|key| value[*key] == true)
         })
     }
     /// The switch as the model is told of it: turned on moments ago, the bindings may not be loaded yet.
@@ -94,6 +98,27 @@ impl Willington {
                     .any(|library| std::fs::read(library).is_ok_and(|bytes| hex::encode(Sha256::digest(bytes)) == digest))
             })
     }
+    /// The native provider repeats this check against the library selected inside Live.
+    /// Leave the new config key absent without evidence, retaining older bridge compatibility.
+    fn editing_receipt(&self) -> bool {
+        let beside = self.scripts().join("WillingtonEditing");
+        let bindings =
+            if beside.join("__init__.py").is_file() { beside } else { self.bridge.join(WILLINGTON_FOLDER).join("WillingtonEditing") };
+        let path = bindings.join("self-test.json");
+        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() <= 8192)
+            || secret_permissions(&path) != SecretPermissions::OwnerOnly
+        {
+            return false;
+        }
+        let Some(receipt) = read_json(&path) else { return false };
+        receipt["component"] == "WillingtonEditing"
+            && receipt["status"] == "passed"
+            && receipt["library_sha256"].as_str().is_some_and(|digest| {
+                libraries(&bindings, 3)
+                    .iter()
+                    .any(|library| std::fs::read(library).is_ok_and(|bytes| hex::encode(Sha256::digest(bytes)) == digest))
+            })
+    }
     /// On writes the switch, owner-only (the bridge reads no other kind); off removes it. Follow Actions come
     /// on only with a self-test receipt that can turn their edits on, since Live can't unload their bindings.
     /// Done, it says what to tell the producer.
@@ -101,12 +126,19 @@ impl Willington {
         let switch = self.switch_file();
         if on {
             let follow = self.follow_receipt();
+            let editing = self.editing_receipt();
+            let editing_field = if editing { ", \"editing\": true" } else { "" };
             let bytes = format!(
-                "{{\"version\": 1, \"followActions\": {follow}, \"deviceTools\": true, \"rackZones\": true, \"enableWrites\": true}}\n"
+                "{{\"version\": 1, \"followActions\": {follow}, \"deviceTools\": true, \"rackZones\": true, \"enableWrites\": true{editing_field}}}\n"
             );
             // Staged beside the bridge, so a write cut short leaves nothing among its installed files.
             write_owner_file(&switch, self.scripts(), bytes.as_bytes()).map_err(|error| error.message().to_string())?;
-            return Ok(if follow { TURNED_ON_WITH_FOLLOW } else { TURNED_ON });
+            return Ok(match (follow, editing) {
+                (true, true) => TURNED_ON_WITH_FOLLOW_AND_EDITING,
+                (false, true) => TURNED_ON_WITH_EDITING,
+                (true, false) => TURNED_ON_WITH_FOLLOW,
+                (false, false) => TURNED_ON,
+            });
         }
         let follow = read_json(&switch).is_some_and(|value| value["followActions"] == true);
         match std::fs::remove_file(&switch) {

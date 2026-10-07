@@ -1066,6 +1066,68 @@
       "methods": [
         "summarize"
       ]
+    },
+    {
+      "tool": "group_tracks",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "structure",
+      "description": "Group contiguous top-level trackRefs with playback stopped. Earlier track references expire; discover again. This has no Kumi HISTORY inverse.",
+      "methods": [
+        "prepare",
+        "schema",
+        "summarize",
+        "produces"
+      ],
+      "restructures": true
+    },
+    {
+      "tool": "set_scene_follow_actions",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "clip",
+      "description": "Set scene Follow Actions with playback stopped: ref is a scene; edit contains enabled, linked, action_a/action_b, chance_a/chance_b, jump_a/jump_b, time in beats or loop_count. Chances sum to 100.",
+      "methods": [
+        "prepare",
+        "schema",
+        "summarize"
+      ]
+    },
+    {
+      "tool": "set_global_follow_actions",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "clip",
+      "description": "Enable or disable global Follow Actions with playback stopped: edit contains enabled.",
+      "methods": [
+        "prepare",
+        "schema",
+        "summarize"
+      ]
+    },
+    {
+      "tool": "set_note_expression",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "clip",
+      "description": "Replace one note expression lane with playback stopped: ref is a clip, noteId is a stable note ID, dimension is pitch/slide/pressure. edit contains exists and up to 4096 events [note-relative beats,value,x1,y1,x2,y2]; pitch is cents, slide/pressure MIDI 0–127. Longer existing lanes are refused to preserve restoration.",
+      "methods": [
+        "prepare",
+        "schema",
+        "summarize"
+      ]
+    },
+    {
+      "tool": "edit_arrangement_automation",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "clip",
+      "description": "Edit track-owned Arrangement automation with playback stopped: ref is the track, targetRef a continuous parameter. edit is action insert with event [Song beats,value,0.5,0.5,0.5,0.5], or action delete with start/end in Song beats. Restoration preserves the complete opaque snapshot within the current adapter session.",
+      "methods": [
+        "prepare",
+        "schema",
+        "summarize"
+      ]
     }
   ],
   "sampleInput": {
@@ -1235,7 +1297,9 @@
     "live_subscribe",
     "live_render_offline",
     "live_song_undo",
-    "live_song_redo"
+    "live_song_redo",
+    "live_native_editing_preview",
+    "live_native_editing_apply"
   ],
   "referenceFields": [
     "trackRef",

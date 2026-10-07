@@ -892,7 +892,7 @@ class ControlSurfaceTests(unittest.TestCase):
         self.assertEqual(registry["protocol"], "ableton-live/v1")
         canonical = json.dumps(registry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self.assertEqual(digest, hashlib.sha256(canonical).hexdigest())
-        self.assertEqual(digest, "48a3f3dfc08cbae1842e61163959f7c3361df2dbb43b780434a56d23b7c50d08")
+        self.assertEqual(digest, "dde0289832e75a26b909933099c9adcae4815a157e1b9835f8feb32de9ed50b5")
         self.assertIn("audio.capture.start", [item["id"] for item in registry["operations"]])
         self.assertIn("device.parameter.set", [item["id"] for item in registry["operations"]])
         ids = [item["id"] for item in registry["operations"]]

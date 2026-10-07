@@ -36,7 +36,8 @@ pub const WILLINGTON_CONFIG: &str = "willington.json";
 pub const WILLINGTON_RECEIPT: &str = "willington/WillingtonBindings/self-test.json";
 /// The producer's files in an installed Remote Script, not the release's: they come and go after an install
 /// without counting as drift, and an install carries them over.
-pub const PRODUCER_FILES: [&str; 2] = [WILLINGTON_CONFIG, WILLINGTON_RECEIPT];
+pub const WILLINGTON_EDITING_RECEIPT: &str = "willington/WillingtonEditing/self-test.json";
+pub const PRODUCER_FILES: [&str; 3] = [WILLINGTON_CONFIG, WILLINGTON_RECEIPT, WILLINGTON_EDITING_RECEIPT];
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerCommand {
     pub command: String,

@@ -37,6 +37,8 @@ for macOS ARM64 Live 12.4.15b4 and b5 (rack chain
 zones on b5 only) and Windows x64 Live 12.4.15b5; see
 [Willington](WILLINGTON_INTEGRATION.md).
 
+Native editing (groups, Arrangement automation, scene/global Follow Actions and per-note MPE) requires the installed validated `WillingtonEditing` component, a passing exact-library self-test and explicit opt-in. It supports only Live 12.4.15b5 macOS ARM64; not b4, Intel macOS or Windows. See [the self-test procedure](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
+
 ## Windows
 
 Tested: the installer, `kumi update`, `kumi bridge` and `kumi uninstall` in

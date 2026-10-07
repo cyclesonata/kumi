@@ -125,11 +125,11 @@ fn oracle() -> Value {
     serde_json::from_str(include_str!("fixtures/host-catalog-routes-oracle.json")).unwrap()
 }
 #[test]
-fn source_oracle_covers_the_complete_current_catalog() {
+fn source_oracle_covers_complete_catalog() {
     assert_eq!(
         json!(TOOL_CATALOG.iter().map(|t| &t.name).collect::<Vec<_>>()),
         oracle()["tools"],
-        "source oracle must cover the complete current catalog"
+        "source oracle must cover the complete catalog"
     );
 }
 /// The oracle's cases, every tool's, in 16 tests that nextest runs side by side.

@@ -7,6 +7,7 @@ use std::collections::HashSet;
 pub const READ_ONLY_INVOKES: &[&str] = &[
     "session.playback",
     "willington.device.read",
+    "willington.editing.read",
     "automation.envelope.read",
     "arrangement.automation.read",
     "audio.take-lane.read",

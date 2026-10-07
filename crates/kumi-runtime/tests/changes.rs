@@ -97,7 +97,10 @@ fn change_schemas_outputs_permanence_and_human_messages_match_source() {
     assert_eq!(serde_json::to_value(&*CHANGES).unwrap(), data["kinds"]);
     assert_eq!(*SAMPLE_INPUT, data["sampleInput"].as_object().unwrap().clone());
     assert_eq!(*REFERENCE_FIELDS, serde_json::from_value::<Vec<String>>(data["referenceFields"].clone()).unwrap());
-    assert_eq!(*HOST_TOOLS, serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap());
+    assert_eq!(
+        HOST_TOOLS.iter().cloned().collect::<HashSet<_>>(),
+        serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap()
+    );
     assert_eq!(*UNDO_DESCRIPTION, data["undoDescription"]);
 }
 
@@ -219,4 +222,48 @@ fn an_arrangement_copy_says_so_and_another_track_is_named() {
         "Copied a clip to bar 5 on Bass"
     );
     assert_eq!(summary(json!({"clipRef":"7:arrangement_clip:1:0","position":16})), "Moved a clip to bar 5");
+}
+
+#[test]
+fn native_editing_maps_to_guarded_tools_and_discloses_group_history_limit() {
+    let kind = CHANGES.iter().find(|kind| kind.tool == "group_tracks").unwrap();
+    assert_eq!(kind.preview, "live_native_editing_preview");
+    assert_eq!(kind.apply, "live_native_editing_apply");
+    assert!(HOST_TOOLS.contains(&kind.preview));
+    assert!(HOST_TOOLS.contains(&kind.apply));
+    assert!(kind.replaced(json!({"undoable":false}).as_object().unwrap()).unwrap().contains("no Kumi history inverse"));
+    assert!(kind.replaced(json!({"undoable":true}).as_object().unwrap()).is_none());
+}
+
+#[test]
+fn every_change_kind_has_a_history_summary() {
+    let empty = serde_json::Map::new();
+    for kind in CHANGES.iter() {
+        let summary = kind.summarize(&empty, &empty, &|_| None, None);
+        assert!(!summary.title.is_empty(), "{} needs a HISTORY title", kind.tool);
+    }
+}
+
+#[test]
+fn native_titles_use_visible_targets_and_only_changed_scene_settings() {
+    kumi_runtime::integrations::ableton::more_changes::set_meter(4.0, 4.0);
+    let scene = CHANGES.iter().find(|kind| kind.tool == "set_scene_follow_actions").unwrap();
+    let preview = json!({"prior":{"value":{"action_a":4,"chance_a":100,"chance_b":0,"loop_count":1,"time":4}},
+        "proposed":{"value":{"action_a":4,"chance_a":35,"chance_b":65,"loop_count":2,"time":0.3333333333333333}}});
+    assert_eq!(
+        scene.summarize(preview.as_object().unwrap(), json!({"ref":"7:scene:1"}).as_object().unwrap(), &|_| None, None).title,
+        "Scene 2 Follow Actions: time 0.33 beats, loop count 2, chance 35% / 65%"
+    );
+    let note = CHANGES.iter().find(|kind| kind.tool == "set_note_expression").unwrap();
+    let bass = |value: &Value| (value == "7:track:2").then(|| serde_json::from_value(json!({"name":"Bass"})).unwrap());
+    assert_eq!(
+        note.summarize(
+            json!({"prior":{"note":{"pitch":60,"start_time":4}}}).as_object().unwrap(),
+            json!({"ref":"7:clip:2:0","noteId":987,"dimension":"pressure"}).as_object().unwrap(),
+            &bass,
+            None
+        )
+        .title,
+        "Changed pressure on C3 at bar 2 in Bass"
+    );
 }

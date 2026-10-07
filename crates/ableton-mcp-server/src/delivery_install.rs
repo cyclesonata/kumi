@@ -162,13 +162,19 @@ pub fn install_remote_script(
         }
         // Willington's self-test receipt stays with the bridge's copy of Willington, unless this release ships
         // its own. The bridge checks it against the library it loads, so a receipt for an older one does nothing.
-        let receipt = carried.join(WILLINGTON_RECEIPT);
-        let staged_receipt = staged_package.join(WILLINGTON_RECEIPT);
-        if receipt.exists() && staged_receipt.parent().is_some_and(Path::is_dir) && !staged_receipt.exists() {
-            let entry = lstat(&receipt)?;
-            if entry.is_file() && !entry.file_type().is_symlink() && entry.len() <= 1024 * 1024 {
-                copy(&receipt, &staged_receipt)?;
-                chmod(&staged_receipt, 0o644)?;
+        for name in [WILLINGTON_RECEIPT, WILLINGTON_EDITING_RECEIPT] {
+            let receipt = carried.join(name);
+            let staged_receipt = staged_package.join(name);
+            if name == WILLINGTON_EDITING_RECEIPT && secret_permissions(&receipt) != SecretPermissions::OwnerOnly {
+                continue; // Do not turn an unsafe receipt into trusted evidence during an update.
+            }
+            if receipt.exists() && staged_receipt.parent().is_some_and(Path::is_dir) && !staged_receipt.exists() {
+                let entry = lstat(&receipt)?;
+                if entry.is_file() && !entry.file_type().is_symlink() && entry.len() <= 1024 * 1024 {
+                    copy(&receipt, &staged_receipt)?;
+                    chmod(&staged_receipt, 0o600)?;
+                    secure_windows_file(&staged_receipt)?;
+                }
             }
         }
         // The native bridge carries the registry it was built against. This same text

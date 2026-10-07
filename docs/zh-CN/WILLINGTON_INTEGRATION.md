@@ -35,7 +35,7 @@ Remote Script 停止时，会关闭跟随动作写入，并卸载 DeviceTools �
 
 ### willington.json
 
-`/willington` 会写入这个文件；你也可以自己写。它必须是普通文件、仅所有者可访问、最多 4 KiB，并包含以下这些键（`rackZones` 可选）。`/willington` 写入的内容（有通过的自检时 `followActions` 为 true）：
+`/willington` 会写入这个文件；你也可以自己写。它必须是普通文件、仅所有者可访问、最多 4 KiB，并包含以下这些键（`rackZones` 和 `editing` 可选）。`/willington` 写入的内容（有通过的自检时 `followActions` 为 true）：
 
 ```json
 {"version": 1, "followActions": false, "deviceTools": true, "rackZones": true, "enableWrites": true}
@@ -47,6 +47,7 @@ Remote Script 停止时，会关闭跟随动作写入，并卸载 DeviceTools �
 | `followActions` | 加载 WillingtonBindings |
 | `deviceTools` | 加载 WillingtonDeviceTools |
 | `rackZones` | 可选；加载 WillingtonRackZones |
+| `editing` | 可选；加载 WillingtonEditing。仅当通过匹配实际库的自测时，`/willington` 才添加 `"editing": true`。 |
 | `enableWrites` | 允许编辑；为 `false` 时加载提供程序，但不提供编辑 |
 
 这个文件变化后，桥接会在一秒内重新读取它。Kumi 更新会保留它，它也不会影响桥接的安装检查。没有它，桥接就是普通的桥接。
@@ -147,6 +148,28 @@ Willington 有用于以下操作的原生方法，但在能够安全撤销之前
 
 存在原生方法，并不足以构成一个可撤销的操作：不要只添加一个运行时描述符或一个协议条目就提供它。
 
-## 开发者说明：原生编辑
+## 原生编辑及其自测
 
-[原生编辑指南](WILLINGTON_NATIVE_EDITING.md) 介绍上游已验证的分组、编曲、场景/全局跟随动作及 MPE API。Kumi 尚未导入并发布此集成，`/willington` 不会启用它。功能矩阵继续描述已发布的功能。
+安装并验证适用于 **Live 12.4.15b5 macOS ARM64** 的 `WillingtonEditing` 后，Kumi 提供分组创建、编曲自动化、场景/全局 Follow Actions 和逐音符 MPE。其他构建、Intel macOS 和 Windows 不支持此组件。仅当仅所有者可访问的 `self-test.json` 与已安装库匹配时，`/willington` 才请求编辑；提供器还会核对 Live 实际选择的库。凭据缺失或过期时编辑保持关闭。更新会保留凭据，但库发生变化后需要重新测试。
+
+`group_tracks`, `set_scene_follow_actions`, `set_global_follow_actions`, `set_note_expression`, `edit_arrangement_automation` → `live_native_editing_preview/apply`.
+
+准备名为 `Willington Native Editing` 的可丢弃工程并停止播放。前两条轨道不能分组；轨道 1 / 插槽 0 中应有包含音符 ID 1 的 MIDI 片段，并且场景 0 存在。测试会修改并恢复工程。用下面仅所有者可访问的 `willington.json` 加载提供器，然后通过明确授权的 `run_python` 会话在 Live 主线程运行 Python。将路径替换为本地 Kumi 源码路径。脚本验证全部五类编辑，只有所有检查通过后才在加载的包旁写入凭据，并在结束时关闭编辑写入。失败的运行使旧凭据失效。这是明确执行的操作流程，不是启动时的自动行为。
+
+```json
+{"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
+```
+
+已安装的桥接包不包含此脚本。请克隆 [Kumi](https://github.com/user1303836/kumi)，检出与已安装 Kumi 版本一致的发布标签，并使用该源码中的 `remote-script/native_editing_self_test.py`。将下面的 `/absolute/kumi` 替换为源码目录的绝对路径。开发期间应使用对应的功能分支，而不是发布标签。
+
+```python
+import importlib.util, sys, Live
+spec = importlib.util.spec_from_file_location(
+    "editing_fixture", "/absolute/kumi/remote-script/native_editing_self_test.py")
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+provider = Live._kumi_willington_owner
+fixture.run(provider, sys.modules[type(provider.mapper).__module__], song)
+```
+
+随后用 `/willington` 请求写入，它会再次验证凭据。四类编辑可在当前连接中通过 HISTORY 检查状态后恢复；分组没有 HISTORY 逆操作，并会使移动位置的引用失效。分组后请重新发现轨道。新 MPE 通道及待编辑的既有通道都限制为 4096 个事件。编曲插入仅支持线性控制柄。底层限制见[原生 API 指南](WILLINGTON_NATIVE_EDITING.md)。
