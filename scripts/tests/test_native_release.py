@@ -394,6 +394,22 @@ class NativeRelease(unittest.TestCase):
         self.assertEqual(vendor.check(fetched, root=self.root), [])
         self.assertEqual(vendor.check({**fetched, "commit": "e" * 40}, root=self.root), ["release.json"])
 
+    def test_editing_runtime_import_and_platform_filter_keep_provenance_checks(self):
+        runtime = self.runtime_files()
+        library = "WillingtonEditing/build/live-12.4.15b5-editing-arm64/libwillington_editing.dylib"
+        runtime.update({"WillingtonEditing/__init__.py": b"", "WillingtonEditing/api.py": b"# fixture\n",
+                        library: b"native fixture", "WillingtonEditing/build/live-12.4.15b5-editing-arm64/build.json": b"{}"})
+        fetched = vendor.fetch(7, self.bundle_run(runtime))
+        vendor.vendor(fetched["bundle"], fetched["licenses"], fetched["commit"], root=self.root)
+        self.assertEqual(vendor.check(fetched, root=self.root), [])
+        for target, expected in [("aarch64-apple-darwin", True), ("x86_64-pc-windows-msvc", False)]:
+            remote = self.root / target / "AbletonMcpBridge"
+            release.stage_willington(self.root, remote, target)
+            self.assertEqual((remote / "willington" / library).exists(), expected)
+        (self.root / release.WILLINGTON / library).write_bytes(b"tampered")
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            release.willington_files(self.root / release.WILLINGTON)
+
     def test_only_a_successful_bundle_run_on_a_push_to_willingtons_main_is_taken(self):
         runtime = self.runtime_files()
         listed = {"id": 9, "name": "Willington-matrix", "digest": "sha256:" + "0" * 64, "expired": False}
