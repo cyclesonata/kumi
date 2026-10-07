@@ -91,12 +91,12 @@ of reach of both Live's Python API and the Extensions SDK, or out of scope:
 | --- | --- |
 | Saving, opening or exporting the Set; Collect All and Save (through Live's scripting) | Through Live's own menus instead: save, new Set, Collect All and Save, export; save as and open a Set on Windows. A verified backup of the saved Set; importing a single file into the project. |
 | Exporting the mix or stems; freezing and flattening | Offline render of an audio track's own clips; recording through Resampling |
-| Creating group tracks | [Willington native editing candidate](WILLINGTON_NATIVE_EDITING.md); not bundled or offered as a dedicated Kumi tool |
-| Editing Arrangement automation | Reading it; envelopes in Session clips; [native editing candidate](WILLINGTON_NATIVE_EDITING.md) |
+| Creating group tracks | — |
+| Editing Arrangement automation | Reading it; envelopes in Session clips |
 | Mapping a macro or modulator to a parameter | Wavetable's and Drift's modulation matrices; macro and modulator mapping through Willington |
-| Follow Actions | Session clip Follow Actions through Willington; scene/global [native editing candidate](WILLINGTON_NATIVE_EDITING.md) |
+| Follow Actions | Through Willington |
 | Comp editing, deleting or auditioning take lanes | Reading lanes and comps, renaming lanes, audio into a lane |
-| Per-note MPE (pressure, slide, per-note tuning) | Probability, velocity deviation, release velocity, mute; [native editing candidate](WILLINGTON_NATIVE_EDITING.md) |
+| Per-note MPE (pressure, slide, per-note tuning) | Probability, velocity deviation, release velocity, mute |
 | A plug-in's own window or hidden state | Its parameters, presets, and opening or closing its window |
 | A track's audio as it plays | Capture through Resampling; offline render |
 | Browser similarity search, Packs, Cloud | Live's library database: tags, kinds, plug-in inventory |
