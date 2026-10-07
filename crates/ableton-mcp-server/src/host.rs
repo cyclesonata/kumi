@@ -45,6 +45,7 @@ mod midi_plan_tests;
 mod midi_transform;
 mod mixer;
 pub mod mutations;
+mod native_editing;
 mod note_edit;
 mod note_target;
 mod object_view;
@@ -79,7 +80,6 @@ mod tuning;
 mod ui;
 mod warp;
 mod willington;
-mod native_editing;
 
 use crate::{
     live::*,

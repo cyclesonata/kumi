@@ -178,7 +178,10 @@ fn native_editing_requires_negotiated_kinds_operations_and_edit_policy() {
     status.operations.get_or_insert_default().extend(["willington.editing.read".into(), "willington.editing.set".into()]);
     let native = |status: &LiveStatus, profile: &str| {
         visible_tool_descriptors(status, &ToolPolicySpec { profile: profile.into(), ..Default::default() })
-            .unwrap().into_iter().filter(|d| d.name.starts_with("live_native_editing_")).collect::<Vec<_>>()
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.name.starts_with("live_native_editing_"))
+            .collect::<Vec<_>>()
     };
     assert!(native(&status, "full").is_empty());
     status.extra.insert("nativeEditingKinds".into(), json!([]));
@@ -186,10 +189,15 @@ fn native_editing_requires_negotiated_kinds_operations_and_edit_policy() {
     status.extra.insert("nativeEditingKinds".into(), json!(["scene-follow", "note-expression"]));
     for profile in ["full", "edit-no-audio"] {
         let descriptors = native(&status, profile);
-        assert_eq!(descriptors.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["live_native_editing_preview", "live_native_editing_apply"]);
+        assert_eq!(
+            descriptors.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
+            ["live_native_editing_preview", "live_native_editing_apply"]
+        );
         assert_eq!(descriptors[0].input_schema["properties"]["kind"]["enum"], json!(["scene-follow", "note-expression"]));
     }
-    for profile in ["read-only", "performance"] { assert!(native(&status, profile).is_empty()); }
+    for profile in ["read-only", "performance"] {
+        assert!(native(&status, profile).is_empty());
+    }
     status.operations.as_mut().unwrap().retain(|op| op != "willington.editing.set");
     assert!(native(&status, "full").is_empty());
     status.connected = false;

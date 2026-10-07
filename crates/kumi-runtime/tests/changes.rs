@@ -97,7 +97,14 @@ fn change_schemas_outputs_permanence_and_human_messages_match_source() {
     assert_eq!(serde_json::to_value(CHANGES.iter().filter(|k| k.tool != "edit_native").collect::<Vec<_>>()).unwrap(), data["kinds"]);
     assert_eq!(*SAMPLE_INPUT, data["sampleInput"].as_object().unwrap().clone());
     assert_eq!(*REFERENCE_FIELDS, serde_json::from_value::<Vec<String>>(data["referenceFields"].clone()).unwrap());
-    assert_eq!(HOST_TOOLS.iter().filter(|name| !matches!(name.as_str(), "live_native_editing_preview" | "live_native_editing_apply")).cloned().collect::<HashSet<_>>(), serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap());
+    assert_eq!(
+        HOST_TOOLS
+            .iter()
+            .filter(|name| !matches!(name.as_str(), "live_native_editing_preview" | "live_native_editing_apply"))
+            .cloned()
+            .collect::<HashSet<_>>(),
+        serde_json::from_value::<HashSet<String>>(data["hostTools"].clone()).unwrap()
+    );
     assert_eq!(*UNDO_DESCRIPTION, data["undoDescription"]);
 }
 

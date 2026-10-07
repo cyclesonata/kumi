@@ -59,14 +59,19 @@ fn modern(method: &str, params: Value) -> Value {
     json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
 }
 fn strip_native_additions(value: &mut Value) {
-    const ADDED: &[&str] = &["live_native_editing_preview", "live_native_editing_apply", "willington.editing.read", "willington.editing.set"];
+    const ADDED: &[&str] =
+        &["live_native_editing_preview", "live_native_editing_apply", "willington.editing.read", "willington.editing.set"];
     match value {
         Value::Array(values) => {
             values.retain(|v| !v.as_str().is_some_and(|name| ADDED.contains(&name)));
-            for value in values { strip_native_additions(value); }
+            for value in values {
+                strip_native_additions(value);
+            }
         }
         Value::Object(values) => {
-            for name in ADDED { values.remove(*name); }
+            for name in ADDED {
+                values.remove(*name);
+            }
             for (key, value) in values {
                 if key == "text" {
                     if let Some(mut parsed) = value.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
@@ -125,7 +130,9 @@ async fn host_lifecycle_resources_status_and_gates_match_source() {
             }
             // Native additions have dedicated negotiation/transaction coverage; keep the
             // frozen legacy protocol oracle exact for both text and structured content.
-            if step["request"]["params"]["name"] == "capabilities" || step["request"]["params"]["uri"] == "ableton://capabilities" { strip_native_additions(&mut result); }
+            if step["request"]["params"]["name"] == "capabilities" || step["request"]["params"]["uri"] == "ableton://capabilities" {
+                strip_native_additions(&mut result);
+            }
             let text = kumi_common::js::json::stringify(&result);
             let hash = hex::encode(Sha256::digest(text.as_bytes()));
             assert_eq!(

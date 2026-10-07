@@ -1,6 +1,6 @@
 //! Native editing transactions keep opaque prior state off model-facing receipts.
-use super::*;
 use super::reads::AUDITION_DEADLINE_MS;
+use super::*;
 use kumi_common::{abort::Signal, time::now_ms_f64};
 use sha2::{Digest, Sha256};
 const SELECTOR: &[&str] = &["kind", "ref", "targetRef", "noteId", "dimension", "trackRefs"];
@@ -8,18 +8,23 @@ fn property<'a>(value: Option<&'a Value>, key: &str) -> Result<Option<&'a Value>
     value.map(|v| v.get(key)).ok_or_else(|| LiveError::error("Missing native editing result"))
 }
 fn put(out: &mut Value, key: &str, value: Option<&Value>) {
-    if let Some(value) = value { out[key] = value.clone(); }
+    if let Some(value) = value {
+        out[key] = value.clone();
+    }
 }
 fn validate_readback(read: &Value) -> Result<Value, LiveError> {
-    let state = read["state"].as_str().filter(|s| !s.is_empty() && s.len() <= 1048576)
+    let state = read["state"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 1048576)
         .ok_or_else(|| LiveError::error("Incomplete native editing state"))?;
     if read["stateRevision"].as_str() != Some(hex::encode(Sha256::digest(state.as_bytes())).as_str()) {
         return Err(LiveError::error("Invalid native editing revision"));
     }
-    let summary = read["summary"].as_str().filter(|s| s.len() <= 8192)
-        .ok_or_else(|| LiveError::error("Missing native editing summary"))?;
+    let summary = read["summary"].as_str().filter(|s| s.len() <= 8192).ok_or_else(|| LiveError::error("Missing native editing summary"))?;
     let summary: Value = serde_json::from_str(summary).map_err(|_| LiveError::error("Invalid native editing summary"))?;
-    if !summary.is_object() { return Err(LiveError::error("Invalid native editing summary")); }
+    if !summary.is_object() {
+        return Err(LiveError::error("Invalid native editing summary"));
+    }
     Ok(summary)
 }
 impl McpHost {
@@ -34,7 +39,9 @@ impl McpHost {
     pub async fn live_native_editing_preview_async(&self, id: &Value, p: &Value) -> Result<Value, LiveError> {
         if !has_only(p, &["kind", "ref", "targetRef", "noteId", "dimension", "trackRefs", "edit"])
             || !p["edit"].is_object()
-            || !["group-tracks", "scene-follow", "global-follow", "note-expression", "arrangement-automation"].contains(&p["kind"].as_str().unwrap_or("")) {
+            || !["group-tracks", "scene-follow", "global-follow", "note-expression", "arrangement-automation"]
+                .contains(&p["kind"].as_str().unwrap_or(""))
+        {
             return Ok(error(id, -32602, "an explicit native editing kind, target and edit are required", None));
         }
         let result = async {
@@ -82,8 +89,11 @@ impl McpHost {
         }
         let result = async {
             let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(now_ms_f64() + AUDITION_DEADLINE_MS))).await?;
-            if !status.connected || json!(status.epoch) != t["epoch"] || !status.has_operation("willington.editing.set")
-                || !status.extra.get("nativeEditingKinds").and_then(Value::as_array).is_some_and(|k| k.contains(&t["payload"]["kind"])) {
+            if !status.connected
+                || json!(status.epoch) != t["epoch"]
+                || !status.has_operation("willington.editing.set")
+                || !status.extra.get("nativeEditingKinds").and_then(Value::as_array).is_some_and(|k| k.contains(&t["payload"]["kind"]))
+            {
                 return Err(LiveError::error("Native editing epoch or capability changed"));
             }
             let context = LiveOperationContext {
@@ -148,8 +158,11 @@ impl McpHost {
             let (_, steps) = self.begin_undo_recovery(&record, p["idempotencyKey"].as_str().unwrap())?;
             record.borrow_mut()["undoKey"] = p["idempotencyKey"].clone();
             let status = self.fresh_status(Some(&LiveOperationContext::with_deadline(now_ms_f64() + AUDITION_DEADLINE_MS))).await?;
-            if !status.connected || json!(status.epoch) != t["epoch"] || !status.has_operation("willington.editing.set")
-                || !status.extra.get("nativeEditingKinds").and_then(Value::as_array).is_some_and(|k| k.contains(&t["payload"]["kind"])) {
+            if !status.connected
+                || json!(status.epoch) != t["epoch"]
+                || !status.has_operation("willington.editing.set")
+                || !status.extra.get("nativeEditingKinds").and_then(Value::as_array).is_some_and(|k| k.contains(&t["payload"]["kind"]))
+            {
                 return Err(LiveError::error("Native editing epoch or capability changed"));
             }
             let adapter = self.async_adapter();
