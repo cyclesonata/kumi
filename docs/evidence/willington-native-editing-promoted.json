@@ -332,6 +332,10 @@
     "harness": [
       "crates/kumi/tests/native_editing_live.rs",
       "remote-script/native_editing_live_fixture.py"
-    ]
+    ],
+    "validatedKumiCommit": "6caab10154bfa2f6cd854397df953ca1846485ee",
+    "validatedMainCommit": "2b901dab0158e675fc3367c1ca13fc9d41465a3c",
+    "validatedAfterPR": 247,
+    "validatedDate": "2026-10-07"
   }
 }
