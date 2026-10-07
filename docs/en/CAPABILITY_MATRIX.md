@@ -91,12 +91,12 @@ of reach of both Live's Python API and the Extensions SDK, or out of scope:
 | --- | --- |
 | Saving, opening or exporting the Set; Collect All and Save (through Live's scripting) | Through Live's own menus instead: save, new Set, Collect All and Save, export; save as and open a Set on Windows. A verified backup of the saved Set; importing a single file into the project. |
 | Exporting the mix or stems; freezing and flattening | Offline render of an audio track's own clips; recording through Resampling |
-| Creating group tracks | — |
-| Editing Arrangement automation | Reading it; envelopes in Session clips |
+| Creating group tracks | [Native editing through Willington](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test), with a passing self-test; b5 macOS ARM64 only |
+| Editing Arrangement automation | [Native editing through Willington](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test), with a passing self-test; b5 macOS ARM64 only |
 | Mapping a macro or modulator to a parameter | Wavetable's and Drift's modulation matrices; macro and modulator mapping through Willington |
-| Follow Actions | Through Willington |
+| Follow Actions | [Native editing through Willington](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test), with a passing self-test; b5 macOS ARM64 only |
 | Comp editing, deleting or auditioning take lanes | Reading lanes and comps, renaming lanes, audio into a lane |
-| Per-note MPE (pressure, slide, per-note tuning) | Probability, velocity deviation, release velocity, mute |
+| Per-note MPE (pressure, slide, per-note tuning) | [Native editing through Willington](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test), with a passing self-test; b5 macOS ARM64 only |
 | A plug-in's own window or hidden state | Its parameters, presets, and opening or closing its window |
 | A track's audio as it plays | Capture through Resampling; offline render |
 | Browser similarity search, Packs, Cloud | Live's library database: tags, kinds, plug-in inventory |

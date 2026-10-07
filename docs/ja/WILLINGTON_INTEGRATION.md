@@ -147,6 +147,26 @@ Willington にはこれらのためのネイティブメソッドがあります
 
 ネイティブメソッドがあるだけでは、取り消せる操作には足りません。ランタイムの記述子やプロトコルのエントリを追加するだけで、それを提供しないでください。
 
-## 開発者向け注記：ネイティブ編集
+## ネイティブ編集とセルフテスト
 
-[ネイティブ編集ガイド](WILLINGTON_NATIVE_EDITING.md) は、上流で検証済みのグループ、Arrangement、シーン/全体の Follow Action、MPE API を説明します。Kumi はまだこの統合を取り込んでリリースしておらず、`/willington` では有効になりません。機能マトリクスは引き続き出荷済み機能を示します。
+Kumi は、`WillingtonEditing` がインストールされ、**Live 12.4.15b5 macOS ARM64** 用として検証されている場合に、グループ作成、Arrangement オートメーション、シーン/全体の Follow Actions、ノートごとの MPE を提供します。他のビルド、Intel macOS、Windows は対象外です。`/willington` は、インストール済みライブラリと一致する所有者専用の `self-test.json` がある場合だけ編集を要求し、プロバイダーは Live が実際に選択したライブラリとの一致を再確認します。記録がない場合や古い場合は編集を無効にします。更新は記録を保持しますが、ライブラリが変わったら再テストが必要です。
+
+`group_tracks`, `set_scene_follow_actions`, `set_global_follow_actions`, `set_note_expression`, `edit_arrangement_automation` → `live_native_editing_preview/apply`.
+
+停止した使い捨ての Set を `Willington Native Editing` という名前で用意します。先頭の 2 トラックはグループ化せず、トラック 1 / スロット 0 にノート ID 1 を含む MIDI クリップを置き、シーン 0 を用意してください。テストは Set を変更して復元します。以下の所有者専用 `willington.json` でプロバイダーを読み込み、明示的に許可された `run_python` セッションから Live のメインスレッドで Python を実行します。パスはローカルの Kumi ソースに置き換えてください。ランナーは 5 種類をテストし、すべて合格した場合だけ読み込んだパッケージの隣に記録を書き、編集の書き込みを無効にして終了します。失敗した実行は以前の記録を無効にします。起動時の自動処理ではなく、明示的な操作手順です。
+
+```json
+{"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
+```
+
+```python
+import importlib.util, sys, Live
+spec = importlib.util.spec_from_file_location(
+    "editing_fixture", "/absolute/kumi/remote-script/native_editing_self_test.py")
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+provider = Live._kumi_willington_owner
+fixture.run(provider, sys.modules[type(provider.mapper).__module__], song)
+```
+
+その後 `/willington` で書き込みを要求すると、記録が再検証されます。4 種類は現在の接続内で状態を確認して HISTORY から復元できます。グループ作成には HISTORY の逆操作がなく、移動した参照を失効させます。グループ化後はトラックを再取得してください。新規 MPE レーンと編集対象の既存レーンは 4096 イベントまでです。Arrangement の挿入は線形ハンドルのみです。低レベルの制限は[ネイティブ API ガイド](WILLINGTON_NATIVE_EDITING.md)を参照してください。

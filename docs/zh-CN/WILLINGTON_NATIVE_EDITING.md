@@ -4,7 +4,7 @@
 
 Willington 的仓库是私有的；本指南中的上游链接需要访问权限。
 
-这是**开发者指南，不代表 Kumi 已发布这些功能**。[Willington PR #12](https://github.com/xonedsp/willington/pull/12) 已将 **Live 12.4.15b5 macOS ARM64** 的原生编辑提升为已验证配置，支持自动选择并纳入常规矩阵包。Kumi 尚未导入该包，也未发布运行时集成；当前的 `/willington` 不会启用这些功能。此组件不支持其他 Live 构建版本或 Windows。
+本指南说明原生 Python API。Kumi 的受保护工具和凭据验证式 `/willington` 设置见 [Willington 集成](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。原生编辑要求安装已验证的 **Live 12.4.15b5 macOS ARM64** 组件；不支持其他构建或 Windows。
 
 在可丢弃的测试工程中开发时，请遵循上游的[构建与安装说明](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)。安装提升后的包后，`api.install()` 会自动选择并验证与精确构建匹配的库。写入默认关闭，必须明确启用；播放必须停止。安装后，如果 full 策略允许 Python，就可以通过 `run_python`（在主机接口中为 `live_run_python`）调用这些方法。如果方法不存在或精确构建检查拒绝加载，则表示不可用，无论 Kumi 的 Willington 开关处于什么状态。
 

@@ -78,7 +78,7 @@ when it starts again or loads the providers again after `/willington`.
 ### willington.json
 
 `/willington` writes this file; you can also write it yourself. It must be a
-regular file, owner-only and at most 4 KiB, with the keys below (`rackZones` is
+regular file, owner-only and at most 4 KiB, with the keys below (`rackZones` and `editing` are
 optional). `/willington` writes this, with `followActions` true when a passing
 self-test is there:
 
@@ -92,6 +92,7 @@ self-test is there:
 | `followActions` | Load WillingtonBindings |
 | `deviceTools` | Load WillingtonDeviceTools |
 | `rackZones` | Optional; load WillingtonRackZones |
+| `editing` | Optional: load WillingtonEditing. `/willington` adds `"editing": true` only with a passing exact-library receipt. |
 | `enableWrites` | Allow edits; `false` loads the providers without offering edits |
 
 The bridge reads it again within a second of its changing. Kumi updates keep it,
@@ -274,6 +275,26 @@ they can be undone safely:
 A native method existing isn't enough for an undoable operation: don't offer
 one by adding only a runtime descriptor or a protocol entry.
 
-## Developer notes: native editing
+## Native editing and its self-test
 
-The [native editing guide](WILLINGTON_NATIVE_EDITING.md) covers the upstream validated group, Arrangement, scene/global Follow Action and MPE APIs. Kumi has not yet imported and released this integration; `/willington` does not enable it. The capability matrix continues to describe shipped functionality.
+Kumi offers native group creation, Arrangement automation, scene/global Follow Actions and per-note MPE when `WillingtonEditing` is installed and verified for **Live 12.4.15b5 macOS ARM64**. Other builds, Intel macOS and Windows do not support this component. `/willington` requests editing only with an owner-only `self-test.json` matching an installed library; the provider checks the library actually selected in Live again. Missing or stale evidence leaves editing off. Updates preserve the receipt, but a changed library needs a new test.
+
+`group_tracks`, `set_scene_follow_actions`, `set_global_follow_actions`, `set_note_expression`, `edit_arrangement_automation` → `live_native_editing_preview/apply`.
+
+Use a disposable stopped Set named `Willington Native Editing`, with two ungrouped first tracks, a MIDI clip in track 1 / slot 0 containing note ID 1, and scene 0. This test changes and restores the Set. Load the provider using the owner-only `willington.json` below, then run the Python block on Live’s main thread through an explicitly authorized `run_python` session. Replace the checkout path with your local Kumi source path. The runner tests all five kinds, writes the receipt beside the loaded package only after all checks pass, and leaves editing writes disabled. A failed run invalidates earlier evidence. This is an explicit operator procedure, not automatic startup behavior.
+
+```json
+{"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
+```
+
+```python
+import importlib.util, sys, Live
+spec = importlib.util.spec_from_file_location(
+    "editing_fixture", "/absolute/kumi/remote-script/native_editing_self_test.py")
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+provider = Live._kumi_willington_owner
+fixture.run(provider, sys.modules[type(provider.mapper).__module__], song)
+```
+
+Then use `/willington` to request writes. It verifies the receipt again. Four kinds support guarded HISTORY restoration within the current connection; grouping has no HISTORY inverse and retires moved references. Rediscover tracks after grouping. New MPE lanes and existing lanes to be edited are limited to 4096 events. Arrangement insertion uses linear handles only. See the [native API guide](WILLINGTON_NATIVE_EDITING.md) for the lower-level limits.

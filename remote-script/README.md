@@ -248,47 +248,12 @@ checks, 49 fade measurements and seven actual Max `live.object` write/read/resto
 checks to the earlier Kumi transaction tests. See the
 [public validation summary and receipt digests](https://github.com/user1303836/kumi/blob/main/docs/evidence/rack-zones-b5.json) for the measured scope.
 
-### Native editing receipt (developer fixture)
+### Native editing
 
-PR #249 adds receipt-gated native editing; it still requires the official bundle
-import through Kumi's owner-only vendor PR. The validated profile supports only
-Live 12.4.15b5 macOS ARM64. `/willington` requests editing when an owner-only
-`WillingtonEditing/self-test.json` names an installed library; the provider checks
-that receipt against the library actually selected in Live before enabling writes.
-An update that changes the library requires a new passing test.
-
-`native_editing_self_test.py` is an explicit macOS developer fixture runner, not
-part of startup or a model tool. It tests all five editing kinds, restores the
-four reversible states exactly, and explicitly ungroups the test group. It writes
-a receipt only after all checks and cleanup pass; a failed run leaves a non-passing
-receipt. Do not copy a historical evidence JSON into the installed receipt path.
-
-To produce local evidence, use a disposable stopped Set named `Willington Native
-Editing`: the first two tracks must be ungrouped, track 1 / clip slot 0 must contain
-a MIDI clip with note ID 1, and scene 0 must exist. Load the provider with an
-owner-only adjacent `willington.json` containing:
-
-```json
-{"version":1,"followActions":false,"deviceTools":false,"editing":true,"enableWrites":false}
-```
-
-On Live's main thread, using the explicitly authorized developer Python bridge,
-load the runner from this checkout and call:
-
-```python
-import importlib.util, sys, Live
-spec = importlib.util.spec_from_file_location(
-    "editing_fixture", "/absolute/kumi/remote-script/native_editing_self_test.py")
-fixture = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fixture)
-provider = Live._kumi_willington_owner
-fixture.run(provider, sys.modules[type(provider.mapper).__module__], song)
-```
-
-The runner leaves editing writes disabled. `/willington` can then request writes;
-the provider verifies the receipt again when it reloads. This procedure does not
-provision receipts automatically for end users. The promoted-library fixture
-results are in `docs/evidence/willington-native-editing-promoted.json`.
+Native editing requires an installed validated component, explicit opt-in and an
+owner-only receipt matching the library selected inside Live. See the
+[operator self-test procedure](../docs/en/WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
+The fixture runner is `native_editing_self_test.py`; it is not run at startup.
 
 ## Tests
 

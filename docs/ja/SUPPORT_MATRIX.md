@@ -18,6 +18,9 @@ Kumi とそのブリッジが動作する環境、対応する Live のバージ
 
 以下の実機 Live の結果は旧 TypeScript 版の記録です。ネイティブ版の CI と移行テストは、実機 Live での受け入れ確認とは別です。
 
+
+ネイティブ編集（グループ、Arrangement オートメーション、シーン/全体の Follow Actions、ノートごとの MPE）には、インストール済みの検証済み `WillingtonEditing`、実際のライブラリに一致するセルフテストの合格、明示的な有効化が必要です。Live 12.4.15b5 macOS ARM64 のみで、b4、Intel macOS、Windows は対象外です。[セルフテスト手順](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。
+
 ## Ableton Live
 
 | Live | 状況 |

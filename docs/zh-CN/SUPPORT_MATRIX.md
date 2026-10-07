@@ -18,6 +18,9 @@ Kumi 及其桥接能在哪些系统上运行、适用于哪些版本的 Live，�
 
 下述真实 Live 测试来自较早的 TypeScript 版本。原生版 CI 和迁移检查不等同于真实 Live 硬件验收。
 
+
+原生编辑（分组、编曲自动化、场景/全局 Follow Actions、逐音符 MPE）要求安装已验证的 `WillingtonEditing`、通过与实际库匹配的自测，并明确启用。仅支持 Live 12.4.15b5 macOS ARM64，不支持 b4、Intel macOS 或 Windows。参见[自测流程](WILLINGTON_INTEGRATION.md#原生编辑及其自测)。
+
 ## Ableton Live
 
 | Live | 状态 |

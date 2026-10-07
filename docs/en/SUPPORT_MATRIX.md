@@ -20,6 +20,9 @@ lists the evidence behind each "tested".
 
 Real-Live results below describe the earlier TypeScript releases. Native CI and migration checks are separate from acceptance on actual Live hardware.
 
+
+Native editing (groups, Arrangement automation, scene/global Follow Actions and per-note MPE) requires the installed validated `WillingtonEditing` component, a passing exact-library self-test and explicit opt-in. It supports only Live 12.4.15b5 macOS ARM64; not b4, Intel macOS or Windows. See [the self-test procedure](WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
+
 ## Ableton Live
 
 | Live | Status |

@@ -4,8 +4,7 @@
 
 Willington のリポジトリは非公開です。このガイドの上流リンクを開くにはアクセス権が必要です。
 
-これは**開発者向けガイドであり、Kumi の出荷済み機能の宣言ではありません**。
-[Willington PR #12](https://github.com/xonedsp/willington/pull/12) により、**Live 12.4.15b5 macOS ARM64** のネイティブ編集が検証済みプロファイルに昇格し、自動選択と通常のマトリクスバンドルに含まれるようになりました。Kumi はまだこのバンドルを取り込んでおらず、ランタイム統合もリリースしていません。現在の `/willington` はこれらの機能を有効にしません。ほかの Live ビルドと Windows は、このコンポーネントの対象外です。
+このガイドはネイティブ Python API を説明します。Kumi の保護されたツールと、記録を確認する `/willington` の設定は [Willington 統合](WILLINGTON_INTEGRATION.md#ネイティブ編集とセルフテスト)を参照してください。ネイティブ編集にはインストール済みの検証済み **Live 12.4.15b5 macOS ARM64** コンポーネントが必要です。他のビルドと Windows は対象外です。
 
 使い捨てのテスト用 Set での開発では、上流の[ビルドとインストール手順](https://github.com/xonedsp/willington/blob/main/integrations/WillingtonEditing/README.md)に従ってください。昇格済みパッケージをインストールすると、`api.install()` がビルドに一致するライブラリを自動で選択・検証します。書き込みは明示的に有効にするまで無効で、トランスポートは停止している必要があります。インストール後、full ポリシーが Python を許可していれば、`run_python`（ホスト側では `live_run_python`）からメソッドを呼べます。メソッドがない場合やビルドの検証で拒否された場合は、Kumi の Willington スイッチにかかわらず利用できません。
 
