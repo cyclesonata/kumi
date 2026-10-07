@@ -273,3 +273,7 @@ they can be undone safely:
 
 A native method existing isn't enough for an undoable operation: don't offer
 one by adding only a runtime descriptor or a protocol entry.
+
+## Developer notes: native editing
+
+The [native editing guide](WILLINGTON_NATIVE_EDITING.md) covers the upstream validated group, Arrangement, scene/global Follow Action and MPE APIs. Kumi has not yet imported and released this integration; `/willington` does not enable it. The capability matrix continues to describe shipped functionality.
