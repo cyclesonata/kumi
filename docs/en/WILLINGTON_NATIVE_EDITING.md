@@ -4,8 +4,10 @@
 group creation, Arrangement automation editing, scene/global Follow Actions,
 and per-note MPE for **Live 12.4.15b5 macOS ARM64**. It is an exact-build
 development candidate, not part of Kumi's bundled Willington release.
-`/willington` does not install or enable this candidate. No other Live build or
-Windows support is implied.
+`/willington` does not install or enable this candidate. The bridge now has an
+optional provider lifecycle for future validated native-editing releases; the
+current candidate still requires explicit standalone installation. No other
+Live build or Windows support is implied.
 
 The native methods can be called through `run_python` (`live_run_python` at the
 host boundary) when the full policy permits Python and the candidate has been
@@ -108,6 +110,23 @@ identity are not part of the snapshot contract.
 
 ## Evidence and release boundary
 
+The bridge accepts optional boolean `editing` in its existing owner-only
+`willington.json` configuration. When true, it calls `WillingtonEditing.api.install()`
+with no caller-supplied path. Default resolution accepts only validated exact-build
+profiles. The current candidate therefore returns a typed unavailability error;
+an older bundle with no editing package also leaves other providers running.
+Integrity failures and missing dependencies inside the component fail closed.
+`enableWrites` controls activation, and disconnect/disable uninstalls owned patches.
+A separately installed editing surface is never silently taken over.
+
+The status field `nativeEditingKinds` lists the available native Python families
+only after successful provider installation and write enablement; otherwise it
+is empty. It is separate from `willingtonKinds`, which continues to describe the
+existing device preview/apply operations. It does not advertise new transactions
+or history support. `/willington` keeps its existing config format for compatibility
+with older installed bridges; developer opt-in to `editing` must be made in a
+bridge version that supports the field.
+
 The upstream [fixture evidence](https://github.com/xonedsp/willington/blob/feat/native-editing/evidence/native-editing/b5/README.md)
 covers native readback, undo/redo, save/reopen, actual Max calls, MPE playback
 and note notifications, Arrangement playback, group routing, and UI-launched
@@ -119,5 +138,5 @@ Kumi's `scripts/vendor-willington.py` accepts only a successful Bundle run from
 a push to Willington main, verifies the artifact and bundle digests, and checks
 the runtime inventory. Keep that provenance chain intact. Candidate libraries
 must not be copied into the release vendor tree or advertised by the existing
-device-editing capabilities. Release import, provider lifecycle support and
+device-editing capabilities. Release import, automatic switch integration and
 dedicated revision-fenced transactions remain subsequent integration work.
