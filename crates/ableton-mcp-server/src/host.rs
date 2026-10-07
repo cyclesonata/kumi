@@ -79,6 +79,7 @@ mod tuning;
 mod ui;
 mod warp;
 mod willington;
+mod native_editing;
 
 use crate::{
     live::*,

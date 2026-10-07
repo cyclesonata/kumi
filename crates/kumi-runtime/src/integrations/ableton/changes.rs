@@ -694,6 +694,9 @@ impl ChangeKind {
     /// Why Kumi can't take back part of an applied change, from its preview: an Arrangement move or new clip that
     /// replaced what was in its place.
     pub fn replaced(&self, preview: &JsonObject) -> Option<String> {
+        if self.tool == "edit_native" && preview.get("undoable") == Some(&json!(false)) {
+            return Some("Group creation has no Kumi history inverse; Live's own undo can take it back if appropriate.".into());
+        }
         if self.tool == "add_arrangement_clip" && preview.get("replacesUnknown") == Some(&json!(true)) {
             return Some(
                 "Kumi couldn't tell what the new clip cut where it landed, so it leaves taking it back to Live's own undo.".into(),

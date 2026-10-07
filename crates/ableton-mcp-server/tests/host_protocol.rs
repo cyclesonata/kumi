@@ -58,6 +58,29 @@ fn modern(method: &str, params: Value) -> Value {
     params["_meta"] = json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}});
     json!({"jsonrpc":"2.0","id":1,"method":method,"params":params})
 }
+fn strip_native_additions(value: &mut Value) {
+    const ADDED: &[&str] = &["live_native_editing_preview", "live_native_editing_apply", "willington.editing.read", "willington.editing.set"];
+    match value {
+        Value::Array(values) => {
+            values.retain(|v| !v.as_str().is_some_and(|name| ADDED.contains(&name)));
+            for value in values { strip_native_additions(value); }
+        }
+        Value::Object(values) => {
+            for name in ADDED { values.remove(*name); }
+            for (key, value) in values {
+                if key == "text" {
+                    if let Some(mut parsed) = value.as_str().and_then(|s| serde_json::from_str::<Value>(s).ok()) {
+                        strip_native_additions(&mut parsed);
+                        *value = json!(kumi_common::js::json::stringify(&parsed));
+                        continue;
+                    }
+                }
+                strip_native_additions(value);
+            }
+        }
+        _ => {}
+    }
+}
 #[tokio::test]
 async fn host_lifecycle_resources_status_and_gates_match_source() {
     let data: Value = serde_json::from_str(include_str!("fixtures/host-protocol-oracle.json")).unwrap();
@@ -100,6 +123,9 @@ async fn host_lifecycle_resources_status_and_gates_match_source() {
                 result["result"]["content"][0]["text"] =
                     json!(ableton_mcp_server::host::helpers::canonical_mutation_identity(&status).unwrap());
             }
+            // Native additions have dedicated negotiation/transaction coverage; keep the
+            // frozen legacy protocol oracle exact for both text and structured content.
+            if step["request"]["params"]["name"] == "capabilities" || step["request"]["params"]["uri"] == "ableton://capabilities" { strip_native_additions(&mut result); }
             let text = kumi_common::js::json::stringify(&result);
             let hash = hex::encode(Sha256::digest(text.as_bytes()));
             assert_eq!(

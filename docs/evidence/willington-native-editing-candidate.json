@@ -1,0 +1,44 @@
+{
+  "liveVersion": "12.4.15b5",
+  "platform": "macOS ARM64",
+  "willingtonCommit": "323bbd9",
+  "fixture": "Willington Native Editing",
+  "scope": "Kumi LiveObjectMapper operations invoked through authenticated python.run in an explicit candidate fixture. This does not validate a released Kumi bundle or end-to-end chat transport.",
+  "transactions": {
+    "checks": [
+      {
+        "kind": "global-follow",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "scene-follow",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "note-expression",
+        "applied": true,
+        "restoredExact": true
+      },
+      {
+        "kind": "arrangement-automation",
+        "applied": true,
+        "restoredExact": true
+      }
+    ],
+    "writesEnabled": false,
+    "transportStopped": true,
+    "provider": "explicit candidate fixture; no default release promotion"
+  },
+  "groupCreation": {
+    "kind": "group-tracks",
+    "applied": true,
+    "createdRefReturned": true,
+    "cleanup": "explicit native ungroup; no Kumi history inverse",
+    "topologyRestored": true,
+    "transportStopped": true,
+    "writesEnabled": false
+  },
+  "releaseGate": "No WillingtonEditing release is vendored. Default component resolution remains unavailable; production writes require an exact-library self-test receipt."
+}

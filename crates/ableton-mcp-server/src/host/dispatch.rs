@@ -174,6 +174,7 @@ impl McpHost {
             optional!(dispatch_midi_transform_tool);
             optional!(dispatch_advanced_device_tool);
             optional!(dispatch_willington_tool);
+            optional!(dispatch_native_editing_tool);
             optional!(dispatch_device_edit_tool);
             optional!(dispatch_rack_tool);
             optional!(dispatch_scene_tool);
@@ -398,6 +399,9 @@ impl McpHost {
             }
             if tx.starts_with("chainset_") {
                 return Ok(boxed_operation(|| self.undo_chain_async(id, params, signal)).await);
+            }
+            if tx.starts_with("nativeedit_") {
+                return Ok(boxed_operation(|| self.undo_native_editing_async(id, params, signal)).await);
             }
             if tx.starts_with("willington_") {
                 return Ok(boxed_operation(|| self.undo_willington_async(id, params, signal)).await);

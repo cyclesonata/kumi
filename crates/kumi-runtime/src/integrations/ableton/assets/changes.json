@@ -1066,6 +1066,16 @@
       "methods": [
         "summarize"
       ]
+    },
+    {
+      "tool": "edit_native",
+      "preview": "live_native_editing_preview",
+      "apply": "live_native_editing_apply",
+      "family": "device",
+      "description": "Preview exact-build native editing with playback stopped. kind group-tracks groups contiguous trackRefs (edit action=group); no Kumi history undo. scene-follow uses a scene ref and Follow Action fields; global-follow uses edit enabled. note-expression uses a clip ref, stable noteId and dimension pitch/slide/pressure; edit contains exists and up to 4096 six-number events [note-relative beats,value,x1,y1,x2,y2], pitch cents or MIDI 0–127. arrangement-automation uses ref=owning track, targetRef=continuous parameter, edit action=insert with event (linear handles only: x1=y1=x2=y2=0.5) or action=delete with start/end in Song beats. Complete Arrangement snapshots remain opaque and valid only for the same adapter/parameter. Other kinds support revision-fenced restoration within the current connection.",
+      "methods": [
+        "summarize"
+      ]
     }
   ],
   "sampleInput": {
@@ -1235,7 +1245,9 @@
     "live_subscribe",
     "live_render_offline",
     "live_song_undo",
-    "live_song_redo"
+    "live_song_redo",
+    "live_native_editing_preview",
+    "live_native_editing_apply"
   ],
   "referenceFields": [
     "trackRef",

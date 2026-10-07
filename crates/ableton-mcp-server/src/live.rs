@@ -2191,6 +2191,8 @@ pub struct LiveEvent {
 /// Every operation the bridge invokes on Live (the registry's invoke operations, and the simulator's older ones).
 pub const LIVE_OPERATIONS: &[&str] = &[
     "willington.device.read",
+    "willington.editing.read",
+    "willington.editing.set",
     "willington.device.set",
     "clip.follow-actions.set",
     "arrangement.clip.create",

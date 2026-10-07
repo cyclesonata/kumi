@@ -176,6 +176,7 @@ pub fn live_mutation_available(status: &LiveStatus) -> bool {
         "realtime.arm",
         "realtime.disarm",
         "locator.add",
+        "willington.editing.set",
     ];
     status.capabilities.iter().any(|c| CAPABILITIES.contains(&c.as_str())) && OPERATIONS.iter().any(|op| status.has_operation(op))
 }
@@ -203,6 +204,11 @@ fn executable(entry: &ToolCatalogEntry, status: &LiveStatus, offered: &Offered) 
         return true;
     }
     if p.never == Some(true) || !status.connected {
+        return false;
+    }
+    if entry.name.starts_with("live_native_editing_")
+        && !status.extra.get("nativeEditingKinds").and_then(Value::as_array).is_some_and(|kinds| !kinds.is_empty())
+    {
         return false;
     }
     if p.provenance.as_deref().is_some_and(|required| status.provenance.as_ref().map(|p| p.as_str()) != Some(required)) {
@@ -347,6 +353,11 @@ pub fn visible_tool_descriptors(status: &LiveStatus, policy: &ToolPolicySpec) ->
             let mut input_schema = r.entry.input_schema.clone();
             if r.entry.name == "live_willington_device_preview" {
                 if let Some(kinds) = &status.willington_kinds {
+                    input_schema["properties"]["kind"] = serde_json::json!({"type":"string", "enum":kinds});
+                }
+            }
+            if r.entry.name == "live_native_editing_preview" {
+                if let Some(kinds) = status.extra.get("nativeEditingKinds").and_then(Value::as_array) {
                     input_schema["properties"]["kind"] = serde_json::json!({"type":"string", "enum":kinds});
                 }
             }
