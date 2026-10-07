@@ -308,8 +308,33 @@ fn script_install_keeps_willingtons_self_test_receipt_unless_the_release_ships_o
     std::fs::write(&receipt, "the producer's receipt").unwrap();
     install_remote_script(&source, &destination, &force).unwrap();
     assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "the producer's receipt");
+    assert_eq!(secret_permissions(&receipt), SecretPermissions::OwnerOnly);
     // A release that ships a receipt brings its own.
     std::fs::write(willington.join("WillingtonBindings/self-test.json"), "the release's receipt").unwrap();
+    install_remote_script(&source, &destination, &force).unwrap();
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "the release's receipt");
+    // Without Willington in the release, there's no copy for a receipt to stay with.
+    std::fs::remove_dir_all(&willington).unwrap();
+    install_remote_script(&source, &destination, &force).unwrap();
+    assert!(!destination.join(WILLINGTON_FOLDER).exists());
+}
+#[test]
+fn script_install_keeps_native_editings_self_test_receipt_unless_the_release_ships_one() {
+    let folder = tempfile::tempdir().unwrap();
+    let source = install_source(folder.path());
+    let willington = source.parent().unwrap().join(REMOTE_SCRIPT_PACKAGE).join(WILLINGTON_FOLDER);
+    std::fs::create_dir_all(willington.join("WillingtonEditing")).unwrap();
+    std::fs::write(willington.join("WillingtonEditing/__init__.py"), "def install(): pass\n").unwrap();
+    let destination = folder.path().join(REMOTE_SCRIPT_PACKAGE);
+    install_remote_script(&source, &destination, &InstallOptions::default()).unwrap();
+    let force = InstallOptions { force: true, ..Default::default() };
+    let receipt = destination.join(WILLINGTON_EDITING_RECEIPT);
+    std::fs::write(&receipt, "the producer's receipt").unwrap();
+    install_remote_script(&source, &destination, &force).unwrap();
+    assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "the producer's receipt");
+    assert_eq!(secret_permissions(&receipt), SecretPermissions::OwnerOnly);
+    // A release that ships a receipt brings its own.
+    std::fs::write(willington.join("WillingtonEditing/self-test.json"), "the release's receipt").unwrap();
     install_remote_script(&source, &destination, &force).unwrap();
     assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "the release's receipt");
     // Without Willington in the release, there's no copy for a receipt to stay with.

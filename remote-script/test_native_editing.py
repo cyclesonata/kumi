@@ -136,4 +136,33 @@ class NativeEditingTests(unittest.TestCase):
         self.assertEqual(json.loads(after['state'])['createdRef'],self.track_ref)
         self.assertEqual(len(self.song.tracks),3)
 
+    def test_long_prior_expression_lane_refuses_preview_without_mutation(self):
+        self.lane.update(exists=True, events=[[i / 10, 64, .5, .5, .5, .5] for i in range(5000)])
+        original = copy.deepcopy(self.lane)
+        selector = {'kind':'note-expression','ref':self.clip_ref,'noteId':1,'dimension':'pressure'}
+        with self.assertRaisesRegex(ValueError, 'restoration limit'):
+            self.read(selector, {'exists':True, 'events':[]})
+        self.assertEqual(self.lane, original)
+        self.assertEqual(self.calls, [])
+
+    def test_float32_expression_time_handles_and_scene_time_roundtrip(self):
+        import struct
+        f32 = lambda value: struct.unpack('f', struct.pack('f', value))[0]
+        original = self.clip.replace_note_expression
+        def rounded(note, dimension, raw):
+            value = json.loads(raw)
+            value['events'] = [[f32(v) for v in row] for row in value['events']]
+            original(note, dimension, json.dumps(value))
+        self.clip.replace_note_expression = rounded
+        selector = {'kind':'note-expression','ref':self.clip_ref,'noteId':1,'dimension':'pressure'}
+        before = self.read(selector, {'exists':True,'events':[[.1, 42.1, .2, .3, .7, .8]]})
+        after = self.apply(selector, before)
+        self.assertEqual(self.undo(selector,before,after)['stateRevision'], before['stateRevision'])
+        original_scene = self.scene.set_follow_action
+        self.scene.set_follow_action = lambda field,value: original_scene(field, f32(value) if field == 'time' else value)
+        selector = {'kind':'scene-follow','ref':self.scene_ref}
+        before = self.read(selector, {'time':1/3})
+        after = self.apply(selector,before)
+        self.assertEqual(self.undo(selector,before,after)['stateRevision'], before['stateRevision'])
+
 if __name__=='__main__': unittest.main()

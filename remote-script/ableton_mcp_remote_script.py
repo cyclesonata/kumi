@@ -9122,7 +9122,7 @@ class LiveObjectMapper:
 
     @staticmethod
     def _native_editing_event_same(observed, expected):
-        return len(observed) == 6 and observed[0] == expected[0] and observed[2:] == expected[2:] and _same_number(observed[1], expected[1])
+        return len(observed) == 6 and all(_same_number(actual, wanted) for actual, wanted in zip(observed, expected))
 
     def _native_editing_read(self, args):
         selector = {k: args[k] for k in self._NATIVE_EDITING_SELECTOR if k in args}
@@ -9137,6 +9137,8 @@ class LiveObjectMapper:
         result = {'state': encoded, 'stateRevision': hashlib.sha256(encoded.encode()).hexdigest(), 'summary': self._bounded_canonical(summary)}
         if 'edit' in args:
             if self.song.is_playing: raise ValueError('native editing requires stopped playback')
+            if kind == 'note-expression' and len(value['events']) > 4096:
+                raise ValueError('current expression lane exceeds the 4096-event restoration limit')
             plan = self._native_editing_plan(selector, state, args['edit'])
             if kind in ('global-follow', 'scene-follow') and plan['value'] == value: raise ValueError('native preview would not change state')
             result['next'] = self._bounded_canonical(plan)
@@ -9184,8 +9186,10 @@ class LiveObjectMapper:
             actual = json.loads(after['state'])['value']
             if restoring:
                 if after['state'] != self._bounded_canonical(prior): raise ValueError('native restoration was not exact')
-            elif kind in ('global-follow', 'scene-follow'):
+            elif kind == 'global-follow':
                 if actual != plan['value']: raise ValueError('native edit postcondition failed')
+            elif kind == 'scene-follow':
+                if any(not (_same_number(actual[field], wanted) if field == 'time' else actual[field] == wanted) for field, wanted in plan['value'].items()): raise ValueError('native scene postcondition failed')
             elif kind == 'note-expression':
                 expected = plan['value']
                 if actual['exists'] != expected['exists'] or len(actual['events']) != len(expected['events']) or any(not self._native_editing_event_same(row, want) for row,want in zip(actual['events'], expected['events'])): raise ValueError('native expression postcondition failed')
