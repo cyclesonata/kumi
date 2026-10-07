@@ -148,7 +148,7 @@ async fn notation_becomes_the_notes_live_takes() {
             // A Session clip: the clip's own bars, the length whole bars of them.
             let input =
                 object(json!({"trackRef":"7:track:1","sceneIndex":0,"name":"Riff","notation":"l/8 1|1 C3 D3 v90 E3 . 2|1 [C3 E3 G3]/2"}));
-            let written = expand("write_midi_clip", input, &connection, Some(120.), &signal).await.unwrap();
+            let written = expand("write_midi_clip", input, &connection, Some(120.), &signal).await.unwrap().input;
             assert_eq!(written["length"], json!(8.0));
             assert_eq!(written["notes"][2], json!({"pitch":64,"start":1.0,"duration":0.5,"velocity":90}));
             assert_eq!(written["notes"].as_array().unwrap().len(), 6);
@@ -156,13 +156,13 @@ async fn notation_becomes_the_notes_live_takes() {
             assert!(live.calls.borrow().is_empty(), "no lane names a drum: nothing read");
             // An Arrangement clip in song time: it starts at the bar of its first note.
             let input = object(json!({"trackRef":"7:track:1","notation":"9|3 C2/1"}));
-            let written = expand("write_arrangement_clip", input, &connection, Some(120.), &signal).await.unwrap();
+            let written = expand("write_arrangement_clip", input, &connection, Some(120.), &signal).await.unwrap().input;
             assert_eq!((written["start"].clone(), written["length"].clone()), (json!(32.0), json!(8.0)));
             assert_eq!(written["notes"], json!([{"pitch":48,"start":2.0,"duration":4.0,"velocity":100}]));
             // Several clips, and drums named by the track's pads.
             let input =
                 object(json!({"clips":[{"trackRef":"7:track:0","start":0,"length":4,"notation":"kick x... *4\nsnare ....x... *2"}]}));
-            let written = expand("write_arrangement_clip", input, &connection, Some(120.), &signal).await.unwrap();
+            let written = expand("write_arrangement_clip", input, &connection, Some(120.), &signal).await.unwrap().input;
             let pitches: Vec<_> = written["clips"][0]["notes"].as_array().unwrap().iter().map(|n| n["pitch"].as_u64().unwrap()).collect();
             assert_eq!(pitches, [36, 36, 38, 36, 36, 38]);
         })
@@ -178,21 +178,63 @@ async fn a_mistake_in_the_notation_is_the_changes_error() {
             let error =
                 expand("write_midi_clip", object(json!({"trackRef":"7:track:1","notation":"1|1 C3 Q3"})), &connection, None, &signal).await;
             assert_eq!(
-                error.unwrap_err(),
+                error.err().unwrap(),
                 "Notation line 1, column 8: “Q3” isn't a pitch: write Live's names (C3 is middle C, F#2, Bb1) or a MIDI number (0–127)"
             );
             let both = object(json!({"trackRef":"7:track:1","notes":[],"notation":"1|1 C3"}));
-            assert!(expand("write_midi_clip", both, &connection, None, &signal).await.unwrap_err().contains("not both"));
-            // Kumi's bridge writes notes inside a clip, and the error says so.
-            let over = object(json!({"trackRef":"7:track:1","length":4,"notation":"1|4 C3/2"}));
-            assert!(expand("write_midi_clip", over, &connection, None, &signal)
-                .await
-                .unwrap_err()
-                .contains("Kumi writes notes inside a clip"));
+            assert!(expand("write_midi_clip", both, &connection, None, &signal).await.err().unwrap().contains("not both"));
+            // Every mistake comes back at once, each with its line, so one fix mends them all (#257).
+            let several = object(json!({"trackRef":"7:track:1","notation":"1|1 C3 Q3
+2|1 H2
+kick /16 1|1 x... *4"}));
+            let error = expand("write_midi_clip", several, &connection, None, &signal).await.err().unwrap();
+            assert!(error.starts_with("Notation line 1, column 8: “Q3” isn't a pitch"), "{error}");
+            assert!(
+                error.contains(
+                    "
+line 2, column 5: “H2” isn't a pitch"
+                ),
+                "{error}"
+            );
+            // A note past the clip's end is cut there, one at its end left out, and the change says so: Kumi's bridge
+            // writes notes inside a clip.
+            let over = object(json!({"trackRef":"7:track:1","length":4,"notation":"1|4 C3/2 D3"}));
+            let written = expand("write_midi_clip", over, &connection, None, &signal).await.unwrap();
+            assert_eq!(written.input["notes"], json!([{"pitch":60,"start":3.0,"duration":1.0,"velocity":100}]));
+            assert_eq!(
+                written.fixed,
+                ["1 note at or past the clip's end (2|1) was left out: at 2|2", "1 note ran past the clip's end (2|1) and was cut there"]
+            );
+            // Of several clips, those whose notation reads are written; the others come back with their mistakes.
+            let clips = object(json!({"clips":[
+                {"trackRef":"7:track:1","start":0,"length":4,"notation":"1|1 C3 D E3"},
+                {"trackRef":"7:track:1","start":4,"length":4,"notation":"2|1 C3 Q3"},
+                {"trackRef":"7:track:1","start":8,"length":4,"notation":"l1 3|1 G2"}
+            ]}));
+            let written = expand("write_arrangement_clip", clips, &connection, None, &signal).await.unwrap();
+            let written_pitches = |clip: usize| -> Vec<u64> {
+                written.input["clips"][clip]["notes"].as_array().unwrap().iter().map(|n| n["pitch"].as_u64().unwrap()).collect()
+            };
+            assert_eq!(written.input["clips"].as_array().unwrap().len(), 2);
+            assert_eq!(written_pitches(0), [60, 62, 64], "D took C3's octave");
+            assert_eq!(
+                written.input["clips"][1]["notes"],
+                json!([{"pitch":55,"start":0.0,"duration":4.0,"velocity":100}]),
+                "l1 is a whole note"
+            );
+            assert_eq!(written.unwritten.len(), 1);
+            assert_eq!(written.unwritten[0]["clip"], 1);
+            assert!(written.unwritten[0]["error"].as_str().unwrap().contains("“Q3” isn't a pitch"));
+            assert_eq!(
+                written.fixed,
+                ["clips[0]: “D” has no octave, so it was read as D3, the octave of the pitch before it", "clips[2]: “l1” was read as l/1"]
+            );
+            // When none reads, the write is refused with every clip's mistakes.
             let clip = object(json!({"clips":[{"trackRef":"7:track:1","start":0,"notation":"1|1 snr"}]}));
             assert!(expand("write_arrangement_clip", clip, &connection, None, &signal)
                 .await
-                .unwrap_err()
+                .err()
+                .unwrap()
                 .starts_with("clips[0]: Notation line 1"));
         })
         .await;
@@ -310,13 +352,13 @@ async fn roman_numerals_start_in_the_sets_scale() {
             let write = |text: &str| object(json!({"trackRef":"7:track:1","sceneIndex":0,"notation":text}));
             // The Set in D Dorian: IV is G major, with no key line.
             set_scale(Some("D Dorian".into()));
-            let written = expand("write_midi_clip", write("1|1 {IV}/1"), &connection, None, &signal).await.unwrap();
+            let written = expand("write_midi_clip", write("1|1 {IV}/1"), &connection, None, &signal).await.unwrap().input;
             let pitches: Vec<_> = written["notes"].as_array().unwrap().iter().map(|note| note["pitch"].as_u64().unwrap()).collect();
             assert_eq!(pitches, [55, 59, 62]);
             // A scale numerals can't be read in (a pentatonic), or none: a key line is needed, as before.
             for scale in [Some("A Minor Pentatonic".to_owned()), None] {
                 set_scale(scale);
-                let error = expand("write_midi_clip", write("1|1 {IV}"), &connection, None, &signal).await.unwrap_err();
+                let error = expand("write_midi_clip", write("1|1 {IV}"), &connection, None, &signal).await.err().unwrap();
                 assert!(error.contains("needs a key"), "{error}");
             }
         })

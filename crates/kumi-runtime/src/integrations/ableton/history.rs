@@ -5,6 +5,7 @@ use super::{
     context,
     fast::revert_script,
     observation::ObservedChange,
+    references::{Moved, Shift},
     remember::Remember,
     snapshots::{self, Material},
     views::ViewHost,
@@ -68,6 +69,10 @@ pub struct Applied {
     /// takes them back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trimmed: Option<usize>,
+    /// Where the change moved the Set's tracks and scenes, which the refs that followed it go back from once it's
+    /// undone. Not kept past this Live connection: its refs aren't either.
+    #[serde(skip)]
+    pub shift: Option<Shift>,
 }
 impl Applied {
     pub fn new(record: ChangeRecord, transaction_id: String, restore: Option<Restore>) -> Self {
@@ -83,6 +88,7 @@ impl Applied {
             revert: None,
             material: None,
             trimmed: None,
+            shift: None,
         }
     }
 }
@@ -93,15 +99,31 @@ pub struct UndoResult {
     pub record: Option<ChangeRecord>,
     pub text: String,
     pub is_error: bool,
+    /// Kumi's refs were retired with it (a restructure's undo Live didn't confirm). The model is told so with the
+    /// undo (`for_model`); the producer reads `text` as it is (a render's cleanup notice, /undo).
+    #[serde(skip)]
+    pub retired: bool,
 }
 impl UndoResult {
     fn error(text: impl Into<String>) -> Self {
-        Self { record: None, text: text.into(), is_error: true }
+        Self { record: None, text: text.into(), is_error: true, retired: false }
     }
     fn with(record: ChangeRecord, text: impl Into<String>, is_error: bool) -> Self {
-        Self { record: Some(record), text: text.into(), is_error }
+        Self { record: Some(record), text: text.into(), is_error, retired: false }
+    }
+    /// The undo's text as the model reads it: with what to do about Kumi's refs when they were retired with it.
+    pub fn for_model(&self) -> String {
+        if !self.retired {
+            return self.text.clone();
+        }
+        let text = self.text.trim_end();
+        let stop = if text.ends_with(['.', '!', '?']) { "" } else { "." };
+        format!("{text}{stop} {REFS_RETIRED}")
     }
 }
+/// Said to the model after a restructure's undo Live didn't confirm.
+const REFS_RETIRED: &str =
+    "Live may have taken the tracks or scenes back, so Kumi's references are retired: discover again before using any.";
 /// The Remote Script's python.run error type for a failure after the code ran (its result, the deadline after it,
 /// its undo step): Live may have changed.
 pub const PYTHON_RAN: &str = "RanResultUnavailable";
@@ -117,10 +139,21 @@ pub struct History {
     quiet: RefCell<Option<Vec<String>>>,
     timeout_ms: u64,
     on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
+    /// What else follows a restructure Kumi's undo takes back (what the turns showed of the Set's devices).
+    pub on_shift: RefCell<Option<OnShift>>,
 }
+/// Told where a restructure Kumi's undo took back moved the Set's tracks and scenes, or None when it can't be known.
+pub type OnShift = Rc<dyn Fn(Option<&Shift>)>;
 impl History {
     pub fn change_signal(&self) -> Signal {
         abort::any([self.connection.lifetime.clone(), abort::timeout(self.timeout_ms)])
+    }
+    /// A change's time in Live, sized to the change: a change of many tracks, scenes, pads or clips takes Live a while
+    /// for each, and each costs more in a big Set (64 tracks took 28 s, and were called unconfirmed at a flat 30 s,
+    /// #260). The bridge bounds each of Live's steps itself, so this only needs to outlast them; at most ten minutes.
+    pub fn change_signal_for(&self, items: usize) -> Signal {
+        let more = items.saturating_sub(8) as u64 * (self.timeout_ms / 15);
+        abort::any([self.connection.lifetime.clone(), abort::timeout((self.timeout_ms + more).min(600_000.max(self.timeout_ms)))])
     }
     pub fn new(
         connection: Rc<LiveConnection>,
@@ -136,6 +169,42 @@ impl History {
             entries: RefCell::new(IndexMap::new()),
             changes_this_turn: Cell::new(0),
             quiet: RefCell::new(None),
+            on_shift: RefCell::new(None),
+        }
+    }
+    /// A restructure this change made, which its undo moves the refs that followed it back from.
+    pub fn restructured(&self, id: &str, shift: &Shift) {
+        if let Some(entry) = self.entries.borrow().get(id) {
+            entry.borrow_mut().shift = Some(shift.clone());
+        }
+    }
+    /// A restructure undone: what followed it goes back, the book's refs (which Live reads again at their places before
+    /// Python uses them), HISTORY's, and what the turns showed.
+    fn unshift(&self, shift: &Shift) {
+        let back = shift.inverse();
+        let moved = self.shifted(&back);
+        let mut book = self.connection.references.borrow_mut();
+        book.shift(&back);
+        book.mark_moved(moved);
+        drop(book);
+        let on_shift = self.on_shift.borrow().clone();
+        if let Some(on_shift) = on_shift {
+            on_shift(Some(&back));
+        }
+    }
+    /// A restructure's undo Live didn't confirm: whether the tracks and scenes moved back can't be known, so the refs
+    /// that followed it are retired, as after a restructure Kumi can't read exactly, and what the turns showed with
+    /// them.
+    fn unknown_shift(&self) {
+        let mut book = self.connection.references.borrow_mut();
+        book.refs.clear();
+        book.known.clear();
+        book.cursors.clear();
+        book.clear_names();
+        drop(book);
+        let on_shift = self.on_shift.borrow().clone();
+        if let Some(on_shift) = on_shift {
+            on_shift(None);
         }
     }
     pub fn observed(&self) -> Vec<ObservedChange> {
@@ -290,6 +359,40 @@ impl History {
         self.remember.schedule_save(20_000);
         Some(record.id)
     }
+    /// After a restructure the refs Kumi's undo names follow what they named, as the book's do, so an undo puts back
+    /// the parameter it set, not what moved into its place; one on what was deleted names nothing, and its undo says
+    /// so. Returns the refs moved, which Live reads again before Python uses them.
+    pub fn shifted(&self, shift: &Shift) -> Vec<String> {
+        let mut moved = Vec::new();
+        for entry in self.entries.borrow().values() {
+            let mut entry = entry.borrow_mut();
+            for target in entry.revert.iter_mut().flatten() {
+                for key in ["ref", "device"] {
+                    let Some(reference) = target.get(key).and_then(Value::as_str) else { continue };
+                    match shift.reference(reference) {
+                        Moved::Same => {}
+                        Moved::To(now) => {
+                            target[key] = json!(now);
+                            moved.push(now);
+                        }
+                        Moved::Gone => target[key] = json!("gone"),
+                    }
+                }
+            }
+            if let Some(restore) = entry.restore.as_mut() {
+                if let Moved::To(now) = shift.reference(&restore.reference) {
+                    restore.reference = now;
+                }
+            }
+            // What an earlier restructure made is where this one moved it, for that one's undo to delete. (Kumi's
+            // undo makes nothing deleted again, so only what was made needs following.)
+            if let Some(earlier) = entry.shift.as_mut() {
+                earlier.tracks_made = earlier.tracks_made.iter().filter_map(|index| shift.track(*index)).collect();
+                earlier.scenes_made = earlier.scenes_made.iter().filter_map(|index| shift.scene(*index)).collect();
+            }
+        }
+        moved
+    }
     pub async fn run_fast(&self, code: String, signal: Signal) -> Result<FastResult, RuntimeError> {
         let called =
             match self.connection.call("live_run_python", object(json!({"code":code,"mode":"exec","timeoutMs":10000})), signal).await {
@@ -315,6 +418,8 @@ impl History {
     }
     pub fn undo<'a>(&'a self, target: &'a str, signal: Signal, discard: bool) -> LocalBoxFuture<'a, Result<UndoResult, RuntimeError>> {
         async move {
+            // The latest change, confirmed or not: one Live didn't confirm (64 tracks added past the time limit) is the
+            // one the producer means, and undoing the one before it instead took back the wrong change (#260).
             let entry = if target == "last" {
                 self.entries
                     .borrow()
@@ -322,7 +427,8 @@ impl History {
                     .rev()
                     .find(|entry| {
                         let entry = entry.borrow();
-                        entry.record.state == ChangeState::Applied && entry.within.as_ref().is_none_or(|s| s.is_empty())
+                        matches!(entry.record.state, ChangeState::Applied | ChangeState::Unsure)
+                            && entry.within.as_ref().is_none_or(|s| s.is_empty())
                     })
                     .cloned()
             } else {
@@ -477,8 +583,15 @@ impl History {
             if snapshot.transaction_id.is_empty() {
                 return Ok(UndoResult::with(snapshot.record, "Kumi can't take this back; Live's own undo (Cmd-Z in Live) can.", true));
             }
-            if let Some(stopped) = self.bridge_undo(&entry, &snapshot, &undo_key, discard).await? {
+            if let Some(mut stopped) = self.bridge_undo(&entry, &snapshot, &undo_key, discard).await? {
+                if snapshot.shift.is_some() && stopped.record.as_ref().is_some_and(|record| record.state == ChangeState::Unsure) {
+                    self.unknown_shift();
+                    stopped.retired = true;
+                }
                 return Ok(stopped);
+            }
+            if let Some(shift) = &snapshot.shift {
+                self.unshift(shift);
             }
             self.remember.schedule_save(20_000);
             if let Some(restore) = snapshot.restore {
