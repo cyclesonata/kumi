@@ -3,6 +3,56 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.9.7 — 2026-10-07
+
+Ships with bridge 1.0.88, which Live loads when it restarts. After updating, Kumi offers to quit Live
+(it asks to save first) and opens it again with the new bridge; or run `kumi bridge` with Live closed.
+
+- Several crashes are gone: reading some web pages, the first look after saving a new Set in which
+  Kumi kept a clip, a chord written with "İ", and /model with an OLLAMA_HOST that isn't http. A
+  problem Kumi recovers from no longer leaves the terminal unresponsive.
+- A big sound library starts and prunes in a moment instead of minutes, and a long MP3 or mix in it is
+  measured without first writing all of it to disk. Places at the root of a drive or share (Z:\,
+  \\NAS\Samples) give their sounds to find_sounds, and a folder that can't be read for a moment no
+  longer makes Kumi forget its sounds.
+- Watching videos: Shorts and side close-ups show frames again, a local video's length is known with
+  Kumi's own ffmpeg, captions turned away once are asked for again, and offline a video without
+  captions still shows its frames.
+- On Windows, Live's menus, dialogs and tracks work with names in any language, and Freeze, Flatten
+  and Ungroup act on the right track when two names differ only in case.
+- Kumi refuses files on a network share before opening them, so a path in a web page can't make
+  Windows send your credentials to another computer. Sounds in your own Live Places on a share still
+  import: Kumi copies them first.
+- A MIDI effect Kumi makes can't run code that reaches Max's files, network or Live objects.
+- /goal stop while a goal is starting stops that goal, a paused goal stays with its Set, and a first
+  start that was cut off finishes once Live is there.
+- When a model provider is overloaded partway into an answer, Kumi tries again instead of stopping,
+  and an answer that breaks off no longer leaves its plan waiting or applies a step twice.
+- A click on a picker or the command menu no longer reaches what's under it (such as a change's undo),
+  Enter twice on an answer choice sends it once, and long transcripts and HISTORY draw with far less
+  work.
+- On Windows, your credentials file is kept readable only by you wherever KUMI_HOME puts it.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
+### Bridge 1.0.88
+
+- Changes are confirmed on real Live, so their undo works: batches (mixer, parameters, new tracks), a
+  shorter list of sends, note edits and transforms with fractional values (and transforms over 512
+  notes finish), replacing a Simpler's sample, deleting a device, locators, scene captures, rack view,
+  Draw Mode, collapsing a device, clearing envelopes and re-enabling automation.
+- A failed repair no longer deletes the Remote Script, repair keeps your Willington switch, and a
+  failed install, upgrade or repair takes back everything it did.
+- A line another program sends to the bridge's port can no longer stop Live's Remote Script or Live's
+  extension host.
+- Arrangement clips can be renamed, Hybrid Reverb's attack, decay, size and IR choice work, nudging
+  lets go of Live's Nudge button, scrubbing a clip works in Live 12.4, and launching a scene plays
+  that scene.
+- A sample Kumi imported is no longer deleted when its change is released, so it's still there when
+  the Set opens again. On a Mac the bridge no longer starts a second Extension Host, and library
+  search pages stay quick.
+
 ## 1.9.6 — 2026-10-06
 
 Ships with bridge 1.0.87, which Live loads when it restarts. After updating, Kumi offers to quit Live
