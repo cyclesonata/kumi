@@ -3,6 +3,25 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.10.0 — 2026-10-07
+
+Ships with bridge 1.0.89, which Live loads when it restarts. After updating, Kumi offers to quit Live
+(it asks to save first) and opens it again with the new bridge; or run `kumi bridge` with Live closed.
+
+- With Willington's native editing (Live 12.4.15b5 on Apple Silicon, after its self-test and
+  `/willington`), Kumi can group tracks, edit Arrangement automation, set scene and global Follow
+  Actions, and shape a note's pitch, slide and pressure (MPE); everything but grouping can be taken
+  back from HISTORY.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
+### Bridge 1.0.89
+
+- Add optional, evidence-gated native editing transactions for groups, Arrangement automation,
+  scene/global Follow Actions and per-note expression, with guarded restoration and a revised protocol
+  registry.
+
 ## 1.9.7 — 2026-10-07
 
 Ships with bridge 1.0.88, which Live loads when it restarts. After updating, Kumi offers to quit Live
