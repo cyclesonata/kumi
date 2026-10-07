@@ -329,10 +329,17 @@ fn script_install_keeps_native_editings_self_test_receipt_unless_the_release_shi
     install_remote_script(&source, &destination, &InstallOptions::default()).unwrap();
     let force = InstallOptions { force: true, ..Default::default() };
     let receipt = destination.join(WILLINGTON_EDITING_RECEIPT);
-    std::fs::write(&receipt, "the producer's receipt").unwrap();
+    write_owner_file(&receipt, folder.path(), b"the producer's receipt").unwrap();
     install_remote_script(&source, &destination, &force).unwrap();
     assert_eq!(std::fs::read_to_string(&receipt).unwrap(), "the producer's receipt");
     assert_eq!(secret_permissions(&receipt), SecretPermissions::OwnerOnly);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&receipt, std::fs::Permissions::from_mode(0o666)).unwrap();
+        install_remote_script(&source, &destination, &force).unwrap();
+        assert!(!receipt.exists(), "an update must not trust an unsafe receipt");
+    }
     // A release that ships a receipt brings its own.
     std::fs::write(willington.join("WillingtonEditing/self-test.json"), "the release's receipt").unwrap();
     install_remote_script(&source, &destination, &force).unwrap();

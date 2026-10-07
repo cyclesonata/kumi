@@ -273,7 +273,7 @@ async fn native_editings_self_test_receipt_is_not_drift_and_upgrades_keep_it_but
     run_lifecycle(&f.options).await.unwrap();
     // The receipt for the bridge's copy of Willington, put beside it after the install, isn't drift.
     let receipt = f.remote().join(WILLINGTON_EDITING_RECEIPT);
-    fs::write(&receipt, br#"{"status": "passed", "library_sha256": "0"}"#).unwrap();
+    write_owner_file(&receipt, receipt.parent().unwrap(), br#"{"status": "passed", "library_sha256": "0"}"#).unwrap();
     assert_eq!(integrity(&f).await, true);
     // An upgrade keeps it with the new generation's copy.
     run_lifecycle(&f.upgrade("1.1.0")).await.unwrap();

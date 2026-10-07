@@ -165,6 +165,9 @@ pub fn install_remote_script(
         for name in [WILLINGTON_RECEIPT, WILLINGTON_EDITING_RECEIPT] {
             let receipt = carried.join(name);
             let staged_receipt = staged_package.join(name);
+            if name == WILLINGTON_EDITING_RECEIPT && secret_permissions(&receipt) != SecretPermissions::OwnerOnly {
+                continue; // Do not turn an unsafe receipt into trusted evidence during an update.
+            }
             if receipt.exists() && staged_receipt.parent().is_some_and(Path::is_dir) && !staged_receipt.exists() {
                 let entry = lstat(&receipt)?;
                 if entry.is_file() && !entry.file_type().is_symlink() && entry.len() <= 1024 * 1024 {
