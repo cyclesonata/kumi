@@ -3,6 +3,16 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.11.1 — 2026-10-08
+
+Ships with bridge 1.0.90, as 1.11.0 did.
+
+- With Max for Live, the judge reads masking against the mix as it comes into Main's chain, so a
+  limiter or EQ on Main no longer keeps the vocal-cutting-through work off the checklist.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.11.0 — 2026-10-08
 
 Ships with bridge 1.0.90, which Live loads when it restarts. After updating, Kumi offers to quit Live
