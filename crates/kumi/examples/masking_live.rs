@@ -1,9 +1,10 @@
 //! Opt-in check on real Live that masking reads through processing on Main (#289): it adds a "vocal" (Drift, a
-//! melody) and a louder bed in the same register, puts a Limiter on Main, and judges the vocal cutting through over
-//! the mix. Masking stays on the checklist (heard against the mix as it comes into Main's chain, by a second Kumi
-//! Ears device first on Main), and that device is gone from Main after the listen, and after one stopped partway.
-//! Then it takes everything back with Kumi's undo. No model and no sign-in. It works in the open Set (it never opens
-//! or closes one): name it, and use a disposable one.
+//! melody) and a louder bed in the same register, puts a Limiter on Main with 12 dB into its ceiling, and judges the
+//! vocal cutting through over the mix. Masking stays on the checklist (heard against the mix as it comes into Main's
+//! chain, by a second Kumi Ears device first on Main), it reads within 5 points of the same run with the Limiter
+//! switched off, and that device is gone from Main after each listen, and after one stopped partway. Then it takes
+//! everything back with Kumi's undo. No model and no sign-in. It works in the open Set (it never opens or closes one):
+//! name it, and use a disposable one.
 //!   cargo build --release -p ableton-mcp-server --bins
 //!   cargo run --release -p kumi --example masking_live -- --set "<Set name>"
 use futures::FutureExt;
@@ -199,6 +200,55 @@ impl Run {
         devices.iter().map(|row| row["name"].as_str().unwrap_or("?").to_owned()).collect()
     }
 
+    /// The Limiter on Main, read fresh: refs from an earlier look are retired.
+    async fn main_limiter(&self) -> Result<Value, RuntimeError> {
+        self.observe().await?;
+        let main = self.rows("main-track", json!({"fields": ["name"]})).await;
+        let main = main.first().cloned().ok_or_else(|| RuntimeError::plain("Main wasn't read"))?;
+        let devices = self.rows("device", json!({"parent": main["ref"], "fields": ["name", "className"]})).await;
+        let limiter = devices.iter().rfind(|row| row["className"] == "Limiter").map(|row| row["ref"].clone());
+        limiter.ok_or_else(|| RuntimeError::plain("the Limiter on Main wasn't read"))
+    }
+
+    /// One knob of the Limiter on Main, set by its name and the value as Live shows it.
+    async fn set_limiter(&self, names: &[&str], value: Value) -> Result<(), RuntimeError> {
+        let limiter = self.main_limiter().await?;
+        let mut why = String::new();
+        for name in names {
+            match self.call("set_device_parameter", json!({"deviceRef": limiter, "parameter": name, "value": value})).await {
+                Ok(_) => return Ok(()),
+                Err(error) => why = error,
+            }
+        }
+        Err(RuntimeError::plain(why))
+    }
+
+    /// A run over the mix, the vocal cutting through, ended at once. Masking is on its checklist with no note that it
+    /// can't be read through Main, and Main's chain is `chain` again after each listen. Masking as read, when it was.
+    async fn judged(&self, goal: &Value, chain: &[String]) -> Option<f64> {
+        let started = self.call_until("judge", goal.clone(), abort::timeout(600_000)).await;
+        let after = self.main_devices().await;
+        self.say(after == chain, &format!("Main's chain after the listen: {}", after.join(", ")));
+        let masked = match &started {
+            Ok(round) => {
+                let text = round.to_string();
+                let masked = masking(round);
+                self.say(masked.is_some(), &format!("masking is on the checklist: {}", head(&text, 300)));
+                self.say(!text.contains("can't be read through Main's chain"), "no note that masking can't be read through Main");
+                masked
+            }
+            Err(why) => {
+                self.say(false, &format!("the judge: {why}"));
+                None
+            }
+        };
+        let done = self.call_until("judge", json!({"done": true}), abort::timeout(600_000)).await;
+        self.say(done.is_ok(), &format!("the run's last listen: {}", head(&format!("{done:?}"), 200)));
+        let after = self.main_devices().await;
+        self.say(after == chain, &format!("Main's chain after the last listen: {}", after.join(", ")));
+        masked
+    }
+
     async fn check(&self, wanted: &str) -> Result<(), RuntimeError> {
         self.integration.start(signal()).await?;
         let observation = self.observe().await?;
@@ -223,23 +273,23 @@ impl Run {
         self.observe().await?;
         let limited = self.main_devices().await;
         println!("Main's chain: {} → {}", before.join(", "), limited.join(", "));
+        // 12 dB into the ceiling: the mix after Main's chain is louder and limited, the mix as it comes in isn't.
+        self.set_limiter(&["Input Gain", "Gain"], json!("12 dB")).await?;
         let goal = json!({"goal": {"focus": vocal, "problems": true}, "from_beat": 0, "beats": 32});
 
-        println!("\nJudged over the mix, the vocal cutting through, with a Limiter on Main");
-        match self.call_until("judge", goal.clone(), abort::timeout(600_000)).await {
-            Ok(round) => {
-                let text = round.to_string();
-                let masking = round["rows"]
-                    .as_array()
-                    .is_some_and(|rows| rows.iter().any(|row| row["id"].as_str().is_some_and(|id| id.starts_with("masking"))));
-                self.say(masking, &format!("masking is on the checklist: {}", head(&text, 300)));
-                self.say(!text.contains("can't be read through Main's chain"), "no note that masking can't be read through Main");
-            }
-            Err(why) => self.say(false, &format!("the judge: {why}")),
+        println!("\nJudged over the mix, the vocal cutting through, with 12 dB into the Limiter on Main");
+        let limiting = self.judged(&goal, &limited).await;
+
+        println!("\nThe same with the Limiter switched off");
+        self.set_limiter(&["Device On"], json!(0)).await?;
+        let off = self.judged(&goal, &limited).await;
+        match (limiting, off) {
+            (Some(limiting), Some(off)) => self.say(
+                (limiting - off).abs() <= 5.,
+                &format!("masked {limiting}% through the limiting, {off}% with it off: within 5 points"),
+            ),
+            _ => self.say(false, "masking read both ways, to compare"),
         }
-        let after = self.main_devices().await;
-        self.say(after == limited, &format!("Main's chain after the listen: {}", after.join(", ")));
-        let _ = self.call("judge", json!({"done": true})).await;
 
         println!("\nThe same, stopped partway through its listen");
         let stop = Signal::new();
@@ -270,4 +320,11 @@ impl Run {
 
 fn signal() -> Signal {
     abort::timeout(120_000)
+}
+
+/// The masked share a round's checklist reads (its masking item's id is "masking <focus>"), when masking is on it.
+fn masking(round: &Value) -> Option<f64> {
+    let rows = round["checklist"].as_array()?;
+    let row = rows.iter().find(|row| row["id"].as_str().is_some_and(|id| id.starts_with("masking ")))?;
+    row["after"].as_f64().or_else(|| row["before"].as_f64())
 }
