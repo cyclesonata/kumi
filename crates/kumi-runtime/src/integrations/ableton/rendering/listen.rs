@@ -2,6 +2,7 @@ use super::super::{
     audition::silent_render, bridge_version::RENDER_BRIDGE, concurrent::eager_all, connection::NO_CURRENT_LIVE, more_changes::bars,
 };
 use super::ears::RawFile;
+use super::ears_pass::PASS_SECONDS;
 use super::*;
 use crate::{
     audio::{matching::closeness, tools::summary},
@@ -93,9 +94,9 @@ impl Rendering {
                 None => None,
             };
             for (index, render) in &files {
-                let heard = audio::hear(&render.file, heard_options(render.start, beats * 60. / tempo, request.focus, signal.clone()))
-                    .await
-                    .map_err(plain)?;
+                let seconds = render.seconds.unwrap_or(beats * 60. / tempo);
+                let heard =
+                    audio::hear(&render.file, heard_options(render.start, seconds, request.focus, signal.clone())).await.map_err(plain)?;
                 let take = &mut takes[*index];
                 take.heard = Some(Heard { lufs: heard.loudness.integrated_lufs, summary: summary(&heard) });
                 take.render = Some(render.clone());
@@ -236,15 +237,32 @@ impl Rendering {
             return Ok(Err("Kumi is already listening to something; wait for it.".into()));
         }
         let looped = set.and_then(|set| set.get("loop")).filter(|v| v["enabled"] == true && v["length"].as_f64().is_some_and(|v| v > 0.));
-        let from = request.from_beat.unwrap_or_else(|| {
-            looped
-                .map(|v| v["start"].as_f64().unwrap_or(0.))
-                .unwrap_or_else(|| set.and_then(|set| set.get("position")).and_then(Value::as_f64).unwrap_or(0.))
+        let whole = if request.whole == Some(true) {
+            let Some(end) = self.song_end(signal.clone()).await else {
+                return Ok(Err("Kumi couldn't tell where the song ends; give from_beat and beats.".into()));
+            };
+            Some(end)
+        } else {
+            None
+        };
+        let from = if whole.is_some() {
+            0.
+        } else {
+            request.from_beat.unwrap_or_else(|| {
+                looped
+                    .map(|v| v["start"].as_f64().unwrap_or(0.))
+                    .unwrap_or_else(|| set.and_then(|set| set.get("position")).and_then(Value::as_f64).unwrap_or(0.))
+            })
+        };
+        let beats = whole.unwrap_or_else(|| {
+            request.beats.unwrap_or_else(|| looped.and_then(|v| v["length"].as_f64()).unwrap_or(4. * self.observer.beats_per_bar.get()))
         });
-        let beats = request
-            .beats
-            .unwrap_or_else(|| looped.and_then(|v| v["length"].as_f64()).unwrap_or(4. * self.observer.beats_per_bar.get()))
-            .min(64.);
+        if beats * 60. / tempo > LONGEST_LISTEN {
+            return Ok(Err(format!(
+                "That's {} of music; Kumi listens to at most an hour at once, so listen in parts.",
+                clock(beats * 60. / tempo)
+            )));
+        }
         let candidates = if request.mix == Some(true) {
             vec![AuditionCandidate { track: MIX_CANDIDATE.into(), mix: Some(true), label: Some("The whole mix".into()), clip: None }]
         } else {
@@ -265,8 +283,10 @@ impl Rendering {
                         label: if source.mix { "The whole mix".into() } else { source.name.clone() },
                         file: found.file.clone(),
                         start: found.start,
-                        seconds: Some(beats * 60. / tempo),
+                        // A take Live cut short says how much it holds; the note says why.
+                        seconds: Some(found.seconds.unwrap_or(beats * 60. / tempo)),
                         live: false,
+                        note: None,
                     })
                 })
                 .collect())
@@ -277,18 +297,46 @@ impl Rendering {
         }
         self.end_rendering();
         self.tell("Listened", Some(false));
+        let notes = rig.map(|rig| rig.notes).unwrap_or_default();
         match result {
             Err(error) => {
                 signal.check()?;
                 Ok(Err(head(&error.to_string(), 400)))
             }
+            // What the capture held says what went wrong; with nothing to say, the Set may have been silent there.
+            Ok(takes) if takes.is_empty() && !notes.is_empty() => Ok(Err(format!("Nothing came through: {}", notes.join(" ")))),
             Ok(takes) if takes.is_empty() => Ok(Err(format!(
-                "Nothing came through{}. Is something playing there in the Arrangement (its clips at {}, the track not muted)?",
-                rig.filter(|rig| !rig.notes.is_empty()).map(|rig| format!(": {}", rig.notes.join(" "))).unwrap_or_default(),
+                "Nothing came through. Is something playing there in the Arrangement (its clips at {}, the track not muted)?",
                 bars(from)
             ))),
-            Ok(takes) => Ok(Ok(takes)),
+            Ok(mut takes) => {
+                if !notes.is_empty() {
+                    for take in &mut takes {
+                        take.note = Some(notes.join(" "));
+                    }
+                }
+                Ok(Ok(takes))
+            }
         }
+    }
+    /// Where the song ends, in beats: its last Arrangement clip's end (Live's own song end often runs on, 58 bars in a
+    /// new Set), else Live's song end.
+    pub(super) async fn song_end(&self, signal: Signal) -> Option<f64> {
+        if self.connection().has("live_run_python") {
+            let read = self
+                .connection()
+                .call("live_run_python", object(json!({"code":SONG_END_SCRIPT,"mode":"exec","timeoutMs":5000})), signal.clone())
+                .await;
+            let end = read.ok().filter(|read| read.is_error != Some(true)).and_then(|read| {
+                let done = super::super::context::payload(&read).ok()?;
+                (done.get("ok") == Some(&Value::Bool(true))).then(|| done.get("result")?.get("end")?.as_f64()).flatten()
+            });
+            if let Some(end) = end.filter(|end| *end > 0.) {
+                return Some(end);
+            }
+        }
+        let song = self.connection().call("live_song_state", JsonObject::new(), signal).await.ok()?;
+        super::super::context::payload(&song).ok()?.get("songLength")?.as_f64().filter(|end| *end > 0.)
     }
     async fn hear_as_it_plays(
         self: &Rc<Self>,
@@ -296,7 +344,7 @@ impl Rendering {
         request: &HearRequest,
         signal: Signal,
     ) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
-        let seconds = request.seconds.unwrap_or(8.).clamp(2., 60.);
+        let seconds = request.seconds.unwrap_or(8.).clamp(2., PASS_SECONDS);
         let mut steps = vec![];
         let mut placed = vec![];
         let result: Result<Vec<HeardTake>, RuntimeError> = async {
@@ -356,13 +404,14 @@ impl Rendering {
                         let written = link.write(tap, &raw.0.to_string_lossy().replace('\\', "/"), Some(signal)).await.map_err(plain)?;
                         let capture = read_capture(&raw.0, written.channels, written.sample_rate).await.map_err(plain)?;
                         let wav = self.ears_folder.join(format!("{}.wav", uuid::Uuid::new_v4()));
-                        write_capture_wav(&wav, &capture, 0., capture.left.len() as f64).await.map_err(plain)?;
+                        write_capture_wav(&wav, &capture, 0., capture.frames() as f64).await.map_err(plain)?;
                         takes.borrow_mut().push(HeardTake {
                             label: label.clone(),
                             file: wav.to_string_lossy().into_owned(),
                             start: 0.,
-                            seconds: Some(capture.left.len() as f64 / capture.sample_rate),
+                            seconds: Some(capture.frames() as f64 / capture.sample_rate),
                             live: true,
+                            note: None,
                         });
                         Ok(())
                     }
@@ -404,6 +453,14 @@ impl Rendering {
 }
 fn round_number(value: f64) -> f64 {
     round(value)
+}
+/// The end of the last clip in the Arrangement, in beats.
+const SONG_END_SCRIPT: &str = "end = 0.0\nfor track in list(song.tracks):\n    for clip in list(getattr(track, 'arrangement_clips', None) or []):\n        end = max(end, float(clip.end_time))\nresult = {'end': end}\n";
+/// The longest stretch one listen hears, in seconds.
+const LONGEST_LISTEN: f64 = 3600.;
+fn clock(seconds: f64) -> String {
+    let whole = round(seconds) as i64;
+    format!("{}:{:02}", whole / 60, whole % 60)
 }
 fn plain(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::plain(error.to_string())

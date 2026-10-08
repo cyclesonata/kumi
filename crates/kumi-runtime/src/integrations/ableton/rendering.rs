@@ -1,10 +1,17 @@
 //! Quiet render rigs, listening devices, auditions, and held goal passes.
 mod ears;
 mod ears_pass;
+mod form;
 mod goal;
+mod groove;
+mod judge;
 mod listen;
 mod pass;
+mod probe;
 mod rig;
+mod roles;
+mod sound;
+mod tune;
 use super::{
     audition::{restore_store, RestoreStore},
     bridge_version::at_least,
@@ -52,8 +59,13 @@ pub struct Rendering {
     step: RenderStep,
     clip_file: ResolveAudio,
     restore: Option<RestoreStore>,
+    /// Scratch copies a search made and hasn't removed yet (beside the render journal): swept when Live is back.
+    copies_journal: Option<PathBuf>,
+    /// The prefixes of copies a search of this process is using right now: never swept.
+    copies_live: RefCell<Vec<String>>,
     on_action: Option<Rc<dyn Fn(ActionEvent)>>,
     on_audition: Option<Rc<dyn Fn(AuditionEvent)>>,
+    on_judge: Option<Rc<dyn Fn(crate::listening::round::Round)>>,
     change_timeout_ms: u64,
     user_library: Option<String>,
     ears_disabled: bool,
@@ -70,7 +82,24 @@ pub struct Rendering {
     told_quietly: Cell<bool>,
     reference_cache: RefCell<IndexMap<String, Analysis>>,
     best_steps: RefCell<Vec<String>>,
+    /// The judged run under way (or the last one).
+    judge: RefCell<Option<judge::JudgeRun>>,
+    /// The groove run under way (or the last one).
+    groove: RefCell<Option<groove::GrooveRun>>,
+    listener_source: Option<super::options::ListenerSource>,
+    /// Measured references, read by name for the judge.
+    references: Option<Rc<crate::references::store::ReferenceStore>>,
+    /// The listening model, once looked for (None inside: there's none).
+    /// Whether the run's listens are heard by the learned models too: the style model, the effects model.
+    embedding_wanted: Cell<(bool, bool)>,
+    /// The listening model as last looked up (found, a definite none, or why the lookup failed), and when.
+    listener: RefCell<Option<(Result<Option<Rc<dyn crate::listening::listener::Listener>>, String>, i64)>>,
 }
+pub use form::FormRequest;
+pub use groove::GrooveRequest;
+pub use judge::{GoalRequest, JudgeRequest};
+pub use sound::SoundRequest;
+pub use tune::{TuneHow, TuneRequest};
 impl Rendering {
     /// Kumi starts playing the Set for itself, Main down: what Live plays meanwhile isn't heard by the producer. True
     /// when a render was already running, which nothing changes.
@@ -100,8 +129,11 @@ impl Rendering {
             step,
             clip_file,
             restore: options.restore_file.as_ref().map(restore_store),
+            copies_journal: options.restore_file.as_ref().map(|file| PathBuf::from(format!("{file}.copies"))),
+            copies_live: RefCell::new(vec![]),
             on_action: options.on_action.clone(),
             on_audition: options.on_audition.clone(),
+            on_judge: options.on_judge.clone(),
             change_timeout_ms: options.change_timeout_ms.unwrap_or(30_000),
             user_library: options.user_library.clone(),
             ears_disabled: matches!(options.ears, Some(EarsSetup::Disabled)),
@@ -119,6 +151,12 @@ impl Rendering {
             told_quietly: Cell::new(false),
             reference_cache: RefCell::new(IndexMap::new()),
             best_steps: RefCell::new(vec![]),
+            judge: RefCell::new(None),
+            groove: RefCell::new(None),
+            listener_source: options.listener.clone(),
+            references: options.references.clone(),
+            listener: RefCell::new(None),
+            embedding_wanted: Cell::new((false, false)),
         })
     }
     pub fn round_count(&self) -> usize {
@@ -129,6 +167,25 @@ impl Rendering {
         if !continuing {
             self.rounds.set(0);
             self.best.set(None);
+            // A judged run's changes are the ones since its last round: what the producer asked for in between isn't
+            // a round's to take back. If that changed the sound, the run's numbers are out of date: its next judge hears
+            // its bars again first.
+            // An undo in between counts too: a change the run's numbers took in that isn't in the Set any more.
+            let ids = self.applied_ids();
+            // A groove run's the same: its rounds re-read the notes, so only its checkpoint moves.
+            if let Some(run) = self.groove.borrow_mut().as_mut() {
+                run.carry_on(ids.clone());
+            }
+            let mut guard = self.judge.borrow_mut();
+            if let Some(run) = guard.as_mut() {
+                let audible = |id: &String| self.history.entries.borrow().get(id).is_some_and(|entry| entry.borrow().audible());
+                let made = self.applied_since(&run.checkpoint).iter().any(|(id, _)| audible(id));
+                let undone = run.checkpoint.iter().any(|id| !ids.contains(id) && audible(id));
+                if made || undone {
+                    run.stale = true;
+                }
+                run.checkpoint = ids;
+            }
         }
     }
     /// A restart of Live may make Max for Live available; bridge-only disconnects leave refusal intact.
@@ -191,6 +248,7 @@ impl Rendering {
         false
     }
     pub async fn restore_after_crash(&self, identity: &str, path: Option<&str>, signal: Signal) -> Result<Option<String>, RuntimeError> {
+        self.sweep_copies(identity, path, signal.clone()).await;
         let Some(pending) = self.restore.as_ref().and_then(RestoreStore::load) else { return Ok(None) };
         if self.rendering.get() {
             return Ok(None);

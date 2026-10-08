@@ -458,7 +458,10 @@ impl TuiApp {
                 }
                 let mut status = value.clone();
                 status["since"] = json!(perf_now() - n("elapsedMs"));
-                self.0.state.borrow_mut().goal = Some(status);
+                let mut state = self.0.state.borrow_mut();
+                state.goal = Some(status);
+                // A sound-match search took over: the GOAL tab shows it, not the last /goal.
+                state.objective = None;
             }
             "match" => {
                 self.0.state.borrow_mut().matching = if get("state") == "running" {
@@ -491,6 +494,49 @@ impl TuiApp {
                         ),
                         NoticeTone::Info,
                     );
+                }
+            }
+            "objective" => {
+                let mut status = value.clone();
+                status["since"] = json!(perf_now() - n("elapsedMs"));
+                self.0.state.borrow_mut().objective = Some(status);
+                self.0.tabs.show("goal");
+            }
+            // No goal here (none set, or another Set is open): the GOAL tab stops showing the last one.
+            "objective-cleared" => self.0.state.borrow_mut().objective = None,
+            "loop" => {
+                self.0.state.borrow_mut().looping = if get("state") == "running" {
+                    let mut status = value.clone();
+                    status["since"] = json!(perf_now() - n("elapsedMs"));
+                    Some(status)
+                } else {
+                    None
+                };
+                if get("state") == "done" && n("rounds") > 0. {
+                    let why = match value["stop"].as_str().unwrap_or("") {
+                        "met" => "every item within tolerance",
+                        "stalled" => "changes stopped helping",
+                        "budget" => "its budget spent",
+                        "ended" => "ended",
+                        _ => "nothing more judged",
+                    };
+                    self.notice(
+                        &format!(
+                            "Loop: {} rounds · {} kept · {} taken back · {} listens · {} · {why}",
+                            n("rounds"),
+                            n("kept"),
+                            n("reverted"),
+                            n("listens"),
+                            helpers::clock_of(n("elapsedMs"))
+                        ),
+                        NoticeTone::Info,
+                    );
+                }
+            }
+            "judged" => {
+                if let SessionEvent::Judged(round) = &event {
+                    let lines = round.lines().iter().map(|line| self.clean_line(line, 400)).collect();
+                    self.insert_before(Entry::Judged { lines, kept: round.kept, met: round.met });
                 }
             }
             "auditioned" => {

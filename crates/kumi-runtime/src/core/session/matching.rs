@@ -2,6 +2,8 @@
 use super::*;
 use crate::core::{
     evolve::{Evolution, NewSlot, TrialHow, EVOLVE},
+    goal_mode::command_word,
+    loop_run::{loop_setup, wants_loop, LoopRun, LOOP_BUDGET, LOOP_HINT},
     match_run::{starts_match, MatchBudget, MatchDecision, MatchRun, MatchState, MatchStop, KEEP_GOING, MATCH_BUDGET},
     playbook::{lesson_from, lesson_line, playbook_brief, PlaybookStore, Reaction},
     techniques::{waiting_note, NEGATIVE, POSITIVE},
@@ -21,11 +23,32 @@ pub(super) fn add_usage(to: &mut Usage, from: Option<&Usage>) {
     }
 }
 impl Operation {
+    /// Lets the operation run `ms` from now, never less than it was let already (a loop inside a goal keeps the goal's).
     pub(super) fn extend(&self, ms: u64) {
-        self.limit.set(Some(Instant::now() + Duration::from_millis(ms)));
+        let until = Instant::now() + Duration::from_millis(ms);
+        if self.limit.get().is_some_and(|limit| limit >= until) {
+            return;
+        }
+        self.limit.set(Some(until));
         self.changed.notify_one();
     }
 }
+/// An explicit /loop's run on the session, taken off again if the turn ends before the loop does (Live unreachable,
+/// the turn superseded, the model's call failing): left there, it would take later rounds and look like a loop running.
+struct LoopHold {
+    session: Session,
+    run: Rc<RefCell<LoopRun>>,
+}
+impl Drop for LoopHold {
+    fn drop(&mut self) {
+        if let Ok(mut s) = self.session.0.state.try_borrow_mut() {
+            if s.looping.as_ref().is_some_and(|run| Rc::ptr_eq(run, &self.run)) {
+                s.looping = None;
+            }
+        }
+    }
+}
+
 impl Session {
     pub(super) fn playbook_serial<T: 'static>(
         &self,
@@ -125,6 +148,51 @@ impl Session {
         pinned: Option<PinnedNode>,
         pictures: Vec<Picture>,
     ) -> Result<Option<TurnResult>, RuntimeError> {
+        // A /loop that matches a sound to a reference is the knob search: candidates built once, then knob settings
+        // tried by the hundred, the model coming back for structural leaps. /loop on its own picks a paused one up.
+        let searching = self.0.state.borrow().integration.as_ref().is_some_and(|i| i.has_goal());
+        if let Some(request) = text.strip_prefix("/loop").filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace)).map(trim)
+        {
+            let word = command_word(request);
+            if request.is_empty() || matches!(word.as_str(), "resume" | "carry on" | "continue") {
+                if searching && self.goal_paused_here().await {
+                    return self.run_goal(op, None).await;
+                }
+                self.notice("Nothing to pick up here. Say what to reach: /loop and the goal, such as /loop master this to -9 LUFS with the vocal cutting through.");
+                return Ok(None);
+            }
+            // Its control words are never a request: nothing is running now (Esc or /loop stop stops a running loop).
+            if matches!(word.as_str(), "stop" | "end" | "cancel" | "pause") {
+                if word != "pause" && searching && self.stop_goal_inner().await? {
+                    return Ok(None);
+                }
+                self.notice(if word == "pause" { "There's no loop running to pause." } else { "There's no loop to stop." });
+                return Ok(None);
+            }
+            // A request the judge measures (mastering, the mix) runs in judged rounds, even with a reference in it.
+            if searching && starts_match(request) && !wants_loop(request) {
+                return self.run_goal(op, Some(request.to_owned())).await;
+            }
+        }
+        // The loop: an explicit /loop, or a request that calls for it (the model judging a change starts one too). An
+        // explicit one is there from the start, so /loop stop finds it even while Live is still being read.
+        let explicit = text
+            .strip_prefix("/loop")
+            .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+            .map(|rest| trim(rest).to_owned());
+        let judged_loop = explicit.as_deref().is_some_and(wants_loop);
+        let matched = self.0.options.matching && starts_match(&text) && !judged_loop;
+        let looping =
+            explicit.as_ref().filter(|_| !matched).map(|request| Rc::new(RefCell::new(LoopRun::new(request.clone(), LOOP_BUDGET))));
+        {
+            let mut s = self.0.state.borrow_mut();
+            s.turn_steers = s.steers;
+            if let Some(run) = &looping {
+                run.borrow_mut().steers = s.steers;
+                s.looping = Some(run.clone());
+            }
+        }
+        let _hold = looping.as_ref().map(|run| LoopHold { session: self.clone(), run: run.clone() });
         let snapshot = self.observe(&op, pinned, false).await?;
         self.assert_current(&op)?;
         let note = match &self.0.learned {
@@ -142,7 +210,7 @@ impl Session {
         }
         let run = if !self.0.options.matching {
             None
-        } else if starts_match(&text) {
+        } else if matched {
             Some(Rc::new(RefCell::new(MatchRun::new(&text, budget))))
         } else if carried {
             let previous = self.0.state.borrow().last_run.clone().unwrap();
@@ -153,17 +221,29 @@ impl Session {
         } else {
             None
         };
+        let looping = looping.filter(|_| run.is_none());
+        // A request the judge can measure gets a hint to work in judged rounds; the model decides, and its own judge
+        // call starts the loop.
+        let note = if run.is_none() && explicit.is_none() && wants_loop(&text) { format!("{note}{LOOP_HINT}") } else { note };
         {
             let mut s = self.0.state.borrow_mut();
             if run.is_none() {
                 s.last_run = None;
             }
             s.matching = run.clone();
+            s.looping = looping;
+            s.judge_start = None;
+            s.turn_request = Some(explicit.clone().unwrap_or_else(|| text.clone()));
         }
-        // A match run goes on by itself: its words aren't a reaction.
+        // What the producer asked (an explicit /loop's request, not Kumi's words around it). A match run goes on by
+        // itself: its words aren't a reaction.
         if let Some(taste) = &self.0.taste {
-            taste.turn_started(&text, run.is_none());
+            taste.turn_started(explicit.as_deref().unwrap_or(&text), run.is_none());
         }
+        let text = match &explicit {
+            Some(request) => loop_setup(request),
+            None => text,
+        };
         let brief = if run.is_some() && !carried {
             playbook_brief(&self.playbook_serial(|s| async move { s.list().await }.boxed_local()).await.unwrap_or_default(), &text, 5)
         } else {
@@ -188,7 +268,13 @@ impl Session {
             result => result?,
         };
         let Some(run) = run else {
-            return Ok(Some(result));
+            let looping = self.0.state.borrow().looping.clone();
+            let Some(looping) = looping else {
+                return Ok(Some(result));
+            };
+            let result = self.run_loop(&op, &looping, result).await;
+            self.0.state.borrow_mut().looping = None;
+            return result.map(Some);
         };
         let result = self.run_match(&op, &run, result, budget).await;
         {

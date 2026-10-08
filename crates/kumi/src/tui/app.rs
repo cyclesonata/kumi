@@ -81,6 +81,8 @@ pub struct TuiOptions {
     pub connect_live: Option<ConnectLive>,
     /// /willington, where Kumi's bridge can carry Willington.
     pub willington: Option<WillingtonControl>,
+    /// /slots: which model does each listening job, swapped and taken back.
+    pub slots: Option<Rc<kumi_runtime::slots::SlotsContext>>,
     /// What's new since the producer last opened Kumi, shown once as it starts.
     pub whats_new: Option<crate::whats_new::News>,
 }
@@ -115,6 +117,7 @@ impl TuiOptions {
             voice: None,
             connect_live: None,
             willington: None,
+            slots: None,
             whats_new: None,
         }
     }
@@ -200,6 +203,10 @@ struct State {
     last_action: Option<LastAction>,
     goal: Option<Value>,
     matching: Option<Value>,
+    /// The loop under way: its status, and when it started.
+    looping: Option<Value>,
+    /// The /goal objective's latest status (and, while it runs, when it started).
+    objective: Option<Value>,
     watching: bool,
     undoing: bool,
     hits: Vec<Hit>,
@@ -259,6 +266,8 @@ struct State {
     flash_timers: Vec<JoinHandle<()>>,
     /// First-run setup, shown in place of the session until it's done or put off.
     setup: Option<setup::Setup>,
+    /// A /slots swap's fetch or check under way: Esc stops it.
+    slots_check: Option<Rc<kumi_common::abort::Controller>>,
 }
 impl State {
     fn new(options: &TuiOptions) -> Self {
@@ -285,6 +294,8 @@ impl State {
             last_action: None,
             goal: None,
             matching: None,
+            looping: None,
+            objective: None,
             watching: false,
             undoing: false,
             hits: vec![],
@@ -338,6 +349,7 @@ impl State {
             beat_timer: None,
             flash_timers: Vec::new(),
             setup: None,
+            slots_check: None,
         }
     }
 }

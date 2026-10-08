@@ -206,8 +206,15 @@ impl TuiApp {
             return;
         }
         if name == "escape" {
+            let checking = self.0.state.borrow().slots_check.is_some();
             if !menu.is_empty() {
                 self.0.state.borrow_mut().menu_dismissed = true;
+            } else if checking {
+                // A /slots fetch or check stops first.
+                let check = self.0.state.borrow_mut().slots_check.take();
+                if let Some(check) = check {
+                    check.abort();
+                }
             } else if self.busy() {
                 self.cancel();
             } else if self.0.state.borrow().pinned.is_some() {
@@ -368,6 +375,7 @@ impl TuiApp {
                         "/btw" => c.has_aside(),
                         "/voice" => self.0.voice.is_some(),
                         "/willington" => self.willington().is_some(),
+                        "/slots" => self.0.options.slots.is_some(),
                         _ => true,
                     }
             })
@@ -553,6 +561,40 @@ impl TuiApp {
             }
             return Ok(());
         }
+        if let Some(slots) = self.0.options.slots.clone().filter(|_| command == "/slots" || command.starts_with("/slots ")) {
+            self.clear_editor();
+            let words = command["/slots".len()..].to_string();
+            // One swap at a time: a model's fetch can take minutes.
+            if self.0.state.borrow().slots_check.is_some() && kumi_runtime::slots::parse(&words) != Ok(kumi_runtime::slots::Asked::Show) {
+                self.notice("Kumi is still trying a model for /slots: wait for it, or Esc stops it.", NoticeTone::Info);
+                return Ok(());
+            }
+            let app = self.clone();
+            let progress = move |line: String| app.notice(&line, NoticeTone::Info);
+            // Its own stop, Esc: a model's download takes as long as it takes (a listening model's check has its own
+            // minute and a half).
+            let check = Rc::new(kumi_common::abort::Controller::new());
+            let signal = check.signal.clone();
+            self.0.state.borrow_mut().slots_check.get_or_insert_with(|| check.clone());
+            let said = kumi_runtime::slots::command(&words, &slots, &progress, signal).await;
+            let ended = self.0.state.borrow().slots_check.as_ref().is_some_and(|current| Rc::ptr_eq(current, &check));
+            if ended {
+                self.0.state.borrow_mut().slots_check = None;
+            }
+            match said {
+                kumi_runtime::slots::Said::Slots { lines, footer } => {
+                    self.0.state.borrow_mut().transcript.add(Entry::News {
+                        title: "Model slots".into(),
+                        items: lines,
+                        footer: Some(footer),
+                    });
+                    self.0.scheduler.request();
+                }
+                kumi_runtime::slots::Said::Done(text) => self.notice(&text, NoticeTone::Info),
+                kumi_runtime::slots::Said::Refused(text) => self.notice(&text, NoticeTone::Warn),
+            }
+            return Ok(());
+        }
         if command == "/status" {
             self.clear_editor();
             let status = controller.status();
@@ -609,10 +651,37 @@ impl TuiApp {
             self.hold(raw, when);
             return Ok(());
         }
-        if matches!(command, "/goal stop" | "/goal end") && controller.has_stop_goal() {
+        // /goal's and /loop's control words, in any case and with trailing punctuation: never a goal or a request.
+        let goal_word = subcommand(command, "/goal");
+        let loop_word = subcommand(command, "/loop");
+        if matches!(goal_word.as_deref(), Some("pause" | "hold")) || loop_word.as_deref() == Some("pause") {
+            self.clear_editor();
+            if self.busy() {
+                self.cancel();
+            } else {
+                self.notice(
+                    if loop_word.is_some() { "There's no loop running to pause." } else { "There's no goal running to pause." },
+                    NoticeTone::Info,
+                );
+            }
+            return Ok(());
+        }
+        if matches!(goal_word.as_deref(), Some("stop" | "end" | "clear" | "cancel" | "done")) && controller.has_stop_goal() {
             self.clear_editor();
             if !controller.stop_goal().await? {
                 self.notice("There's no goal to stop.", NoticeTone::Info);
+            }
+            return Ok(());
+        }
+        // A loop ends as Esc ends it; a sound-match search ends for good (paused ones too) and keeps its best.
+        if matches!(loop_word.as_deref(), Some("stop" | "end" | "cancel")) {
+            self.clear_editor();
+            if !(controller.has_stop_loop() && controller.stop_loop().await?) {
+                if self.busy() {
+                    self.cancel();
+                } else {
+                    self.notice("There's no loop to stop.", NoticeTone::Info);
+                }
             }
             return Ok(());
         }
@@ -653,6 +722,13 @@ impl TuiApp {
                 }
             }
             self.0.scheduler.request();
+            return Ok(());
+        }
+        // /loop goes to the session as a request: it runs it in judged rounds until the goal is met (on its own, it
+        // picks a paused sound-match search back up).
+        if command == "/loop" || command.starts_with("/loop ") {
+            self.clear_editor();
+            self.send(&raw).await;
             return Ok(());
         }
         if command == "/undo" {
@@ -948,7 +1024,7 @@ pub(super) struct Command {
     pub about: &'static str,
 }
 
-pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
+pub(super) const HELP: &str = "enter sends · ctrl+j or alt+enter starts a new line · ctrl+t talks instead of typing: press it again to stop, or hold it while you talk, and what you said lands in the box (enter stops and sends at once); /voice chooses the language and the microphone · ↑ and ↓ go through what you sent before · while Kumi works, enter sends a message it reads after the step under way, tab one for after the answer, and alt+↑ takes the last waiting one back · /btw asks something on the side without interrupting · esc stops Kumi · page up/down or the mouse wheel scroll, ctrl+home goes to the start and ctrl+end back · click undo in HISTORY, or /undo, to take back a change · /new starts a fresh conversation, and /conversations goes back to an earlier one · /reconnect connects to Live again, keeping the conversation · /copy copies the last answer; to select text yourself, hold Shift while dragging (Option in iTerm2) · /model and /effort choose the model and how hard it thinks, and /fast turns on its faster tier when it has one; /willington turns Willington's bindings (macro mapping and more) on or off; /slots shows which model does each listening job (stems, transcription, listening, embeddings), swaps one in plain words after a quick test, and /slots back takes a swap back; /login and /logout sign in and out · /memory shows what Kumi remembers (notes, techniques, recipes and what it learned from your Sets), and forget in MEMORY drops one; /recipes your saved ways of working · /update gets the newest Kumi, and /changelog says what's new in it · drag files in, or ctrl+v a picture, to send them with your next message (backspace in an empty box takes the last one back) · ctrl+c clears the box, then quits · type / for commands";
 pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/new", about: "Forget this conversation and start fresh" },
     Command { name: "/btw", about: "Ask something on the side, without interrupting Kumi" },
@@ -963,8 +1039,10 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/effort", about: "How hard the model thinks" },
     Command { name: "/fast", about: "The model's faster tier, when its provider offers one" },
     Command { name: "/willington", about: "Willington's bindings in Live: macro mapping, zones" },
+    Command { name: "/slots", about: "Which model does each listening job: /slots listening gemini, /slots back listening" },
     Command { name: "/login", about: "Sign in to a provider" },
-    Command { name: "/goal", about: "Go after a sound until Kumi gets there" },
+    Command { name: "/loop", about: "Listen, judge and adjust in rounds until the goal is met: /loop <what>, then stop" },
+    Command { name: "/goal", about: "Keep at one goal until it's met: /goal <what>, then resume, edit, pause, clear" },
     Command { name: "/memory", about: "What Kumi remembers" },
     Command { name: "/note", about: "Change a note's words: /note <id> <new words>" },
     Command { name: "/recipes", about: "Your saved ways of working" },
@@ -976,3 +1054,10 @@ pub(super) const COMMANDS: &[Command] = &[
     Command { name: "/help", about: "Keys and commands" },
     Command { name: "/quit", about: "Close Kumi" },
 ];
+
+/// A command's subcommand words, read as the session reads them (any case, trailing punctuation aside): `/goal Pause.`
+/// is `pause`. None when the line isn't that command.
+fn subcommand(command: &str, name: &str) -> Option<String> {
+    let rest = command.strip_prefix(name)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| kumi_runtime::core::goal_mode::command_word(rest))
+}

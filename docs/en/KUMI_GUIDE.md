@@ -315,7 +315,8 @@ up:
 - **While Live plays**, it listens to what's playing for a few seconds, and
   leaves Main and the transport alone.
 - **While Live is stopped**, it plays the loop (or a few bars from the playhead,
-  or the part you name) with Main silenced, and puts Main back.
+  the part you name, or the whole song to its last clip) with Main silenced, and
+  puts Main back. A listen takes as long as the music it hears.
 - **Several tracks at once:** each one's sound, and where two sit in the same
   band at similar levels.
 - **How:** Kumi Ears, a small Max for Live device Kumi brings (`kumi bridge` puts
@@ -324,6 +325,143 @@ up:
   it untouched, and nothing is recorded into your Set.
 - Auditions and goals hear their candidates the same way: no scratch tracks, no
   arming. Without Max for Live, Kumi records to listen instead.
+
+## Judging changes and the loop
+
+For work that can be measured (mastering to a loudness, taming a harsh
+resonance, making the vocal cut through), Kumi judges its own changes instead of
+trusting them:
+
+- **A goal becomes a checklist:** a loudness and a ceiling, a balance, a
+  reference's profile, or the element that must cut through, each with a
+  tolerance. Kumi first hears the whole stretch and lists what's off: harsh or
+  resonant frequencies, wide lows, rumble, DC, a loud bass note, overs and
+  clipping, and what masks the element you name.
+- **One change at a time:** after each change Kumi hears before and after at the
+  same loudness, and keeps the change only if its target improved and nothing
+  else got audibly worse (a measure it can no longer read, such as silence,
+  counts as worse). Otherwise Kumi's own undo takes it back. When a kept change
+  moved the level, the last limiter or Utility evens it out and Kumi hears it
+  again: if the peaks come back or it clips at that level, the change goes too.
+- **Code picks the numbers.** Kumi chooses the change; code finds its values,
+  with as few listens as it can: an EQ calculated from what was measured (the
+  smallest cut that clears a resonance, or bands toward a reference's shape),
+  one knob homed in on (a limiter's gain until the loudness is right, a
+  de-esser's threshold), one knob probed across its range (seven settings
+  heard side by side on scratch copies of the track in one pass, then set where
+  its response meets the target), or a few knobs that interact searched in
+  small generations, each heard the same way. What a knob was heard to do on a
+  track is remembered for a month, so the next time it's turned there Kumi
+  starts where that says. Every added device and every move has to earn its
+  place.
+- **The round log** shows each round in the conversation: what it was after, the
+  change, the numbers before → after, kept or taken back and why, and what's
+  next, with the listens so far. A target that resists two changes in a row
+  waits while Kumi works on the next one.
+- **A listening model**, when there is one, hears before and after too, and can
+  turn down a change it hears as harsh, muddy or distorted; the meters decide
+  anything at the dB level. With a Gemini API key (`GEMINI_API_KEY`) it's
+  Gemini's newest model, picked from Gemini's own list (it hears a mono mix, so
+  it isn't asked about width or air); else, with an OpenAI API key, OpenAI's
+  newest audio model. `KUMI_LISTENER` names another (`<base URL>#<model>`, such
+  as a model server on your computer), and `KUMI_LISTENER=off` leaves the meters
+  alone.
+- **Model slots.** `/slots` shows which model does each listening job: stems
+  (Live's own splitter), transcription (Live's conversions), listening (the
+  lookup above) and embeddings (Kumi's own: LAION-CLAP's music model for style,
+  AFx-Rep for effects). Swap one in plain words, such as
+  `/slots listening gemini`, `/slots listening off` (at once, mid-run too) or
+  `/slots listening http://127.0.0.1:8080/v1#<model>`. A new listening model is
+  tried on a known clip first, and switched to only if it hears it right.
+  `/slots back listening` takes a swap back. Embeddings run in Kumi's own model
+  runtime: `/slots embeddings ~/models/clap.onnx` (quote a path with spaces) or
+  an https link to an `.onnx` file (up to 4 GB; Esc stops the download) is tried
+  on two known tones and used only if it tells them apart. A file that's gone
+  later gives way to Kumi's own, said once; `/slots embeddings off` stops them.
+  The other slots can't take model files yet, and say what to do instead. A
+  `slots.json` Kumi can't read leaves listening off. `KUMI_LISTENER` wins over
+  the listening slot while it's set.
+- **Style and effects, heard by models.** With a reference, Kumi's style model
+  (LAION-CLAP) and effects model (AFx-Rep) hear it and each listen of the run,
+  and a change that moves the sound further from the reference's style, or a
+  sound's effects further from the reference sound's, is taken back. They're
+  fetched once, the first time they're needed (ONNX Runtime about 10 MB, the
+  models about 245 MB, each checked against its checksum), into
+  `~/.kumi/models`.
+
+**References** become targets too. Give Kumi a file, a folder of them, a YouTube
+video or playlist, a Spotify link, or just words ("like Burial", "dub techno",
+"Kid A"): it finds example tracks (an artist's best-known songs, an album's
+tracks, a genre's main artists), measures each (passing over silent tracks and,
+in a folder or a search, sketches under 30 seconds), and keeps a profile with the
+range the tracks keep to, so "in the style" means inside it. When the words could
+mean more than one thing (two artists by one name, or an album and an artist),
+Kumi asks you once which you mean, and your answer settles it. Each reference is
+measured once and kept in `~/.kumi/references`; a file or folder is measured
+again once its files change. For one element of a reference
+(its bass, its drums), Kumi can put the track in your Set, separate its stems
+with Live's own splitter, and measure a stem.
+
+**A part's feel** is judged on its notes, with no listening: where it plays in
+the bar (drum by drum, for a part on a Drum Rack), how early or late each step
+sits (its push and swing), its accents, syncopation and fills, against a
+reference's MIDI. For a record's drums, Kumi separates its stems, converts the
+drum stem to MIDI with Live's Drums to MIDI, and moves each hit onto the stem's
+real onset first. A pitched part that isn't in Live (a bass line in an audio
+file) becomes notes with Basic Pitch, on a grid fitted to them (its tempo and
+first downbeat). Kumi can move your notes toward the reference itself, step by
+step, and keeps a change only if it got closer without anything else moving
+away.
+
+**A song's form** is heard bar by bar: the energy curve (loudness, density,
+brightness, low end), the sections with their roles and repeats, the turns
+between them and what prepares each drop, the intro, outro and first hook, and
+which tracks play where. Kumi also points out what doesn't work: sections without
+contrast, an energy plateau, odd phrase lengths, a drop that arrives unprepared,
+a loop left unchanged for 32 bars or more. Against a reference song, it says how
+the two forms differ.
+
+**A sound** is measured beside the others in one quiet pass: its attack, its
+decay against the beat, brightness, an 808's or a kick's pitch drop, a wobble's
+rate in beats, warmth (2nd and 3rd harmonics), width, top, noise floor, how long
+its tail hangs on, and crackle. Kumi points out clicks at note edges, DC and
+notes that jump out. A kit is judged as one: a piece whose noise floor, top or
+grit sits apart, pieces that pile up or leave a gap, decays ringing into the next
+hit. Against a kick, it says how far each part ducks and how fast it comes back,
+and whether their hits interlock or collide; with the key, how far each part's
+notes sit from it. Effects are read off what's heard too: a reverb's decay time
+and how its tails darken and widen, echoes as a note value with their repeats
+and how far each falls, how deep a swing goes, how far a filter sweeps, pumping
+against the beat, and how much of the sound is tail, bar by bar. Kumi flags tails
+cut off, echoes out of time, repeats that don't die away and tails burying the
+dry hits. Ask for a sound or an effect like a reference and Kumi closes those
+measured gaps round by round, keeping only what got closer.
+
+`/loop` and what to reach works in rounds until it's met: one change, judged,
+then the next target. Kumi decides when it stops, not the model: every item
+within tolerance, changes no longer helping, or 16 rounds or 45 minutes. Its
+checklist stays as first set, and the model ends the run only when Kumi asks:
+one more listen to the whole stretch and what changed. Kumi starts the same loop
+by itself when the model judges a change of its own (measuring alone starts
+nothing). Esc or `/loop stop` stops it, and so does a message of yours once it's
+answered; what's kept stays.
+
+`/goal` and what to reach keeps at one goal across turns until it's met. After
+every turn Kumi checks it: by the judge's numbers when it measured, otherwise by
+the model's own check, which must say complete, blocked (and what you must do
+first) or continue (and the next step). It stops at 12 turns, an hour, or three
+turns in a row that got no closer (by the judge's numbers, a step or more;
+otherwise, a change in the Set), saying how far it got. An error you must fix
+(sign-in, billing, the model, a setting, Live) stops it as blocked, naming what
+to do. A message of yours while it runs is answered, then the goal waits for
+you. The GOAL tab shows the goal, its turns and time against the budget, the
+last check and what's next. `/goal` alone shows it; `/goal edit <words>` changes
+it, `/goal resume` carries on (with a fresh budget), `/goal pause` or Esc pauses
+it, and `/goal clear` ends it. Another `/goal` while one is unfinished asks
+first: send it again, or `/goal new: <words>`, to replace it. A goal is kept with
+its Set, so it's still there after a restart. An unsaved Set has no name to keep
+it by: its goal stays with that conversation, and moves with the Set's first
+save.
 
 ## Matching a reference
 
@@ -336,11 +474,11 @@ no knob closes a gap, and stops when it reaches the target, when new ideas stop
 helping, or after 12 rounds or 45 minutes. It ends with the score before and
 after and what still differs.
 
-`/goal` and what to reach goes further: Kumi keeps searching, mostly with its
-own fast knob search and with the model's bigger ideas every few generations,
-until the score reaches 95, you stop it, or four hours pass. The GOAL tab shows
-how it's going. Esc pauses a goal, `/goal` alone picks it up again (even after a
-restart), and `/goal stop` ends it.
+`/loop` and a sound to match goes further: Kumi keeps searching, mostly with
+its own fast knob search and with the model's bigger ideas every few
+generations, until the score reaches 95, you stop it, or four hours pass. The
+GOAL tab shows how it's going. Esc pauses the search, `/loop` alone picks it up
+again (even after a restart), and `/loop stop` ends it.
 
 What Kumi learns from each match is kept as a lesson (✦) for the next one;
 `/memory` lists them.
@@ -385,6 +523,13 @@ and its real parameters, matched against what the plug-in shows Live.
   parameters. The guide says which those are and how to add more: click
   **Configure** in the plug-in's title bar and move the knobs in its window once.
   Kumi can open the plug-in's window for you.
+- **Knobs by role.** When Kumi tunes a plug-in, it can name a knob by what it
+  does: a role from the guide (Ozone 12's ceiling) or a job any device does (a
+  limiter's gain, its ceiling, an EQ band's gain, a compressor's threshold). It
+  finds the knob among the names the plug-in shows Live and turns it only when
+  it's configured. When it isn't, Kumi says which knob to configure, and has
+  another device on the same track do the job meanwhile: Ozone 12 first, then
+  the other plug-ins Kumi knows, then Live's own devices.
 - **What isn't a parameter** (an oscillator's wavetable, filter types, modulation
   routing, Ozone's Master Assistant) is done in the plug-in's window; the guide
   says where.
@@ -533,7 +678,7 @@ choose an item to forget it, or a note to change its words or pin it.
   its answer whether to keep it: 1 keeps it, while 2, Enter, Esc or carrying on
   without answering doesn't (saying “keep the technique” in your next message
   still does); undoing the build with Kumi's undo withdraws the question. It
-  asks only about builds you asked for, never about work toward a `/goal`, never
+  asks only about builds you asked for, never about work toward a `/goal` or a `/loop`, never
   over a question Kumi itself just asked, and at most once every three answers.
   A tutorial, reference or steps you give always come first: Kumi reaches for a
   technique only when you leave the approach open, and says when it does. Up to
@@ -669,13 +814,13 @@ closed). Your conversations, notes, recipes and sign-ins stay unless you add
 | Changes in one answer | 5,000 (a batch of pads or parameters counts once) |
 | A `wait` step in a plan | 30 minutes |
 | Conversation size | Earlier Live reads shrink past about 160 KB; the oldest exchanges drop off past about 400 KB |
-| Audio heard | The first 12 minutes of a file |
+| Audio heard | The first 12 minutes of a file; a whole song up to an hour |
 | Video transcription | 90 minutes at a time |
 | Free disk space checked first | 100 MB to record (on the Set's disk, or your home folder's for an unsaved Set), 100 MB to make a device (on the User Library's disk) |
 
 **Listening** hears files, recordings and the Set's tracks and mix (the Set
-through Kumi Ears, which needs Max for Live). It measures and compares; it
-doesn't judge taste.
+through Kumi Ears, which needs Max for Live). It measures, compares and judges
+changes against a goal; taste stays yours.
 
 **Live's own commands** need Accessibility for your terminal on a Mac. Clip
 commands work on a Session clip or the clip you've selected.
@@ -706,8 +851,17 @@ says which need which.
   reads see its requests. Kumi doesn't read an address that carries a key or a
   token.
 - **Downloads** come from GitHub (Kumi's releases and update checks, yt-dlp,
-  ffmpeg and whisper.cpp), Hugging Face (the speech model), and the video sites you name.
-- **Audio** is analysed on your computer; only the numbers go to the model.
+  ffmpeg and whisper.cpp, ONNX Runtime and Kumi's listening models), Hugging Face
+  (the speech model, or a model you name for a slot), and the video sites you name.
+- **References** in words are looked up by name on MusicBrainz and ListenBrainz,
+  a Spotify link on Spotify's public page (an artist's on MusicBrainz), and their
+  audio comes from a YouTube search and is deleted once it's measured.
+- **Audio** is analysed on your computer; only the numbers go to the model. A
+  listening model, when there is one, gets short excerpts (at most 10 seconds
+  each, mono) of the changes it weighs: Gemini with a Gemini API key, OpenAI
+  with an OpenAI API key, or the model in `KUMI_LISTENER` or the listening slot
+  (`/slots`). `KUMI_LISTENER=off` or `/slots listening off` stops that; trying a
+  new listening model sends it only a known test tone.
 - **Your voice** is written down on your computer, and the recording deleted as
   soon as it is; only the words leave, when you send them.
 - **Your library** is learned on your computer; only the manual's pages come from
@@ -732,6 +886,9 @@ Kumi keeps everything in `~/.kumi`. `~/.kumi/settings.json` holds:
 | `libraryFolders` | More folders for Kumi to learn sounds, presets and Sets from |
 | `voice` | Talking: `send` (send when you stop), `language`, `microphone` (`/voice`) |
 
+`~/.kumi/slots.json` keeps the model slots you swapped (`/slots`), and
+`~/.kumi/probes` what each knob was heard to do, by device and track.
+
 Environment variables (paths must be absolute):
 
 | Variable | Meaning |
@@ -739,12 +896,15 @@ Environment variables (paths must be absolute):
 | `KUMI_MODEL` | `<provider>/<model>` for this run, overriding the chosen model |
 | `KUMI_AUTH_FILE`, `KUMI_SETTINGS_FILE` | The sign-in store and the settings file |
 | `KUMI_MEMORY_FILE`, `KUMI_TECHNIQUES_FILE`, `KUMI_PLAYBOOK_FILE` | Notes about you, techniques and lessons |
-| `KUMI_RECIPES_DIR`, `KUMI_PROJECTS_DIR`, `KUMI_GOALS_DIR` | Recipes; each Set's conversations, notes and last state; goals in progress |
+| `KUMI_RECIPES_DIR`, `KUMI_PROJECTS_DIR`, `KUMI_GOALS_DIR` | Recipes; each Set's conversations, notes and last state; goals and searches in progress |
+| `KUMI_REFERENCES_DIR` | Measured references |
 | `KUMI_INPUT_HISTORY_FILE`, `KUMI_GAPS_FILE`, `KUMI_RESTORE_FILE` | What you sent (for ↑), the gap log, and Main's level to put back after a crash mid-render |
 | `KUMI_VIDEOS_DIR`, `KUMI_TOOLS_DIR` | Watched videos, and the programs Kumi fetches |
 | `KUMI_LIBRARY_DIR` | What Kumi learned of your sounds, presets and Sets |
 | `OLLAMA_HOST`, `LM_API_TOKEN` | Where Ollama listens, as Ollama reads it; LM Studio's API token, when its server wants one |
 | `KUMI_EARS=0` | Hear the Set by recording, without Kumi Ears |
+| `KUMI_LISTENER`, `KUMI_LISTENER_KEY` | The listening model that judges changes beside the meters, as `<base URL>#<model>` (an OpenAI-compatible server that takes audio), and its key; `off` for none |
+| `GEMINI_API_KEY`, `GOOGLE_API_KEY` | A Gemini API key for the listening model (Gemini's newest model, from its own list) |
 | `KUMI_FAST=0` | Set device parameters through the bridge's preview and apply, the slower way ([how a change works](KUMI_CHANGES.md#how-a-change-works)) |
 | `KUMI_YTDLP`, `KUMI_FFMPEG`, `KUMI_WHISPER`, `KUMI_WHISPER_MODEL` | Your own yt-dlp, ffmpeg, whisper.cpp (`whisper-cli`) or speech model (`ggml-*.bin`), by path |
 | `KUMI_REMOTE_SCRIPTS_DIR` | Live's Remote Scripts folder, when Kumi doesn't find it |

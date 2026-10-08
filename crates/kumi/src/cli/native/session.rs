@@ -20,6 +20,7 @@ use kumi_runtime::{
         store_client::StoreClient,
     },
     library::{create_library, LibraryOptions},
+    slots,
     video::programs::{configure_programs, ProgramDefaults},
     *,
 };
@@ -248,6 +249,12 @@ pub(super) async fn run_session(
         ..Default::default()
     });
     let controller: Rc<RefCell<Option<Weak<dyn SessionController>>>> = Rc::new(RefCell::new(None));
+    let listener_store = store.clone();
+    // Which model does each listening job: /slots shows, swaps and takes back.
+    let slots_file = slots::file_in(std::path::Path::new(&crate::config::kumi_dir(&io.env)));
+    let slots_context = Rc::new(slots::SlotsContext { file: slots_file.clone(), store: store.clone(), env: io.env.clone() });
+    // Measured references: the reference tool keeps them, the judge works toward them by name.
+    let references = Rc::new(kumi_runtime::references::store::ReferenceStore::new(load_references_dir(&io.env)?));
     let models = Rc::new(create_model_control(ModelControlOptions {
         store,
         settings_file: settings_file.clone(),
@@ -320,6 +327,7 @@ pub(super) async fn run_session(
         let controller = controller.clone();
         let live_config = live_config.clone();
         let bundled = bundled.clone();
+        let references = references.clone();
         Box::new(move |on_connection| {
             let Some(bridge_config) = live_config.borrow().clone() else {
                 return create_inference_only_integration(Rc::new(move |state| on_connection(state, None)));
@@ -387,6 +395,28 @@ pub(super) async fn run_session(
                         c.watch(WatchEvent::Audition(event.clone()));
                     }
                     emit(SessionEvent::Auditioned(event));
+                })
+            });
+            options.on_judge = Some({
+                let emit = emit.clone();
+                let controller = controller.clone();
+                Rc::new(move |round| {
+                    let controller = controller.borrow().as_ref().and_then(Weak::upgrade);
+                    if let Some(c) = controller {
+                        c.watch(WatchEvent::Judged(round.clone()));
+                    }
+                    emit(SessionEvent::Judged(round));
+                })
+            });
+            options.references = Some(references.clone());
+            options.listener = Some({
+                let store: Rc<dyn CredentialStore> = listener_store.clone();
+                let env = env.clone();
+                let slots = slots_file.clone();
+                Rc::new(move |signal| {
+                    let (store, env, slots) = (store.clone(), env.clone(), slots.clone());
+                    // The listening slot's model (KUMI_LISTENER wins over it), following the slot when it's swapped.
+                    async move { slots::listener(&slots, store, &env, signal).await }.boxed_local()
                 })
             });
             options.on_catch_up = Some({
@@ -489,7 +519,10 @@ pub(super) async fn run_session(
     // An older Kumi open beside this one writes the files: what it changes comes in a turn later.
     options.files = database.as_ref().map(|client| FileSync::new(client.clone(), files, &named));
     options.store = database;
-    options.goals = Some(create_goal_store(load_goals_dir(&io.env)?));
+    let goals = load_goals_dir(&io.env)?;
+    options.objectives = Some(create_objective_store(goals.clone()));
+    options.references = Some(references);
+    options.goals = Some(create_goal_store(goals));
     options.gaps = Some(load_gaps_file(&io.env)?);
     options.timings = Some(load_timings_file(&io.env)?);
     options.watch = Some(VideoDirectories { videos_dir: load_videos_dir(&io.env)?, tools_dir: tools_dir.clone() });
@@ -605,6 +638,7 @@ pub(super) async fn run_session(
         options.open_browser = Some(Rc::new(login::open_browser));
         options.updates = Some(updates);
         options.willington = Some(WillingtonControl::new(io.env.clone()));
+        options.slots = Some(slots_context);
         options.voice = Some(Rc::new(create_voice_control(VoiceControlOptions {
             env: Some(io.env.clone()),
             tools_dir,

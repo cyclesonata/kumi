@@ -305,6 +305,9 @@ pub struct Observation {
     pub tools: Vec<Rc<dyn KernelTool>>,
     /// The saved Set this is about (an opaque id), so its conversation can be kept between sessions.
     pub project: Option<ProjectRef>,
+    /// Live's identity for the open Set: it holds while the Set stays open in this run of Live, through a Kumi restart
+    /// and a new conversation (an unsaved Set's goal is kept by it). None when Live wasn't read.
+    pub set: Option<String>,
     /// The Set's track names, when all of them were read (names are data).
     pub tracks: Option<Vec<String>>,
     /// When the saved Set's file was last written: a later time means the producer saved it.
@@ -515,6 +518,9 @@ pub struct HearRequest {
     /// How long to hear what's playing now.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
+    /// The whole song, from the Arrangement's start to its end, quietly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub whole: Option<bool>,
 }
 
 /// One thing heard: its name, its file, where the part starts in it, and whether it was heard as it played.
@@ -526,6 +532,9 @@ pub struct HeardTake {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
     pub live: bool,
+    /// What went short of the request (Live stopped before the part's end, say).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// A goal's candidate chain in Live: its track, what it is, and the knobs a search may move.
@@ -645,6 +654,9 @@ pub struct Where {
 pub struct Render {
     pub file: String,
     pub start: f64,
+    /// How long the part heard is, in seconds, when Live stopped short of what was asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
 }
 
 /// What a take sounded like: its loudness (null when it couldn't be measured) and a summary line.
@@ -1226,8 +1238,16 @@ pub enum SessionEvent {
     },
     Match(MatchStatus),
     Goal(GoalStatus),
+    /// A /goal objective's status: where it is, turns and time against its budget, and the last check.
+    Objective(super::goal_mode::ObjectiveStatus),
+    /// No goal to show: there's none here, or another Set is open.
+    ObjectiveCleared,
     Heard(HeardEvent),
     Auditioned(AuditionEvent),
+    /// A round of a judged run: its target, change, numbers before and after, keep or revert, and what's next.
+    Judged(crate::listening::round::Round),
+    /// Where the loop is: rounds, kept and taken back, listens, time, the next target.
+    Loop(super::loop_run::LoopStatus),
     Watched(WatchedEvent),
     Web(WebEvent),
     Library(LibraryEvent),
@@ -1649,6 +1669,7 @@ pub enum WatchEvent {
     Change(ChangeRecord),
     Action(ActionEvent),
     Audition(AuditionEvent),
+    Judged(crate::listening::round::Round),
 }
 
 /// What Kumi remembers now: about the producer, and about the open Set when it's saved.
@@ -1888,6 +1909,13 @@ pub trait SessionController {
         false
     }
     async fn stop_goal(&self) -> Result<bool, RuntimeError> {
+        Ok(false)
+    }
+    fn has_stop_loop(&self) -> bool {
+        false
+    }
+    /// /loop stop: ends a sound-match search, running or paused, keeping its best (a judged loop ends as Esc ends it).
+    async fn stop_loop(&self) -> Result<bool, RuntimeError> {
         Ok(false)
     }
     fn has_goal_status(&self) -> bool {
