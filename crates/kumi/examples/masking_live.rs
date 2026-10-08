@@ -310,8 +310,9 @@ impl Run {
         let tag = now_ms() % 10_000;
         let (vocal, bed) = (format!("Kumi Vocal {tag}"), format!("Kumi Bed {tag}"));
         println!("Two tracks of its own: “{vocal}” (a melody, its fader down) and “{bed}” (louder chords in its register), Drift each");
-        // The vocal well under the bed: truly buried, so masking is on the checklist whatever Main's chain does.
-        self.part(&vocal, &[(84, 90)], Some(0.5)).await?;
+        // The vocal 2.8 dB down: buried about a quarter of the time. Not all of it, so the reading can tell where it was
+        // heard: Kumi's device left after the Limiter read 100 % through the limiting and 26 % with it off.
+        self.part(&vocal, &[(84, 90)], Some(0.78)).await?;
         self.part(&bed, &[(83, 127), (86, 127), (88, 127), (91, 127)], None).await?;
         let before = self.main_devices().await;
         let main = self.rows("main-track", json!({"fields": ["name"]})).await;
