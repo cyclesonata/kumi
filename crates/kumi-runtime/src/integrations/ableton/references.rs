@@ -2,6 +2,7 @@
 use super::{
     changes::{hex_color, KnownTrack, REFERENCE_FIELDS},
     context::{payload, query_key, ObservationError, PARENTS},
+    mutations::track_index_of,
 };
 use crate::{
     core::contracts::{JsonObject, ToolResult},
@@ -29,6 +30,20 @@ pub struct References {
     /// (`moved_places`), or it would act on what used to be there.
     moved: IndexSet<String>,
 }
+/// Device, chain, parameter and drum pad refs on some tracks (`References::keep`), to put back.
+#[derive(Default)]
+pub struct KeptRefs {
+    refs: Vec<(String, String)>,
+    names: Vec<(String, String)>,
+}
+
+/// Whether a move or a delete of a device on one of `tracks` retires this ref: Live's registry keeps places, and every
+/// device, chain, parameter and drum pad there may have moved (a mixer's haven't).
+pub fn retired_by_shift(reference: &str, tracks: &[f64]) -> bool {
+    static DEVICE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":(?:device|parameter|chain|drum_pad):").unwrap());
+    DEVICE.is_match(reference) && !reference.contains(":mixer:") && track_index_of(reference).is_some_and(|index| tracks.contains(&index))
+}
+
 /// Overflow also requires the owner to invalidate its observation lease.
 #[derive(Debug, Clone)]
 pub struct ReferenceError {
@@ -239,6 +254,34 @@ impl References {
         self.refs.shift_remove(reference);
         self.known.shift_remove(reference);
         self.unname(reference);
+    }
+    /// What a move or a delete of a device on `track` retires (`retired_by_shift`), with its short names: kept to put
+    /// back once the track's devices are where they were again.
+    pub fn keep(&self, track: &str) -> KeptRefs {
+        let long = self.lengthen(&json!({"ref": track}));
+        let Some(index) = long["ref"].as_str().and_then(track_index_of) else { return KeptRefs::default() };
+        let on = |reference: &String| retired_by_shift(reference, &[index]);
+        KeptRefs {
+            refs: self.refs.iter().filter(|(reference, _)| on(reference)).map(|(a, b)| (a.clone(), b.clone())).collect(),
+            names: self.short.iter().filter(|(reference, _)| on(reference)).map(|(a, b)| (a.clone(), b.clone())).collect(),
+        }
+    }
+    /// Puts back refs `keep` kept, with their short names: a name given to one of them since (Kumi's own reads and
+    /// steps meanwhile, which the model never saw) gives way to the one the model knows.
+    pub fn put_back(&mut self, kept: KeptRefs) {
+        for (reference, kind) in kept.refs {
+            self.refs.entry(reference).or_insert(kind);
+        }
+        for (reference, short) in kept.names {
+            // A retired name never names anything else, so this only guards against a cleared book.
+            if self.long.get(&short).is_some_and(|other| *other != reference) {
+                continue;
+            }
+            if let Some(since) = self.short.insert(reference.clone(), short.clone()).filter(|since| *since != short) {
+                self.long.shift_remove(&since);
+            }
+            self.long.insert(short, reference);
+        }
     }
     pub fn named_references(&self) -> Vec<String> {
         self.short.keys().cloned().collect()
@@ -573,6 +616,35 @@ mod tests {
         let returns = Shift { tracks_gone: vec![9], sends: true, ..Default::default() };
         assert_eq!(to(&returns, "7:parameter:mixer:2:sends:0"), Moved::Gone);
         assert_eq!(to(&returns, "7:parameter:mixer:2:volume"), Moved::Same);
+    }
+
+    #[test]
+    fn mains_device_refs_kept_before_a_move_there_come_back_with_their_names() {
+        let mut book = References::default();
+        for reference in ["7:track:6", "7:device:6:0", "7:parameter:7:device:6:0:12", "7:device:2:0", "7:parameter:mixer:6:volume"] {
+            book.refs.insert(reference.into(), "x".into());
+        }
+        let (main, limiter, gain) =
+            (book.short_ref("7:track:6"), book.short_ref("7:device:6:0"), book.short_ref("7:parameter:7:device:6:0:12"));
+        // Kept by Main's short name as well as its long one.
+        let kept = book.keep(&main);
+        // A move and a delete on Main retire its devices' refs and their parameters', not its mixer's or another track's.
+        for reference in book.refs.keys().cloned().chain(book.named_references()).collect::<Vec<_>>() {
+            if retired_by_shift(&reference, &[6.]) {
+                book.retire(&reference);
+            }
+        }
+        assert_eq!(book.refs.keys().cloned().collect::<Vec<_>>(), ["7:track:6", "7:device:2:0", "7:parameter:mixer:6:volume"]);
+        // Kumi's own read of Main meanwhile names its first device anew.
+        let since = book.short_ref("7:device:6:0");
+        assert_ne!(since, limiter);
+        book.put_back(kept);
+        assert!(book.refs.contains_key("7:device:6:0") && book.refs.contains_key("7:parameter:7:device:6:0:12"));
+        assert_eq!(book.lengthen(&json!({"ref": gain}))["ref"], "7:parameter:7:device:6:0:12");
+        assert_eq!(book.short_ref("7:device:6:0"), limiter);
+        assert_eq!(book.lengthen(&json!({"ref": since}))["ref"], json!(since));
+        // Nothing was kept for a track Kumi can't place.
+        assert!(book.keep("nowhere").refs.is_empty());
     }
 
     #[test]

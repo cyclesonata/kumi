@@ -1,5 +1,5 @@
 use super::super::{bridge_version::EARS_BRIDGE, samples::user_library};
-use super::rig::{Rig, RigEars};
+use super::rig::{BeforeMainTap, Rig, RigEars, BEFORE_MAIN};
 use super::*;
 use crate::ears::{
     device::{install_ears, EARS_ITEM},
@@ -179,14 +179,20 @@ impl Rendering {
         })
     }
     pub(super) async fn place_tap(&self, link: Rc<dyn EarsLink>, track: &str, signal: Signal) -> Result<Tap, TapError> {
+        self.place_tap_besides(link, track, &[], signal).await
+    }
+    /// `place_tap`, never taking one of `placed` (the rig's own taps on the same track, loaded moments before) for it.
+    async fn place_tap_besides(&self, link: Rc<dyn EarsLink>, track: &str, placed: &[f64], signal: Signal) -> Result<Tap, TapError> {
         let location = self.lom_track_path(track, signal.clone()).await?;
         let before: Vec<_> = link.taps().iter().map(|tap| tap.id).collect();
+        let placed = placed.to_vec();
         let loading = now_ms();
         self.step("load_device", json!({"itemId":EARS_ITEM,"trackRef":track}), signal.clone()).await?;
         let tap = link
             .wait_for(
                 Rc::new(move |candidate| {
                     candidate.loaded_at.map_or_else(|| !before.contains(&candidate.id), |loaded| loaded >= loading as f64 - 1000.)
+                        && !placed.contains(&candidate.id)
                         && candidate.path.starts_with(&format!("{location} devices "))
                 }),
                 6000,
@@ -203,12 +209,131 @@ impl Rendering {
     pub(super) async fn place_taps(&self, rig: &mut Rig, signal: Signal) -> Result<(), TapError> {
         for source in &rig.sources {
             let track = if source.mix { self.main_volume(signal.clone()).await?.0 } else { source.track.clone() };
-            let RigEars { link, taps } = rig.ears.as_mut().unwrap();
+            let RigEars { link, taps, .. } = rig.ears.as_mut().unwrap();
             taps.insert(source.name.clone(), self.place_tap(link.clone(), &track, signal.clone()).await?);
+        }
+        if rig.before_main {
+            self.place_before_main(rig, signal).await;
         }
         Ok(())
     }
+    /// A second tap on Main, first on its chain: the mix as it comes into Main's chain, heard in the same pass. Live
+    /// loads it last; it's moved first. One that can't be placed is deleted again, the listen goes on without it, and
+    /// why is kept for the masking note (masking then reads only through a Main chain that leaves it be).
+    async fn place_before_main(&self, rig: &mut Rig, signal: Signal) {
+        let began = now_ms();
+        let marked: std::collections::HashSet<String> = self.history.entries.borrow().keys().cloned().collect();
+        // Main's refs before anything of Kumi's is on it: the move and the delete retire them, and once Main's chain is
+        // as it was again, they name what they did.
+        let mut kept = None;
+        let mut identity = None;
+        let placed: Result<Tap, RuntimeError> = async {
+            let (main, _) = self.main_volume(signal.clone()).await?;
+            let read = |signal: Signal| self.rows("device", json!({"parent":main,"fields":["objectIdentity"]}), signal);
+            let had: Vec<String> = read(signal.clone()).await?.iter().map(object_identity).collect();
+            kept = Some((had, self.history.connection.references.borrow().keep(&main)));
+            let ears = rig.ears.as_ref().unwrap();
+            let placed: Vec<f64> = ears.taps.values().map(|tap| tap.id).collect();
+            // Live's browser now and then loads nothing, and the bridge says so with nothing left behind: once more.
+            let mut again = true;
+            let tap = loop {
+                match self.place_tap_besides(ears.link.clone(), &main, &placed, signal.clone()).await {
+                    Ok(tap) => break tap,
+                    Err(error) if error.silent => return Err(observation("its device there didn't start in time")),
+                    Err(error) if again && error.error.to_string().contains("without a residual device") => {
+                        if std::env::var("KUMI_TIMING").is_ok_and(|s| !s.is_empty()) {
+                            eprintln!("[ears] Live loaded nothing before Main: once more");
+                        }
+                        again = false;
+                        delay(250., signal.clone()).await?;
+                    }
+                    Err(error) => return Err(error.error),
+                }
+            };
+            // Its device: the one this load made, by the identity Live gave for it, wherever it landed on Main.
+            let made = self.history.entries.borrow().iter().filter(|(id, _)| !marked.contains(*id)).find_map(|(_, entry)| {
+                let entry = entry.borrow();
+                (entry.tool.as_deref() == Some("load_device")).then(|| entry.created.clone()).flatten()
+            });
+            let made = made.ok_or_else(|| observation("Live didn't say which device it loaded"))?;
+            let rows = read(signal.clone()).await?;
+            let device = device_with(&rows, &made).ok_or_else(|| observation("Kumi couldn't find its device on Main"))?;
+            identity = Some(made);
+            let reference = device.get("ref").and_then(Value::as_str).ok_or_else(|| observation("Live gave its device no ref"))?;
+            self.step("move_device", json!({"deviceRef":reference,"index":0}), signal.clone()).await?;
+            Ok(tap)
+        }
+        .await;
+        let steps: Vec<String> = self.history.entries.borrow().keys().filter(|id| !marked.contains(*id)).cloned().collect();
+        let ears = rig.ears.as_mut().unwrap();
+        let (had, refs) = kept.unwrap_or_default();
+        match (placed, identity) {
+            (Ok(tap), Some(identity)) => {
+                ears.taps.insert(BEFORE_MAIN.into(), tap);
+                ears.before_main = Some(BeforeMainTap { identity, steps, had, refs });
+                if std::env::var("KUMI_TIMING").is_ok_and(|s| !s.is_empty()) {
+                    eprintln!("[ears] placed before Main: {} ms", now_ms() - began);
+                }
+            }
+            (failed, identity) => {
+                // Taken off at once: half placed, it would sit on Main through the listen.
+                if let Some(identity) = identity {
+                    ears.before_main = Some(BeforeMainTap { identity, steps, had, refs });
+                    self.remove_before_main(rig, self.cleanup()).await;
+                }
+                if let Err(error) = failed {
+                    let error = error.to_string();
+                    if std::env::var("KUMI_TIMING").is_ok_and(|s| !s.is_empty()) {
+                        eprintln!("[ears] not placed before Main: {error}");
+                    }
+                    rig.before_main_missed = Some(kumi_common::js::string::head(&error, 160).to_owned());
+                }
+            }
+        }
+    }
+    /// Takes the tap first on Main off again by Live's identity for its device (undoing its move and its load is less
+    /// sure), and forgets the steps that placed it. Main's refs come back when its chain is as it was. Said when the
+    /// device can't be taken off.
+    pub(super) async fn remove_before_main(&self, rig: &mut Rig, signal: Signal) {
+        let Some(ears) = rig.ears.as_mut() else { return };
+        let Some(placed) = ears.before_main.take() else { return };
+        ears.taps.shift_remove(BEFORE_MAIN);
+        let began = now_ms();
+        let read = |signal: Signal| async move {
+            let (main, _) = self.main_volume(signal.clone()).await.ok()?;
+            self.rows("device", json!({"parent":main,"fields":["objectIdentity"]}), signal).await.ok()
+        };
+        let found = read(signal.clone())
+            .await
+            .map(|rows| device_with(&rows, &placed.identity).and_then(|row| row.get("ref").and_then(Value::as_str).map(str::to_owned)));
+        let gone = match found {
+            Some(None) => true,
+            Some(Some(reference)) => {
+                self.history.quietly(None, self.step("delete_device", json!({"ref":reference}), signal.clone())).await.is_ok()
+            }
+            None => false,
+        };
+        if gone {
+            self.history.forget(&placed.steps);
+            rig.steps.retain(|id| !placed.steps.contains(id));
+            let now: Option<Vec<String>> = read(signal).await.map(|rows| rows.iter().map(object_identity).collect());
+            let back = now.as_ref() == Some(&placed.had);
+            if back {
+                self.history.connection.references.borrow_mut().put_back(placed.refs);
+            }
+            if std::env::var("KUMI_TIMING").is_ok_and(|s| !s.is_empty()) {
+                eprintln!(
+                    "[ears] taken off Main: {} ms{}",
+                    now_ms() - began,
+                    if back { "" } else { " (its chain changed: refs stay retired)" }
+                );
+            }
+        } else {
+            rig.notes.push("Kumi's listening device may still be first on Main's chain: delete it in Live.".into());
+        }
+    }
     pub(super) async fn remove_taps(&self, rig: &mut Rig) {
+        self.remove_before_main(rig, self.cleanup()).await;
         let cleanup = self.cleanup();
         let loads: Vec<_> = rig
             .steps
@@ -273,6 +398,24 @@ pub(super) async fn prune_takes(folder: &Path, budget: u64, fresh: std::time::Du
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_device_moved_first_on_main_is_only_ever_the_one_its_load_made() {
+        let row = |reference: &str, identity: &str| json!({"ref": reference, "objectIdentity": identity}).as_object().unwrap().clone();
+        // Main as Live's walk lists it: a rack's devices right after the rack, so a row's place isn't its place on
+        // Main's chain. The Ears device the load made (Live's identity "ears") is found wherever it is.
+        let rows = [
+            row("7:device:6:0", "rack"),
+            row("7:device:6:0:0:0", "eq"),
+            row("7:device:6:1", "limiter"),
+            row("7:device:6:2", "main tap"),
+            row("7:device:6:3", "ears"),
+        ];
+        assert_eq!(device_with(&rows, "ears").and_then(|row| row["ref"].as_str()), Some("7:device:6:3"));
+        // The producer's devices are never it: not the last one, nor one inside the rack, when the load's isn't there.
+        assert!(device_with(&rows[..3], "ears").is_none());
+        // Nor a row Live gave no identity for, when the load had none either.
+        assert!(device_with(&[json!({"ref": "7:device:6:0"}).as_object().unwrap().clone()], "").is_none());
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn a_crashed_sessions_ears_folder_is_swept_and_a_running_ones_kept() {
         let parent = tempfile::tempdir().unwrap();
@@ -354,5 +497,19 @@ mod tests {
         let path = raw.0.clone();
         drop(raw);
         assert!(!path.exists());
+    }
+}
+
+/// The device among a chain's rows that Live knows by `identity` (a rack's devices are among them too).
+fn device_with<'a>(rows: &'a [JsonObject], identity: &str) -> Option<&'a JsonObject> {
+    rows.iter().find(|row| !identity.is_empty() && object_identity(row) == identity)
+}
+
+/// A device row's identity in Live (empty when the bridge doesn't say).
+fn object_identity(row: &JsonObject) -> String {
+    match row.get("objectIdentity") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Number(number)) => number.to_string(),
+        _ => String::new(),
     }
 }

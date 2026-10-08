@@ -929,7 +929,13 @@ impl Checklist {
 
     /// What each item reads from a listen (and, for masking, the focus element's own listen).
     pub fn read(&self, heard: &Heard, focus: Option<&Heard>) -> Vec<Option<f64>> {
-        self.items.iter().map(|item| read(&item.quantity, heard, focus)).collect()
+        self.read_with(heard, focus, None)
+    }
+
+    /// As `read`, with masking read against `before_main` when it was heard: the mix before Main's chain, as the focus
+    /// is, so a gain, a limiter or an EQ on Main moves neither reading.
+    pub fn read_with(&self, heard: &Heard, focus: Option<&Heard>, before_main: Option<&Heard>) -> Vec<Option<f64>> {
+        self.items.iter().map(|item| reading(&item.quantity, heard, focus, before_main).filter(|value| value.is_finite())).collect()
     }
 
     /// The items a listen can't read, taken off the checklist (and said): what can't be measured can't be judged, and an
@@ -1259,13 +1265,19 @@ pub fn utility_gain(device: &MainDevice) -> Option<f64> {
     gain
 }
 
-/// Why masking can't be read fairly on a run over the mix, when it can't: the mix is heard after Main's chain but
-/// `focus` before it, so a device there (a limiter's gain, its limiting, an EQ) moves one and not the other. Masked by
-/// 0 % read as 100 % with 8 dB on Main, and 100 % as 12 % under heavy limiting. `devices` are Main's (`MainState`).
-pub fn masking_unfair(focus: &str, devices: &[String]) -> Option<String> {
+/// Why masking can't be read fairly on a run over the mix, when it can't: without Kumi Ears' tap first on Main, the mix
+/// is heard after Main's chain but `focus` before it, so a device there (a limiter's gain, its limiting, an EQ) moves
+/// one and not the other. Masked by 0 % read as 100 % with 8 dB on Main, and 100 % as 12 % under heavy limiting.
+/// `devices` are Main's (`MainState`); `missed` is why that tap wasn't heard when Kumi Ears tried (None: no Max for
+/// Live).
+pub fn masking_unfair(focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
     (!devices.is_empty()).then(|| {
+        let instead = match missed {
+            Some(why) => format!("Kumi couldn't hear the mix as it comes into Main's chain this time ({why})"),
+            None => "With Max for Live, Kumi hears the mix as it comes into Main's chain and reads masking there".into(),
+        };
         format!(
-            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own; reading it through Main's chain is #289",
+            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own. {instead}",
             devices.join(", ")
         )
     })
@@ -1322,10 +1334,10 @@ fn describe(quantity: &Quantity) -> (String, String, &'static str, f64) {
 
 /// A quantity read from a listen: None when it can't be read there (silence reads as nothing, never as a number).
 pub fn read(quantity: &Quantity, heard: &Heard, focus: Option<&Heard>) -> Option<f64> {
-    reading(quantity, heard, focus).filter(|value| value.is_finite())
+    reading(quantity, heard, focus, None).filter(|value| value.is_finite())
 }
 
-fn reading(quantity: &Quantity, heard: &Heard, focus: Option<&Heard>) -> Option<f64> {
+fn reading(quantity: &Quantity, heard: &Heard, focus: Option<&Heard>, before_main: Option<&Heard>) -> Option<f64> {
     let m: &Measures = &heard.measures;
     match quantity {
         Quantity::Integrated => m.integrated,
@@ -1374,7 +1386,7 @@ fn reading(quantity: &Quantity, heard: &Heard, focus: Option<&Heard>) -> Option<
             ),
             ProblemKind::Masking => {
                 let _ = name;
-                detect::masking_share(focus?, heard)
+                detect::masking_share(focus?, before_main.unwrap_or(heard))
             }
             _ => None,
         },

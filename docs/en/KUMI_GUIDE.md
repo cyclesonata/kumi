@@ -339,12 +339,15 @@ trusting them:
   tolerance. Kumi first hears the whole stretch and lists what's off: harsh or
   resonant frequencies, wide lows, rumble, DC, a loud bass note, overs and
   clipping, and what masks the element you name.
-- **Masking is read only through a transparent Main.** Kumi hears the element
-  before Main's chain and the mix after it, so masking is on the checklist only
-  while Main's devices are off, meters (Spectrum, Tuner) or a Utility that only
-  turns the level (the element is heard at that level too). With anything else
-  on Main, such as a limiter or an EQ, it's left off and the run says so: to
-  work on the element cutting through, judge it with Main's devices switched
+- **Masking is read before Main's chain.** Kumi hears the element before
+  Main's chain. With Max for Live it also hears the mix as it comes into Main's
+  chain (a second Kumi Ears device, first on Main, taken off again after each
+  listen), so masking reads fairly whatever Main holds: a limiter or an EQ there
+  doesn't move it. Without Max for Live it hears only the mix after Main's
+  chain, so masking is on the checklist only while Main's devices are off,
+  meters (Spectrum, Tuner) or a Utility that only turns the level (the element
+  is heard at that level too). With anything else on Main it's left off and the
+  run says so: judge the element cutting through with Main's devices switched
   off, then the master's loudness and peaks on their own.
 - **One change at a time:** after each change Kumi brings the level back where it
   belongs (the goal's loudness, or where it was) with the last Live Limiter on

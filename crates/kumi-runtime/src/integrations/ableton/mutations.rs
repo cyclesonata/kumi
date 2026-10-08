@@ -8,7 +8,7 @@ use super::{
     observation::Observer,
     options::AbletonOptions,
     parameters::{ChangeOutcome, Parameters},
-    references::Shift,
+    references::{retired_by_shift, Shift},
     views::ViewHost,
 };
 use crate::core::{contracts::*, errors::RuntimeError};
@@ -496,12 +496,8 @@ impl Mutations {
             {
                 let mut book = connection.references.borrow_mut();
                 let references: IndexSet<_> = book.refs.keys().cloned().chain(book.named_references()).collect();
-                static DEVICE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r":(?:device|parameter|chain|drum_pad):").unwrap());
                 for reference in references {
-                    if DEVICE.is_match(&reference)
-                        && !reference.contains(":mixer:")
-                        && track_index_of(&reference).is_some_and(|index| tracks.contains(&index))
-                    {
+                    if retired_by_shift(&reference, &tracks) {
                         book.retire(&reference);
                     }
                 }

@@ -5,7 +5,7 @@
 //! round. The whole stretch is heard again only at the end.
 
 use super::super::{connection::NO_CURRENT_LIVE, display::parse_display};
-use super::rig::Window;
+use super::rig::{Window, BEFORE_MAIN};
 use super::*;
 use crate::listening::{
     checklist::{
@@ -90,6 +90,8 @@ pub struct JudgeRun {
     /// The span's own capture (its file and where the part starts), to cut excerpts from before anything changes.
     pub(super) span_file: (PathBuf, f64),
     pub(super) span_focus: Option<(PathBuf, f64)>,
+    /// The span's mix as it came into Main's chain, when Kumi Ears heard it there (masking reads against it).
+    pub(super) span_premix: Option<(PathBuf, f64)>,
     pub(super) loudness: Vec<Option<f64>>,
     pub(super) problems: Vec<Problem>,
     pub(super) first: Vec<Option<f64>>,
@@ -259,7 +261,7 @@ impl Rendering {
         };
         let offset = span.from * 60. / tempo;
         // Masking only where it can be read fairly: not through a Main chain that moves the mix but not the focus.
-        let masking_off = goal.focus.as_deref().and_then(|name| masking_unfair(name, &heard.main_unfair));
+        let masking_off = goal.focus.as_deref().and_then(|name| masking_unfair(name, &heard.main_unfair, heard.premix_missed.as_deref()));
         let read_masking = masking_off.is_none();
         let goal = Goal {
             loudness: goal.loudness,
@@ -275,13 +277,13 @@ impl Rendering {
         let bar = self.observer.beats_per_bar.get().max(1.) * 60. / tempo;
         // What was heard is worked out off the app's thread: detectors, the checklist and where each problem stands
         // out take a while over a whole song.
-        let (main, focus) = (heard.main, heard.focus);
+        let (main, focus, premix) = (heard.main, heard.focus, heard.premix);
         let analysed = tokio::task::spawn_blocking(move || {
             let mut problems = detect::harshness(&main);
             problems.extend(detect::low_end(&main));
             problems.extend(detect::peaks(&main, goal.true_peak));
             if let (Some(focus), Some(name), true) = (&focus, &goal.focus, read_masking) {
-                problems.extend(detect::masking(focus, &main, name));
+                problems.extend(detect::masking(focus, premix.as_ref().unwrap_or(&main), name));
             }
             // Times as the song's, not the capture's.
             for problem in &mut problems {
@@ -291,7 +293,7 @@ impl Rendering {
                 }
             }
             let mut checklist = Checklist::new(&goal, &main, &problems);
-            let mut whole = checklist.read(&main, focus.as_ref());
+            let mut whole = checklist.read_with(&main, focus.as_ref(), premix.as_ref());
             let unreadable = checklist.drop_unreadable(&mut whole);
             let worst: Vec<Option<f64>> = checklist
                 .items
@@ -329,6 +331,7 @@ impl Rendering {
             span,
             span_file: (heard.file.clone(), heard.start),
             span_focus: heard.focus_file.clone(),
+            span_premix: heard.premix_file.clone(),
             loudness: main.measures.short_term.clone(),
             problems: problems.clone(),
             first: whole.clone(),
@@ -491,7 +494,7 @@ impl Rendering {
         let masking = masking_items(&self.judge.borrow().as_ref().unwrap().checklist);
         let held: Vec<(usize, Option<f64>)> =
             if heard.main_unfair.is_empty() { vec![] } else { masking.iter().map(|index| (*index, before.values[*index])).collect() };
-        let unfair = heard.main_unfair.clone();
+        let (unfair, missed) = (heard.main_unfair.clone(), heard.premix_missed.clone());
         let mut after = after;
         for (index, value) in &held {
             after[*index] = *value;
@@ -544,7 +547,7 @@ impl Rendering {
             }
             // A kept change left Main's chain moving the mix but not the focus: masking can't be read from here.
             if verdict.kept && !masking.is_empty() {
-                if let Some(note) = masking_unfair(run.focus.as_deref().unwrap_or("the focus"), &unfair) {
+                if let Some(note) = masking_unfair(run.focus.as_deref().unwrap_or("the focus"), &unfair, missed.as_deref()) {
                     drop_items(run, &masking);
                     verdict.why = format!("{}; {}", verdict.why, note);
                 }
@@ -668,7 +671,7 @@ impl Rendering {
             let run = guard.as_mut().unwrap();
             run.listens += 1;
             // Main's chain now moves the mix but not the focus: the new baseline holds no masking.
-            let masking_off = drop_masking_if_unfair(run, &heard.main_unfair);
+            let masking_off = drop_masking_if_unfair(run, &heard.main_unfair, heard.premix_missed.as_deref());
             let values = heard.read(&run.checklist);
             let before = run
                 .excerpts
@@ -771,10 +774,10 @@ impl Rendering {
         let mut guard = self.judge.borrow_mut();
         let run = guard.as_mut().unwrap();
         run.listens += 1;
-        if let Some(note) = drop_masking_if_unfair(run, &heard.main_unfair) {
+        if let Some(note) = drop_masking_if_unfair(run, &heard.main_unfair, heard.premix_missed.as_deref()) {
             self.tell(note, None);
         }
-        let values = run.checklist.read(&heard.main, heard.focus.as_ref());
+        let values = heard.read(&run.checklist);
         let state = run.state;
         run.excerpts.push(Excerpt { window, state, values, file, start: heard.start, loudness: heard.main.measures.integrated });
         Ok(Ok(()))
@@ -865,11 +868,12 @@ impl Rendering {
         };
         let ids = self.applied_ids();
         // Main's chain moves the mix but not the focus: the last listen can't read masking, so it comes off.
-        let masking_off = drop_masking_if_unfair(self.judge.borrow_mut().as_mut().unwrap(), &heard.main_unfair);
+        let masking_off =
+            drop_masking_if_unfair(self.judge.borrow_mut().as_mut().unwrap(), &heard.main_unfair, heard.premix_missed.as_deref());
         // The whole span's readings are worked out off the app's thread.
         let checklist = self.judge.borrow().as_ref().unwrap().checklist.clone();
-        let (main, focus) = (heard.main, heard.focus);
-        let now = tokio::task::spawn_blocking(move || checklist.read(&main, focus.as_ref()))
+        let (main, focus, premix) = (heard.main, heard.focus, heard.premix);
+        let now = tokio::task::spawn_blocking(move || checklist.read_with(&main, focus.as_ref(), premix.as_ref()))
             .await
             .map_err(|error| RuntimeError::plain(error.to_string()))?;
         let mut guard = self.judge.borrow_mut();
@@ -1075,16 +1079,23 @@ impl Rendering {
         let rendering = self.rendering_now();
         let mut rig = None;
         let rendered: Result<(IndexMap<String, Render>, Vec<(String, bool)>), RuntimeError> = async {
-            rig = Some(self.open_rig(&candidates, Some(window.from), Some(window.beats), signal.clone()).await?);
+            // Over the mix with a focus, the mix is heard as it comes into Main's chain too: masking reads there.
+            let before_main = track.is_none() && candidates.len() > 1;
+            rig = Some(self.open_rig_with(&candidates, Some(window.from), Some(window.beats), before_main, signal.clone()).await?);
             let rig = rig.as_mut().unwrap();
             let files = self.render_pass(rig, signal.clone()).await?;
             Ok((files, rig.sources.iter().map(|source| (source.name.clone(), source.mix)).collect()))
         }
         .await;
         let mut notes = vec![];
+        // Why the mix wasn't heard as it comes into Main's chain, when Kumi Ears tried to: its device wasn't placed, or
+        // nothing came through from it.
+        let mut tried = None;
         if let Some(rig) = rig.as_mut() {
+            let placed = rig.ears.as_ref().is_some_and(|ears| ears.before_main.is_some());
             self.close_rig(rig).await;
             notes.extend(rig.notes.clone());
+            tried = rig.before_main_missed.clone().or_else(|| placed.then(|| "nothing came through from it".to_string()));
         }
         drop(rendering);
         self.tell("Listened", Some(false));
@@ -1115,10 +1126,19 @@ impl Rendering {
                 if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(" ")) }
             )
         });
-        // On a run over the mix with a focus, Main's chain as it is now (read from Live, so an undo or the producer's
-        // own move is in it): the mix is heard after it, the focus before it.
-        let main_chain = match (track, &focus_name) {
-            (None, Some(_)) => Some(self.main_state(signal.clone()).await),
+        // On a run over the mix with a focus, the mix as it comes into Main's chain, when Kumi Ears heard it there: the
+        // focus is heard before Main's chain too, so masking reads fairly whatever Main's chain holds.
+        let premix = match (track, &focus_name, files.get(BEFORE_MAIN)) {
+            (None, Some(_), Some(render)) => {
+                let heard = measure(render.file.clone(), render.start).await?;
+                Some((heard, (self.keep_file(&PathBuf::from(&render.file)).await, render.start)))
+            }
+            _ => None,
+        };
+        // Without it, Main's chain as it is now (read from Live, so an undo or the producer's own move is in it): the
+        // mix is heard after it, the focus before it.
+        let main_chain = match (track, &focus_name, &premix) {
+            (None, Some(_), None) => Some(self.main_state(signal.clone()).await),
             _ => None,
         };
         let (heard_focus, focus_file, focus_gain) = match focus_name.clone().and_then(|name| files.get(&name).cloned()) {
@@ -1138,7 +1158,27 @@ impl Rendering {
         }
         let file = self.keep_file(&PathBuf::from(&main.file)).await;
         let main_unfair = main_chain.map(|state| state.unfair).unwrap_or_default();
-        Ok(Ok(JudgeHeard { main: heard_main, focus: heard_focus, file, start: main.start, focus_file, silent, focus_gain, main_unfair }))
+        let premix_missed = if premix.is_none() { tried } else { None };
+        let (premix, premix_file) = premix.unzip();
+        // What went wrong around a listen that worked is said too (with silence, it's in what's said about that).
+        if silent.is_none() {
+            for note in &notes {
+                self.tell(note.clone(), None);
+            }
+        }
+        Ok(Ok(JudgeHeard {
+            main: heard_main,
+            focus: heard_focus,
+            file,
+            start: main.start,
+            focus_file,
+            premix,
+            premix_file,
+            silent,
+            focus_gain,
+            main_unfair,
+            premix_missed,
+        }))
     }
 
     /// Main's chain as masking needs it, read from Live as it is now: what on it moves the mix but not the focus, and
@@ -1288,7 +1328,11 @@ impl Rendering {
             Some((file, start)) => Some(cut(file, start).await?.gained(run.span_focus_gain)),
             None => None,
         };
-        let values = run.checklist.read(&heard, focus.as_ref());
+        let premix = match run.span_premix.clone() {
+            Some((file, start)) => Some(cut(file, start).await?),
+            None => None,
+        };
+        let values = run.checklist.read_with(&heard, focus.as_ref(), premix.as_ref());
         Ok(Excerpt { window, state: run.state, values, file, start: start + into, loudness: heard.measures.integrated })
     }
 
@@ -1504,13 +1548,13 @@ impl Rendering {
 }
 
 /// Takes masking off a run's checklist when Main's chain (`unfair`, as last heard) moves the mix but not the focus;
-/// what to tell, when it did.
-fn drop_masking_if_unfair(run: &mut JudgeRun, unfair: &[String]) -> Option<String> {
+/// what to tell, when it did (and why the mix wasn't heard as it comes into Main's chain, when Kumi tried: `missed`).
+fn drop_masking_if_unfair(run: &mut JudgeRun, unfair: &[String], missed: Option<&str>) -> Option<String> {
     let masking = masking_items(&run.checklist);
     if masking.is_empty() {
         return None;
     }
-    let note = masking_unfair(run.focus.as_deref().unwrap_or("the focus"), unfair)?;
+    let note = masking_unfair(run.focus.as_deref().unwrap_or("the focus"), unfair, missed)?;
     drop_items(run, &masking);
     Some(note)
 }
@@ -1650,6 +1694,11 @@ pub(super) struct JudgeHeard {
     pub focus: Option<Heard>,
     /// The focus element's own capture and where its part starts, to cut excerpts from.
     pub focus_file: Option<(PathBuf, f64)>,
+    /// On a run over the mix with a focus, the mix as it comes into Main's chain, when Kumi Ears heard it there too
+    /// (a second device, first on Main's chain): masking reads the focus against it, both before Main's chain. And its
+    /// capture, to cut excerpts from.
+    pub premix: Option<Heard>,
+    pub premix_file: Option<(PathBuf, f64)>,
     pub file: PathBuf,
     pub start: f64,
     /// Silence came through (why that's a problem, said): nothing on the checklist can be read from it.
@@ -1659,6 +1708,8 @@ pub(super) struct JudgeHeard {
     /// On a run over the mix with a focus, Main's devices that change the mix in a way the focus (heard before Main)
     /// doesn't share: masking can't be read fairly while there are any.
     pub main_unfair: Vec<String>,
+    /// Why the mix wasn't heard as it comes into Main's chain, when Kumi Ears was there and tried to.
+    pub premix_missed: Option<String>,
 }
 
 impl JudgeHeard {
@@ -1667,7 +1718,7 @@ impl JudgeHeard {
         if self.silent.is_some() {
             return vec![None; checklist.items.len()];
         }
-        checklist.read(&self.main, self.focus.as_ref())
+        checklist.read_with(&self.main, self.focus.as_ref(), self.premix.as_ref())
     }
 }
 
