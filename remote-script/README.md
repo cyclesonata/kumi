@@ -225,6 +225,8 @@ Validated macOS ARM64 12.4.15b4/b5/b6 bindings can coexist in one installation;
 a missing validated component profile skips only that component. Artifact or
 integrity failures tear down all native providers; ordinary Kumi stays active.
 The existing owner-only `willington.json` opt-in and write controls still apply.
+
+Live 12.4.15b6 ARM64 support requires Willington `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a` or a later bundle retaining its validated profile. All four components are included. Check the installed `willington/release.json`; older bundled copies need updating. Follow Actions and Native Editing still require local self-tests for the selected library hashes. See the [integration guide](../docs/en/WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
 Follow Action evidence must match the selected library, so rerun its self-test
 after switching builds, following the [standalone self-test procedure](https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md#follow-action-self-test).
 Windows and Intel macOS bindings are not yet available.
@@ -242,8 +244,8 @@ Install the exact-build `WillingtonRackZones` Remote Script package alongside
 the existing adapters, then add the optional `"rackZones": true` field to the
 owner-only `willington.json`. The existing `enableWrites` flag controls writes.
 Rack Zones is supported on Live 12.4.15b5/b6 macOS ARM64 and included in the
-validated multi-version bundle. Default installation selects its exact b5 profile;
-other builds remain unavailable. The current validation adds 42 actual signal-gating
+validated multi-version bundle. Default installation selects its matching b5 or b6 profile;
+other builds remain unavailable. The b5 validation added 42 actual signal-gating
 checks, 49 fade measurements and seven actual Max `live.object` write/read/restore
 checks to the earlier Kumi transaction tests. See the
 [public validation summary and receipt digests](https://github.com/user1303836/kumi/blob/main/docs/evidence/rack-zones-b5.json) for the measured scope.
@@ -306,5 +308,3 @@ Remote Script's authority/idempotency path, and HISTORY undo. Group creation
 checks HISTORY refusal; cleanup explicitly ungroups it. Cleanup also restores
 the original Set state, provider and display hook and deletes the endpoint
 secret file. This does not test model inference, a released installer or chat UI.
-
-Live 12.4.15b6 ARM64 support requires Willington `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a` or a later bundle retaining its validated profile. All four components are included. Check the installed `willington/release.json`; older bundled copies need updating. Follow Actions and Native Editing still require local self-tests for the selected library hashes. See the [integration guide](../docs/en/WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
