@@ -227,9 +227,11 @@ integrity failures tear down all native providers; ordinary Kumi stays active.
 The existing owner-only `willington.json` opt-in and write controls still apply.
 
 Live 12.4.15b6 ARM64 support requires Willington `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a` or a later bundle retaining its validated profile. All four components are included. Check the installed `willington/release.json`; older bundled copies need updating. Follow Actions and Native Editing still require local self-tests for the selected library hashes. See the [integration guide](../docs/en/WILLINGTON_INTEGRATION.md#native-editing-and-its-self-test).
+
 Follow Action evidence must match the selected library, so rerun its self-test
 after switching builds, following the [standalone self-test procedure](https://github.com/user1303836/kumi/blob/main/docs/en/WILLINGTON_INTEGRATION.md#follow-action-self-test).
-Windows and Intel macOS bindings are not yet available.
+Windows x64 Live 12.4.15b5 supports Follow Actions, Device Tools and Rack Zones.
+Native Editing on Windows and all Intel macOS bindings remain unavailable.
 
 The optional Willington rack-zone adapter adds `selector-zone`, `key-zone`, and
 `velocity-zone` to `live_willington_device_preview`. Use `ref` for the rack and
