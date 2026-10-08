@@ -1,10 +1,12 @@
 //! Opt-in check on real Live that masking reads through processing on Main (#289): it adds a "vocal" (Drift, a
-//! melody) and a louder bed in the same register, puts a Limiter on Main with 12 dB into its ceiling, and judges the
-//! vocal cutting through over the mix. Masking stays on the checklist (heard against the mix as it comes into Main's
-//! chain, by a second Kumi Ears device first on Main), it reads within 5 points of the same run with the Limiter
-//! switched off, and that device is gone from Main after each listen, and after one stopped partway. Then it takes
-//! everything back with Kumi's undo. No model and no sign-in. It works in the open Set (it never opens or closes one):
-//! name it, and use a disposable one.
+//! melody) under a louder bed in the same register, puts a rack holding an EQ Eight and a Limiter with 12 dB into its
+//! ceiling on Main, and judges the vocal cutting through over the mix. On every listen masking stays on the checklist
+//! (heard against the mix as it comes into Main's chain, by a second Kumi Ears device first on Main), it reads within
+//! 5 points of the same run with the Limiter switched off, and that device is gone from Main after each listen, and
+//! after one stopped while it was first there. Then it takes everything back with Kumi's undo. No model and no
+//! sign-in. It works in the open Set (it never opens or closes one): name it, and use a disposable one.
+//! Refs to Main's devices read before the listens still work after them. KUMI_TIMING=1 also prints how long the
+//! device's placing and taking off take.
 //!   cargo build --release -p ableton-mcp-server --bins
 //!   cargo run --release -p kumi --example masking_live -- --set "<Set name>"
 use futures::FutureExt;
@@ -15,7 +17,7 @@ use kumi_common::{
     time::now_ms,
 };
 use kumi_runtime::{
-    core::contracts::ChangeState,
+    core::contracts::{ActionEvent, ChangeState},
     create_ableton_integration,
     integrations::ableton::{connection::Connect, AbletonOptions},
     mcp::client,
@@ -85,11 +87,22 @@ struct Run {
     passed: RefCell<Vec<bool>>,
 }
 
+fn bridge_options(bridge: &Path, bridge_config: &str) -> AbletonOptions {
+    let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
+    options.bridge_config = Some(bridge_config.into());
+    options.connect = Some(connect_to(bridge.into(), bridge_config.into()));
+    options
+}
+
 async fn masking_live(wanted: String, bridge_config: String, bridge: PathBuf) -> i32 {
     let records = Rc::new(RefCell::new(Vec::<ChangeRecord>::new()));
-    let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
-    options.bridge_config = Some(bridge_config.clone());
-    options.connect = Some(connect_to(bridge, bridge_config));
+    let mut options = bridge_options(&bridge, &bridge_config);
+    // What Kumi says beside its progress (a listen's notes) is printed.
+    options.on_action = Some(Rc::new(|event: ActionEvent| {
+        if !event.title.starts_with("Listen") {
+            println!("  · {}", event.title);
+        }
+    }));
     options.on_change = Some({
         let records = records.clone();
         Rc::new(move |change: ChangeRecord| {
@@ -101,9 +114,10 @@ async fn masking_live(wanted: String, bridge_config: String, bridge: PathBuf) ->
         })
     });
     options.change_timeout_ms = Some(30_000);
-    let run =
-        Run { integration: create_ableton_integration(options), observation: RefCell::new(None), records, passed: RefCell::new(vec![]) };
-    let code = match run.check(&wanted).await {
+    let run = Run::new(create_ableton_integration(options), records);
+    // Another connection to Live, to read Main's chain while a judge call holds the first one's tools.
+    let watcher = Run::new(create_ableton_integration(bridge_options(&bridge, &bridge_config)), Rc::default());
+    let code = match run.check(&wanted, &watcher).await {
         Ok(()) => {
             let passed = run.passed.borrow();
             let good = passed.iter().filter(|ok| **ok).count();
@@ -118,10 +132,15 @@ async fn masking_live(wanted: String, bridge_config: String, bridge: PathBuf) ->
     println!("\nUndo, newest first");
     run.undo_all().await;
     let _ = run.integration.close().await;
+    let _ = watcher.integration.close().await;
     code
 }
 
 impl Run {
+    fn new(integration: Rc<dyn Integration>, records: Rc<RefCell<Vec<ChangeRecord>>>) -> Self {
+        Run { integration, observation: RefCell::new(None), records, passed: RefCell::new(vec![]) }
+    }
+
     fn say(&self, ok: bool, what: &str) {
         self.passed.borrow_mut().push(ok);
         println!("  {}  {what}", if ok { "ok  " } else { "FAIL" });
@@ -162,8 +181,8 @@ impl Run {
     }
 
     /// A MIDI track playing `notes` (pitch and velocity, a quarter note each, two beats apart) through Drift, for
-    /// eight bars in the Arrangement from its start.
-    async fn part(&self, name: &str, notes: &[(i64, i64)]) -> Result<(), RuntimeError> {
+    /// eight bars in the Arrangement from its start, its fader at `volume` when one is given (0.85 is 0 dB).
+    async fn part(&self, name: &str, notes: &[(i64, i64)], volume: Option<f64>) -> Result<(), RuntimeError> {
         let added = self
             .call("add_tracks_and_scenes", json!({"tracks": [{"name": name, "kind": "midi"}], "scenes": []}))
             .await
@@ -188,6 +207,9 @@ impl Run {
         let clip = clip.ok_or_else(|| RuntimeError::plain("the clip didn't come back"))?;
         for copy in 0..2 {
             self.call("duplicate_clip", json!({"clipRef": clip, "arrangementPosition": copy * 16})).await.map_err(RuntimeError::plain)?;
+        }
+        if let Some(volume) = volume {
+            self.call("set_mixer", json!({"trackRef": track["ref"], "volume": volume})).await.map_err(RuntimeError::plain)?;
         }
         Ok(())
     }
@@ -223,33 +245,58 @@ impl Run {
         Err(RuntimeError::plain(why))
     }
 
-    /// A run over the mix, the vocal cutting through, ended at once. Masking is on its checklist with no note that it
-    /// can't be read through Main, and Main's chain is `chain` again after each listen. Masking as read, when it was.
+    /// A run over the mix, the vocal cutting through, ended at once. On both its listens masking is on the checklist
+    /// with no note that it can't be read through Main, and Main's chain is `chain` again after each. Masking as read
+    /// at the start, when it was.
     async fn judged(&self, goal: &Value, chain: &[String]) -> Option<f64> {
+        let began = std::time::Instant::now();
         let started = self.call_until("judge", goal.clone(), abort::timeout(600_000)).await;
+        println!("  (its first listen took {:.1} s)", began.elapsed().as_secs_f64());
+        let masked = self.heard_before_main(&started, "the first listen");
         let after = self.main_devices().await;
-        self.say(after == chain, &format!("Main's chain after the listen: {}", after.join(", ")));
-        let masked = match &started {
-            Ok(round) => {
-                let text = round.to_string();
-                let masked = masking(round);
-                self.say(masked.is_some(), &format!("masking is on the checklist: {}", head(&text, 300)));
-                self.say(!text.contains("can't be read through Main's chain"), "no note that masking can't be read through Main");
-                masked
-            }
-            Err(why) => {
-                self.say(false, &format!("the judge: {why}"));
-                None
-            }
-        };
+        self.say(after == chain, &format!("Main's chain after the first listen: {}", after.join(", ")));
+        let began = std::time::Instant::now();
         let done = self.call_until("judge", json!({"done": true}), abort::timeout(600_000)).await;
-        self.say(done.is_ok(), &format!("the run's last listen: {}", head(&format!("{done:?}"), 200)));
+        println!("  (its last listen took {:.1} s)", began.elapsed().as_secs_f64());
+        self.heard_before_main(&done, "the last listen");
         let after = self.main_devices().await;
         self.say(after == chain, &format!("Main's chain after the last listen: {}", after.join(", ")));
         masked
     }
 
-    async fn check(&self, wanted: &str) -> Result<(), RuntimeError> {
+    /// A round's masking, read against the mix as it comes into Main's chain: on the checklist, and no note that it
+    /// can't be read through Main. The masked share, when it was read.
+    fn heard_before_main(&self, round: &Result<Value, String>, listen: &str) -> Option<f64> {
+        let round = match round {
+            Ok(round) => round,
+            Err(why) => {
+                self.say(false, &format!("{listen}: {why}"));
+                return None;
+            }
+        };
+        let text = round.to_string();
+        let masked = masking(round);
+        let found: Vec<&str> = round["problems"]
+            .as_array()
+            .map(|found| found.iter().filter_map(|problem| problem["id"].as_str()).collect())
+            .unwrap_or_default();
+        let found = if found.is_empty() { String::new() } else { format!(" (problems found: {})", found.join(", ")) };
+        self.say(masked.is_some(), &format!("{listen}: masking is on the checklist, {masked:?}%{found}"));
+        self.say(
+            !text.contains("can't be read through Main's chain"),
+            &format!("{listen}: no note that masking can't be read through Main"),
+        );
+        masked
+    }
+
+    /// The browser item Live finds first for `query` among its `category`.
+    async fn item(&self, category: &str, query: &str) -> Result<Value, RuntimeError> {
+        let found = self.call("live_browser_search", json!({"category": category, "query": query, "limit": 1})).await;
+        let item = found.ok().map(|found| found["live"]["items"][0]["id"].clone()).filter(|item| !item.is_null());
+        item.ok_or_else(|| RuntimeError::plain(format!("{query} isn't in Live's browser")))
+    }
+
+    async fn check(&self, wanted: &str, watcher: &Run) -> Result<(), RuntimeError> {
         self.integration.start(signal()).await?;
         let observation = self.observe().await?;
         let context: Value = serde_json::from_str(&observation.context).unwrap_or(Value::Null);
@@ -258,31 +305,56 @@ impl Run {
             println!("The open Set is “{set}”, not “{wanted}”; nothing was changed.");
             return Err(RuntimeError::plain("not the Set named"));
         }
+        watcher.integration.start(signal()).await?;
+        watcher.observe().await?;
         let tag = now_ms() % 10_000;
         let (vocal, bed) = (format!("Kumi Vocal {tag}"), format!("Kumi Bed {tag}"));
-        println!("Two tracks of its own: “{vocal}” (a melody) and “{bed}” (louder chords in its register), Drift each");
-        self.part(&vocal, &[(84, 90)]).await?;
-        self.part(&bed, &[(83, 127), (86, 127), (88, 127), (91, 127)]).await?;
+        println!("Two tracks of its own: “{vocal}” (a melody, its fader down) and “{bed}” (louder chords in its register), Drift each");
+        // The vocal well under the bed: truly buried, so masking is on the checklist whatever Main's chain does.
+        self.part(&vocal, &[(84, 90)], Some(0.5)).await?;
+        self.part(&bed, &[(83, 127), (86, 127), (88, 127), (91, 127)], None).await?;
         let before = self.main_devices().await;
         let main = self.rows("main-track", json!({"fields": ["name"]})).await;
         let main = main.first().cloned().ok_or_else(|| RuntimeError::plain("Main wasn't read"))?;
-        let found = self.call("live_browser_search", json!({"category": "audio_effects", "query": "Limiter", "limit": 1})).await;
-        let item = found.ok().map(|found| found["live"]["items"][0].clone()).filter(|item| !item.is_null());
-        let item = item.ok_or_else(|| RuntimeError::plain("Limiter isn't in Live's browser"))?;
-        self.call("load_device", json!({"itemId": item["id"], "trackRef": main["ref"]})).await.map_err(RuntimeError::plain)?;
+        // A rack holding an EQ Eight, then a Limiter: Live's walk of Main lists the rack's devices right after it, so a
+        // row's place there isn't its place on Main's chain.
+        let (rack, eq, limiter) = (
+            self.item("audio_effects", "Audio Effect Rack").await?,
+            self.item("audio_effects", "EQ Eight").await?,
+            self.item("audio_effects", "Limiter").await?,
+        );
+        let steps = json!([
+            {"tool": "load_device", "input": {"itemId": rack, "trackRef": main["ref"]}, "as": "rack"},
+            {"tool": "edit_rack", "input": {"rackRef": "@rack", "action": "add-chain"}, "as": "chain"},
+            {"tool": "load_device", "input": {"itemId": eq, "chainRef": "@chain"}},
+            {"tool": "load_device", "input": {"itemId": limiter, "trackRef": main["ref"]}},
+        ]);
+        self.call("make_changes", json!({"steps": steps})).await.map_err(RuntimeError::plain)?;
         self.observe().await?;
-        let limited = self.main_devices().await;
-        println!("Main's chain: {} → {}", before.join(", "), limited.join(", "));
+        let chain = self.main_devices().await;
+        println!("Main's chain: {} → {}", before.join(", "), chain.join(", "));
         // 12 dB into the ceiling: the mix after Main's chain is louder and limited, the mix as it comes in isn't.
         self.set_limiter(&["Input Gain", "Gain"], json!("12 dB")).await?;
+        // The Limiter's switch, discovered as the model would before a listen: it still works after the listens.
+        let limiter = self.main_limiter().await?;
+        let parameters = self.rows("parameter", json!({"parent": limiter, "fields": ["name"]})).await;
+        let switch = parameters.iter().find(|row| row["name"] == "Device On").map(|row| row["ref"].clone());
+        let switch = switch.ok_or_else(|| RuntimeError::plain("the Limiter's Device On wasn't read"))?;
         let goal = json!({"goal": {"focus": vocal, "problems": true}, "from_beat": 0, "beats": 32});
 
         println!("\nJudged over the mix, the vocal cutting through, with 12 dB into the Limiter on Main");
-        let limiting = self.judged(&goal, &limited).await;
+        let limiting = self.judged(&goal, &chain).await;
 
         println!("\nThe same with the Limiter switched off");
-        self.set_limiter(&["Device On"], json!(0)).await?;
-        let off = self.judged(&goal, &limited).await;
+        let switched = self.call("set_device_parameter", json!({"deviceRef": limiter, "parameterRef": switch, "value": 0})).await;
+        self.say(
+            switched.is_ok(),
+            &format!("the Limiter switched off by refs read before the listens: {}", head(&format!("{switched:?}"), 160)),
+        );
+        if switched.is_err() {
+            self.set_limiter(&["Device On"], json!(0)).await?;
+        }
+        let off = self.judged(&goal, &chain).await;
         match (limiting, off) {
             (Some(limiting), Some(off)) => self.say(
                 (limiting - off).abs() <= 5.,
@@ -291,19 +363,28 @@ impl Run {
             _ => self.say(false, "masking read both ways, to compare"),
         }
 
-        println!("\nThe same, stopped partway through its listen");
+        println!("\nThe same, stopped once Kumi Ears is first on Main");
         let stop = Signal::new();
-        let stopping = stop.clone();
-        tokio::task::spawn_local(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-            stopping.cancel();
-        });
-        let stopped = self.call_until("judge", goal, stop).await;
-        println!("  (the judge answered: {})", head(&format!("{stopped:?}"), 200));
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let watch = async {
+            let began = std::time::Instant::now();
+            let mut seen = vec![];
+            while !stop.is_cancelled() && began.elapsed() < std::time::Duration::from_secs(30) {
+                let now = watcher.main_devices().await;
+                if now.first().is_some_and(|name| name == "Kumi Ears") && now.len() > chain.len() {
+                    seen = now;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            stop.cancel();
+            (seen, began.elapsed())
+        };
+        let (stopped, (seen, at)) = tokio::join!(self.call_until("judge", goal, stop.clone()), watch);
+        self.say(!seen.is_empty(), &format!("stopped {:.1} s in, with Main's chain: {}", at.as_secs_f64(), seen.join(", ")));
+        self.say(stopped.is_err(), &format!("the judge stopped partway: {}", head(&format!("{stopped:?}"), 200)));
         self.observe().await?;
         let after = self.main_devices().await;
-        self.say(after == limited, &format!("Main's chain after the stopped listen: {}", after.join(", ")));
+        self.say(after == chain, &format!("Main's chain after the stopped listen: {}", after.join(", ")));
         Ok(())
     }
 
