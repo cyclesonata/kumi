@@ -230,13 +230,11 @@ impl Rendering {
             let ears = rig.ears.as_ref().unwrap();
             let placed: Vec<f64> = ears.taps.values().map(|tap| tap.id).collect();
             let tap = self.place_tap_besides(ears.link.clone(), &main, &placed, signal.clone()).await.map_err(|error| error.error)?;
-            // Its device: the one on Main that wasn't there before (Live puts a loaded device last).
+            // Its device: the one on Main that wasn't there before, where the tap says it is.
             let rows = read(signal.clone()).await?;
-            let new: Vec<&JsonObject> =
-                rows.iter().filter(|row| !object_identity(row).is_empty() && !had.contains(&object_identity(row))).collect();
-            let [device] = new.as_slice() else {
-                return Err(observation("Kumi couldn't tell which device on Main is its listening device."));
-            };
+            let at = tap.path.rsplit(' ').next().and_then(|index| index.parse::<usize>().ok());
+            let device = loaded_device(&had, &rows, at)
+                .ok_or_else(|| observation("Kumi couldn't tell which device on Main is its listening device."))?;
             identity = Some(object_identity(device));
             let reference = device.get("ref").and_then(Value::as_str).ok_or_else(|| observation("A device without a ref."))?;
             self.step("move_device", json!({"deviceRef":reference,"index":0}), signal.clone()).await?;
@@ -359,6 +357,22 @@ pub(super) async fn prune_takes(folder: &Path, budget: u64, fresh: std::time::Du
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn the_device_moved_first_on_main_is_only_ever_the_one_just_loaded() {
+        let row =
+            |identity: &str| json!({"ref": format!("7:device:main:{identity}"), "objectIdentity": identity}).as_object().unwrap().clone();
+        let had = vec!["eq".to_string(), "limiter".to_string()];
+        // The new device is the one taken, wherever it is, and when the tap's place agrees.
+        let rows = [row("eq"), row("limiter"), row("ears")];
+        assert_eq!(loaded_device(&had, &rows, None).map(object_identity).as_deref(), Some("ears"));
+        assert_eq!(loaded_device(&had, &rows, Some(2)).map(object_identity).as_deref(), Some("ears"));
+        // The producer's last device (their Limiter) is never it: not with no new one, nor when the tap points at it.
+        assert!(loaded_device(&had, &[row("eq"), row("limiter")], None).is_none());
+        assert!(loaded_device(&had, &rows, Some(1)).is_none());
+        // Two new devices (something else loaded meanwhile), or one Live gave no identity for: not told apart.
+        assert!(loaded_device(&had, &[row("eq"), row("limiter"), row("ears"), row("other")], None).is_none());
+        assert!(loaded_device(&had, &[row("eq"), row("limiter"), json!({"ref": "x"}).as_object().unwrap().clone()], None).is_none());
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn a_crashed_sessions_ears_folder_is_swept_and_a_running_ones_kept() {
         let parent = tempfile::tempdir().unwrap();
@@ -440,6 +454,24 @@ mod tests {
         let path = raw.0.clone();
         drop(raw);
         assert!(!path.exists());
+    }
+}
+
+/// The device Kumi just loaded on a chain, from its rows now: the one whose identity wasn't among `had`, when there's
+/// exactly one, and it sits where its tap says (`at`) when the tap says. Never one of the producer's own: anything
+/// else (none, two, a tap elsewhere) is None, and the load is taken back with the rig's other steps.
+fn loaded_device<'a>(had: &[String], rows: &'a [JsonObject], at: Option<usize>) -> Option<&'a JsonObject> {
+    let new: Vec<(usize, &JsonObject)> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            let identity = object_identity(row);
+            !identity.is_empty() && !had.contains(&identity)
+        })
+        .collect();
+    match new.as_slice() {
+        [(index, row)] if at.is_none_or(|at| at == *index) => Some(*row),
+        _ => None,
     }
 }
 
