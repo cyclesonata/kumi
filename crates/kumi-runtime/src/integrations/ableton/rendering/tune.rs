@@ -584,7 +584,7 @@ impl Rendering {
                     let masking = masking_items(&checklist);
                     if masking.contains(&index) {
                         let focus = focus.as_deref().unwrap_or("the focus");
-                        return Ok(Err(masking_unfair(focus, &heard.main_unfair).unwrap_or_default()));
+                        return Ok(Err(masking_unfair(focus, &heard.main_unfair, heard.premix_missed.as_deref()).unwrap_or_default()));
                     }
                     for at in masking {
                         values[at] = before_all.get(at).copied().flatten();

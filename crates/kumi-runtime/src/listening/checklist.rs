@@ -1265,14 +1265,19 @@ pub fn utility_gain(device: &MainDevice) -> Option<f64> {
     gain
 }
 
-/// Why masking can't be read fairly on a run over the mix, when it can't: without Kumi Ears' tap first on Main (no Max
-/// for Live), the mix is heard after Main's chain but `focus` before it, so a device there (a limiter's gain, its
-/// limiting, an EQ) moves one and not the other. Masked by 0 % read as 100 % with 8 dB on Main, and 100 % as 12 % under
-/// heavy limiting. `devices` are Main's (`MainState`).
-pub fn masking_unfair(focus: &str, devices: &[String]) -> Option<String> {
+/// Why masking can't be read fairly on a run over the mix, when it can't: without Kumi Ears' tap first on Main, the mix
+/// is heard after Main's chain but `focus` before it, so a device there (a limiter's gain, its limiting, an EQ) moves
+/// one and not the other. Masked by 0 % read as 100 % with 8 dB on Main, and 100 % as 12 % under heavy limiting.
+/// `devices` are Main's (`MainState`); `missed` is why that tap wasn't heard when Kumi Ears tried (None: no Max for
+/// Live).
+pub fn masking_unfair(focus: &str, devices: &[String], missed: Option<&str>) -> Option<String> {
     (!devices.is_empty()).then(|| {
+        let instead = match missed {
+            Some(why) => format!("Kumi couldn't hear the mix as it comes into Main's chain this time ({why})"),
+            None => "With Max for Live, Kumi hears the mix as it comes into Main's chain and reads masking there".into(),
+        };
         format!(
-            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own. With Max for Live, Kumi hears the mix as it comes into Main's chain and reads masking there",
+            "Masking can't be read through Main's chain ({}): it's left off the checklist. To work on {focus} cutting through, judge it with Main's devices switched off, then the master's loudness and peaks on their own. {instead}",
             devices.join(", ")
         )
     })

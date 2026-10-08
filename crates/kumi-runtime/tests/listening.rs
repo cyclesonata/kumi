@@ -274,8 +274,11 @@ fn masking_is_read_only_while_mains_chain_is_transparent() {
     // A Limiter on Main from the start: masking is left off, and the note says what to do instead.
     let limited = main_chain(&[device("Limiter", "Limiter", true, vec![])]);
     assert_eq!(limited.unfair, ["Limiter"]);
-    let note = masking_unfair("Vocal", &limited.unfair).expect("masking left off");
+    let note = masking_unfair("Vocal", &limited.unfair, None).expect("masking left off");
     assert!(note.contains("(Limiter)") && note.contains("Main's devices switched off") && note.contains("Max for Live"), "{note}");
+    // With Max for Live, when the mix wasn't heard as it comes into Main's chain this time: why, not Max for Live.
+    let note = masking_unfair("Vocal", &limited.unfair, Some("its device there didn't start in time")).expect("masking left off");
+    assert!(note.contains("this time (its device there didn't start in time)") && !note.contains("Max for Live"), "{note}");
     // Spectrum, Tuner, Kumi's Ears and a Limiter switched off leave it on, at no gain.
     let clear = main_chain(&[
         device("Spectrum", "SpectrumAnalyzer", true, vec![]),
@@ -284,7 +287,7 @@ fn masking_is_read_only_while_mains_chain_is_transparent() {
         device("Limiter", "Limiter", false, vec![]),
     ]);
     assert_eq!(clear, MainState::default());
-    assert_eq!(masking_unfair("Vocal", &clear.unfair), None);
+    assert_eq!(masking_unfair("Vocal", &clear.unfair, None), None);
     // Live 12.4's Utility, one knob set: a Utility that only turns the level is a gain the focus is heard with too.
     let utility = |set: &[(&str, &str)]| {
         let mut parameters = live_utility();

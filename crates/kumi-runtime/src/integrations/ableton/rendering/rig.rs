@@ -1,4 +1,4 @@
-use super::super::audition::MainRestore;
+use super::super::{audition::MainRestore, references::KeptRefs};
 use super::*;
 use crate::ears::link::Tap;
 
@@ -31,13 +31,18 @@ pub(super) struct Transport {
 pub(super) struct RigEars {
     pub link: Rc<dyn EarsLink>,
     pub taps: IndexMap<String, Tap>,
-    /// The tap first on Main's chain (the mix as it comes into it), when there's one: Live's identity for its device,
-    /// to delete it by, and the steps that loaded and moved it.
+    /// The tap first on Main's chain (the mix as it comes into it), when there's one.
     pub before_main: Option<BeforeMainTap>,
 }
 pub(super) struct BeforeMainTap {
+    /// Live's identity for its device, to delete it by.
     pub identity: String,
+    /// The steps that loaded and moved it.
     pub steps: Vec<String>,
+    /// Main's devices before it was loaded (their identities, in order), and the refs to them, which its move and
+    /// delete retire: they're put back when Main's chain is as it was again.
+    pub had: Vec<String>,
+    pub refs: KeptRefs,
 }
 /// Its capture's name among a pass's files: no track's (Kumi's own render tracks are named "Kumi · render …").
 pub(super) const BEFORE_MAIN: &str = "Kumi · before Main";
@@ -57,6 +62,8 @@ pub(super) struct Rig {
     pub recorded: Vec<PathBuf>,
     /// Whether the mix is heard as it comes into Main's chain too (Kumi Ears only): a second tap, first on Main.
     pub before_main: bool,
+    /// Why that tap wasn't placed, when Kumi Ears was there but it couldn't be.
+    pub before_main_missed: Option<String>,
 }
 impl Rig {
     pub fn window(&self) -> Window {
@@ -104,6 +111,7 @@ impl Rendering {
             ears: None,
             recorded: vec![],
             before_main,
+            before_main_missed: None,
         };
         let link = self.ears_ready(signal.clone()).await?;
         let tracks = self.rows("track", json!({"fields":["name"]}), signal.clone()).await?;
