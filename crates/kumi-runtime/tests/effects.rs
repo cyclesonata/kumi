@@ -283,6 +283,28 @@ fn guesses_arent_said_as_effects() {
         .collect();
     let (octaves, _) = sweep(&heard(&line, &line)).unwrap();
     assert!(octaves < 0.25, "{octaves} octaves");
+    // Nor is a lead an octave wide above the bass range: its brightness is read against each moment's own pitch.
+    let lead = |hz: &dyn Fn(f64) -> f64, cutoff: &dyn Fn(f64) -> f64| -> Vec<f64> {
+        let (mut phase, mut state) = (0., [0.; 2]);
+        (0..(8. * RATE) as usize)
+            .map(|n| {
+                let t = n as f64 / RATE;
+                phase += 2. * PI * hz(t) / RATE;
+                let saw = 0.15 * (1..=20).map(|k| (k as f64 * phase).sin() / k as f64).sum::<f64>();
+                let pole = 1. - (-2. * PI * cutoff(t) / RATE).exp();
+                state[0] += pole * (saw - state[0]);
+                state[1] += pole * (state[0] - state[1]);
+                state[1]
+            })
+            .collect()
+    };
+    let melody = lead(&|t| if (t / 0.5) as usize % 2 == 0 { 440. } else { 880. }, &|_| 12_000.);
+    let (octaves, _) = sweep(&heard(&melody, &melody)).unwrap();
+    assert!(octaves < 0.25, "a lead an octave wide: {octaves} octaves");
+    // A held note through a filter sweeping three octaves still sweeps.
+    let filtered = lead(&|_| 330., &|t| 1200. * 2f64.powf(1.5 * (2. * PI * 0.5 * t).sin()));
+    let (octaves, cycle) = sweep(&heard(&filtered, &filtered)).unwrap();
+    assert!(octaves > 0.5 && cycle.is_some_and(|cycle| (cycle - 2.).abs() < 0.25), "{octaves} octaves every {cycle:?} s");
 }
 
 #[test]
@@ -320,4 +342,34 @@ fn a_reverb_tail_close_under_its_hit_is_still_a_reverb() {
         let (fall, tail) = effects::slopes(&wet).unwrap();
         assert!(effects(&wet, None, None).reverb, "{rt60} s at {level}: {fall} then {tail:?} dB a second");
     }
+}
+
+#[test]
+fn a_note_decaying_to_a_sustain_isnt_a_reverb() {
+    // A synth note every 0.75 s: 30 ms from its peak down to a sustain 10 dB under, released at 430 ms. Its fall then
+    // holds, so the part after its first 25 ms doesn't fall evenly as a reverb's tail does.
+    let note = |hold: f64, every: f64| -> Vec<f64> {
+        (0..(6. * RATE) as usize)
+            .map(|n| n as f64 / RATE)
+            .map(|t| {
+                let into = t % every;
+                if into >= hold + 0.02 {
+                    return 0.;
+                }
+                let level = if into < 0.002 { into / 0.002 } else { (-(into - 0.002) / 0.03).exp().max(10f64.powf(-10. / 20.)) };
+                let release = ((hold + 0.02 - into) / 0.02).min(1.);
+                0.5 * level * release * (2. * PI * 330. * t).sin()
+            })
+            .collect()
+    };
+    let synth = note(0.43, 0.75);
+    let (own, reverb) = effects::slopes(&heard(&synth, &synth)).unwrap();
+    assert_eq!(reverb, None, "its own fall {own} dB a second");
+    // Held for a second, it's mostly past its first 60 ms, as such a note is by itself: no effect buries it.
+    let held = note(1., 1.5);
+    let heard = heard(&held, &held);
+    let found = effects::problems(&heard, &effects(&heard, None, None), None, &|seconds| format!("{seconds} s"));
+    assert!(found.iter().all(|problem| !problem.contains("buries")), "{found:?}");
+    // A reverb's tail after a hit still reads as one.
+    assert!(effects::slopes(&hits(Some(1.2), None)).unwrap().1.is_some());
 }

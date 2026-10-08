@@ -1,10 +1,12 @@
 //! The groove judge against a Live that answers as Kumi's bridge does (each row only the fields asked for, with its ref
 //! and parent): it moves a part's notes by their ids, keeps them inside what the clip plays, leaves alone the notes Live
-//! never plays, takes back only the part's own note edits, and finds a clip's track from the short ref the model has.
+//! never plays, takes back only the part's own note edits, and finds a clip's track from the short ref the model has. A
+//! reference that can't be heard (a file that isn't there, a stale or MIDI clip) says which, before anything is heard.
 use async_trait::async_trait;
 use futures::FutureExt;
 use kumi_common::{abort::Signal, js::json::stringify};
 use kumi_runtime::{
+    audio::tools::ResolveAudio,
     core::{
         contracts::{ChangeRecord, JsonObject},
         errors::RuntimeError,
@@ -16,7 +18,7 @@ use kumi_runtime::{
         observation::Observer,
         options::{AbletonOptions, EarsSetup},
         remember::Remember,
-        rendering::{GrooveRequest, Rendering},
+        rendering::{FormRequest, GrooveRequest, Rendering},
     },
     mcp::{
         client::{McpEndpoint, StderrStatus},
@@ -154,16 +156,23 @@ fn live(ids: bool) -> Rc<Live> {
     Rc::new(Live { notes: RefCell::new(notes), ids })
 }
 
-/// What the tests hold of the groove judge: it, Live's connection, HISTORY, and the changes it made.
+/// What the tests hold of the groove judge: it, Live's connection, HISTORY, what it observes of the Set, and the
+/// changes it made.
 struct Groove {
     rendering: Rc<Rendering>,
     connection: Rc<LiveConnection>,
     history: Rc<History>,
+    observer: Rc<Observer>,
     made: Rc<RefCell<Vec<(String, JsonObject)>>>,
 }
 
 /// The groove judge over `live`, and the changes it made (each tool and input), applied to `live`'s notes.
 async fn groove(live: Rc<Live>) -> Groove {
+    groove_with(live, Rc::new(|_, _| async { Ok(None) }.boxed_local())).await
+}
+
+/// The same, finding clips' files with `clip_file`.
+async fn groove_with(live: Rc<Live>, clip_file: ResolveAudio) -> Groove {
     let mut options = AbletonOptions::new(Rc::new(|_, _| {}));
     let endpoint = live.clone();
     options.connect = Some(Rc::new(move |_| {
@@ -186,7 +195,7 @@ async fn groove(live: Rc<Live>) -> Groove {
     let book = connection.clone();
     let rendering = Rendering::new(
         history.clone(),
-        observer,
+        observer.clone(),
         &options,
         Rc::new(move |tool: String, input: JsonObject, _| {
             // As Kumi's changes do: only what Live was read for in this answer can be named.
@@ -207,9 +216,9 @@ async fn groove(live: Rc<Live>) -> Groove {
             changes.borrow_mut().push((tool, input));
             async { Ok(JsonObject::new()) }.boxed_local()
         }),
-        Rc::new(|_, _| async { Ok(None) }.boxed_local()),
+        clip_file,
     );
-    Groove { rendering, connection, history, made }
+    Groove { rendering, connection, history, observer, made }
 }
 
 fn request(value: Value) -> GrooveRequest {
@@ -333,6 +342,67 @@ async fn an_apply_in_a_later_answer_reads_the_clip_again() {
             let round = rendering.groove(&request(json!({"apply":true})), Signal::new()).await.unwrap().unwrap();
             assert_eq!(round.kept, Some(true), "{:?}", round.why);
             assert_eq!(made.borrow().len(), 1);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_reference_file_that_isnt_there_says_so_rather_than_reading_as_a_clip_ref() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let Groove { rendering, made, .. } = groove(live(true)).await;
+            let why = rendering
+                .groove(&request(json!({"clip":"7:clip:0:0","reference":"/nowhere/bass line.wav"})), Signal::new())
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert!(why.starts_with("The reference: there's no audio file at ") && why.contains("bass line.wav"), "{why}");
+            assert!(made.borrow().is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_stale_or_midi_reference_clip_says_which_before_the_song_is_heard() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for why in
+                ["That clip isn't one from this turn's discovery; discover it again.", "That's a MIDI clip, which has no sound of its own."]
+            {
+                let clip_file: ResolveAudio = Rc::new(move |_, _| async move { Err(RuntimeError::Observation(why.into())) }.boxed_local());
+                let Groove { rendering, made, .. } = groove_with(live(true), clip_file).await;
+                let request = FormRequest { from_beat: Some(0.), beats: Some(16.), reference: Some("clip:9".into()) };
+                let said = rendering.form(&request, Signal::new()).await.unwrap().unwrap_err();
+                assert_eq!(said, format!("The reference: {why}"));
+                // Nothing was played or made to hear the song first.
+                assert!(made.borrow().is_empty());
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_tempo_change_mid_run_keeps_the_references_timing_as_a_share_of_the_beat() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let live = live(true);
+            let Groove { rendering, observer, .. } = groove(live.clone()).await;
+            // The reference's hats sit 12 ms behind at 120 BPM: 0.024 beats.
+            rendering.groove(&request(json!({"clip":"7:clip:0:0","reference":"7:clip:1:0"})), Signal::new()).await.unwrap().unwrap();
+            observer.tempo.set(Some(150.));
+            let round = rendering.groove(&request(json!({"apply":true})), Signal::new()).await.unwrap().unwrap();
+            assert_eq!(round.kept, Some(true), "{:?}", round.why);
+            // At 150 BPM the part's hats move 0.024 beats (9.6 ms), not 12 ms (0.03 beats).
+            for note in &live.notes.borrow()["7:clip:0:0"] {
+                if note["pitch"] == 42 && note["id"] != 99 {
+                    let start = note["start"].as_f64().unwrap();
+                    let late = start - (start * 4.).floor() / 4.;
+                    assert!((late - 0.024).abs() < 0.002, "{note}");
+                }
+            }
+            let timing = round.rows.iter().find(|row| row.id == "timing hats").unwrap();
+            assert_eq!(timing.before, Some(9.6), "{timing:?}");
+            assert_eq!(timing.gap_after, 0., "{timing:?}");
         })
         .await;
 }

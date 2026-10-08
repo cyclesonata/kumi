@@ -6,8 +6,9 @@ use super::judge::JudgeHeard;
 use super::rig::Window;
 use super::*;
 use crate::listening::{
-    form::{compare, form, Form},
+    form::{compare, file_grid, form, form_from, Form},
     measure::{measure_file, MeasureOptions},
+    notes::Grid,
 };
 use kumi_common::js::string::head;
 
@@ -42,24 +43,34 @@ impl Rendering {
             },
         };
         let span = Window { from, beats: (beats / meter).ceil().max(1.) * meter };
+        let bar = meter * 60. / tempo;
+        // The reference first: one that can't be heard says so before the song is.
+        let reference = match &request.reference {
+            Some(named) => {
+                let file = match self.reference_file(named, signal.clone()).await? {
+                    Ok(file) => file,
+                    Err(why) => return Ok(Err(format!("The reference: {why}"))),
+                };
+                let heard = match measure_file(&file, MeasureOptions { signal: Some(signal.clone()), ..Default::default() }).await {
+                    Ok(heard) => heard,
+                    Err(error) => return Ok(Err(format!("Kumi couldn't hear the reference: {}", head(&error.to_string(), 200)))),
+                };
+                // In its own bars: a reference at another tempo cut into this Set's bars gains or loses bars.
+                let grid = file_grid(&file, meter, self.observer.tempo.get(), signal.clone()).await;
+                Some(match grid {
+                    Some(grid) => (form_from(&heard, meter * 60. / grid.tempo, grid.downbeat), Some(grid)),
+                    None => (form(&heard, bar), None),
+                })
+            }
+            None => None,
+        };
         let heard = match self.judge_hear(None, None, span, signal.clone()).await? {
             Ok(JudgeHeard { silent: Some(why), .. }) | Err(why) => return Ok(Err(why)),
             Ok(heard) => heard,
         };
-        let bar = meter * 60. / tempo;
         let shape = form(&heard.main, bar);
         let first = (from / meter) as usize;
         let elements = self.elements(span, meter, signal.clone()).await;
-        let reference = match &request.reference {
-            Some(named) => {
-                let file = (self.clip_file)(named.clone(), signal.clone()).await.ok().flatten().unwrap_or_else(|| audio::audio_path(named));
-                match measure_file(&file, MeasureOptions { signal: Some(signal.clone()), ..Default::default() }).await {
-                    Ok(heard) => Some(form(&heard, bar)),
-                    Err(error) => return Ok(Err(format!("Kumi couldn't hear the reference: {}", head(&error.to_string(), 200)))),
-                }
-            }
-            None => None,
-        };
         Ok(Ok(reply(&shape, first, &elements, reference.as_ref())))
     }
 
@@ -111,7 +122,7 @@ impl Rendering {
 }
 
 /// The form as the model reads it: bar numbers as the song's (from `first`, its first bar, counted from 0).
-fn reply(shape: &Form, first: usize, elements: &[(String, Vec<(usize, usize)>)], reference: Option<&Form>) -> Value {
+fn reply(shape: &Form, first: usize, elements: &[(String, Vec<(usize, usize)>)], reference: Option<&(Form, Option<Grid>)>) -> Value {
     let bars = |from: usize, to: usize| format!("{}–{}", first + from + 1, first + to);
     let sections: Vec<Value> = shape
         .sections
@@ -142,10 +153,14 @@ fn reply(shape: &Form, first: usize, elements: &[(String, Vec<(usize, usize)>)],
     if !plays.is_empty() {
         said["playing"] = Value::Object(plays);
     }
-    if let Some(reference) = reference {
+    if let Some((reference, grid)) = reference {
         said["reference"] = json!({
             "form": reference.sections.iter().map(|section| section.letter).collect::<String>(),
             "bars": reference.bars.len(),
+            "readIn": match grid {
+                Some(grid) => format!("its own bars: {} BPM, beat one {} s in", (grid.tempo * 10.).round() / 10., (grid.downbeat * 100.).round() / 100.),
+                None => "this Set's bars, from its start (its tempo couldn't be told)".into(),
+            },
             "differences": compare(shape, reference),
         });
     }

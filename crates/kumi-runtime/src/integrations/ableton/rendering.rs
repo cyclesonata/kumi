@@ -92,6 +92,9 @@ pub struct Rendering {
     /// The listening model, once looked for (None inside: there's none).
     /// Whether the run's listens are heard by the learned models too: the style model, the effects model.
     embedding_wanted: Cell<(bool, bool)>,
+    /// The style model a judge run hears with, fixed when it starts: the embeddings slot's file then (None: Kumi's
+    /// own) and its identity. A slot swapped during a run doesn't change it.
+    style_model: RefCell<Option<(Option<PathBuf>, String)>>,
     /// The listening model as last looked up (found, a definite none, or why the lookup failed), and when.
     listener: RefCell<Option<(Result<Option<Rc<dyn crate::listening::listener::Listener>>, String>, i64)>>,
 }
@@ -157,6 +160,7 @@ impl Rendering {
             references: options.references.clone(),
             listener: RefCell::new(None),
             embedding_wanted: Cell::new((false, false)),
+            style_model: RefCell::new(None),
         })
     }
     pub fn round_count(&self) -> usize {
@@ -276,8 +280,17 @@ impl Rendering {
         self.tell(&text, None);
         Ok(Some(text))
     }
+    /// The audio file a reference names: a clip's, else the name itself as a file. A clipRef that's stale, gone or a
+    /// MIDI clip's says so, rather than reading as a file that isn't there.
+    async fn reference_file(&self, named: &str, signal: Signal) -> Result<Result<String, String>, RuntimeError> {
+        match (self.clip_file)(named.into(), signal).await {
+            Ok(file) => Ok(Ok(file.unwrap_or_else(|| audio::audio_path(named)))),
+            Err(RuntimeError::Aborted) => Err(RuntimeError::Aborted),
+            Err(error) => Ok(Err(error.to_string())),
+        }
+    }
     async fn heard_reference(&self, named: &str, request: &AuditionRequest, signal: Signal) -> Result<Analysis, RuntimeError> {
-        let file = (self.clip_file)(named.into(), signal.clone()).await.ok().flatten().unwrap_or_else(|| audio::audio_path(named));
+        let file = self.reference_file(named, signal.clone()).await?.map_err(RuntimeError::Observation)?;
         let key = stringify(&json!([file, request.reference_from.unwrap_or(0.), request.reference_seconds, request.focus]));
         if let Some(known) = self.reference_cache.borrow().get(&key) {
             return Ok(known.clone());
