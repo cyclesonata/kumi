@@ -141,7 +141,14 @@ impl Fetcher {
         if let Some(kept) = kept(&self.folder, &id) {
             return Ok(kept);
         }
-        tokio::fs::create_dir_all(&self.folder).await.map_err(|error| format!("Kumi couldn't make {}: {error}", self.folder.display()))?;
+        // Only the producer's: what's downloaded into it stays out of other users' reach (yt-dlp writes its files as the
+        // system's defaults have them).
+        let mut builder = tokio::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        builder.mode(0o700);
+        builder.create(&self.folder).await.map_err(|error| format!("Kumi couldn't make {}: {error}", self.folder.display()))?;
+        sweep(&self.folder);
         let (ytdlp, extras) = self.ytdlp(signal).await?;
         let template = self.folder.join(format!("{id}.%(ext)s"));
         let mut args: Vec<String> = vec![
@@ -189,6 +196,61 @@ pub fn kept(folder: &Path, id: &str) -> Option<PathBuf> {
             && path.file_stem().and_then(|stem| stem.to_str()) == Some(id)
             && path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| !matches!(ext, "part" | "ytdl" | "temp"))
     })
+}
+
+/// What a Kumi that stopped mid-measure left in the folder (a download it never got to delete once measured), gone once
+/// it's a day old. Only yt-dlp's own names go (a video's 11-character id, then its extension: `.m4a`, `.m4a.part`…):
+/// the folder may be one the producer keeps files of their own in.
+fn sweep(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    let day = std::time::Duration::from_secs(24 * 3600);
+    for path in entries.filter_map(|entry| entry.ok().map(|entry| entry.path())) {
+        let ours = path.file_name().and_then(|name| name.to_str()).is_some_and(downloaded);
+        let age = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok());
+        if ours && path.is_file() && age.is_some_and(|age| age > day) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Whether a file name is one yt-dlp downloads a video's sound under: its 11-character id, then a format it fetches
+/// sound as (and `.part` or the like while it's at it). A producer's own `Kick_Snare1.wav` isn't.
+fn downloaded(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    let id =
+        bytes.len() > 12 && bytes[..11].iter().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')) && bytes[11] == b'.';
+    id && name[12..]
+        .split('.')
+        .next()
+        .is_some_and(|format| matches!(format, "m4a" | "webm" | "opus" | "mp3" | "ogg" | "aac" | "mp4" | "mka"))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_downloads_a_day_old_are_swept_and_the_producers_files_stay() {
+        let folder = tempfile::tempdir().unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600);
+        let put = |name: &str, aged: bool| {
+            let path = folder.path().join(name);
+            let file = std::fs::File::create(&path).unwrap();
+            if aged {
+                file.set_modified(old).unwrap();
+            }
+            path
+        };
+        let swept = [put("dQw4w9WgXcQ.m4a", true), put("dQw4w9WgXcQ.m4a.part", true)];
+        let kept = [
+            put("my mix.wav", true),
+            put("abc.wav", true),
+            put("Kick_Snare1.wav", true),
+            put("Kick_Snare-1.m4a", true),
+            put("aBcDeFgHiJk.webm", false),
+        ];
+        super::sweep(folder.path());
+        assert!(swept.iter().all(|path| !path.exists()), "{swept:?}");
+        assert!(kept.iter().all(|path| path.exists()), "{kept:?}");
+    }
 }
 
 /// What a failed download left behind (`<id>.m4a.part` and the like), gone.
