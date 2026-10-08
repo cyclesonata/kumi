@@ -341,6 +341,20 @@ impl History {
         let _guard = Guard { history: self, outer: self.quiet.replace(Some(Vec::new())), counted: self.changes_this_turn.get(), into };
         work.await
     }
+    /// Drops changes from HISTORY, and from the quiet list they're on, once what they made is gone some other way (a
+    /// rig's device deleted by its identity): there's nothing left for them to take back. Their transactions are
+    /// released.
+    pub fn forget(&self, ids: &[String]) {
+        if let Some(quiet) = self.quiet.borrow_mut().as_mut() {
+            quiet.retain(|id| !ids.contains(id));
+        }
+        let released: Vec<String> = ids
+            .iter()
+            .filter_map(|id| self.entries.borrow_mut().shift_remove(id))
+            .map(|entry| entry.borrow().transaction_id.clone())
+            .collect();
+        self.release(&released);
+    }
     pub fn release(&self, given: &[String]) {
         let ids: Vec<_> = given.iter().filter(|s| !s.is_empty()).cloned().collect();
         if ids.is_empty() || !self.connection.has("live_transaction_release") {

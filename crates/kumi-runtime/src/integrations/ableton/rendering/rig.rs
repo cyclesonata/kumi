@@ -31,7 +31,16 @@ pub(super) struct Transport {
 pub(super) struct RigEars {
     pub link: Rc<dyn EarsLink>,
     pub taps: IndexMap<String, Tap>,
+    /// The tap first on Main's chain (the mix as it comes into it), when there's one: Live's identity for its device,
+    /// to delete it by, and the steps that loaded and moved it.
+    pub before_main: Option<BeforeMainTap>,
 }
+pub(super) struct BeforeMainTap {
+    pub identity: String,
+    pub steps: Vec<String>,
+}
+/// Its capture's name among a pass's files: no track's (Kumi's own render tracks are named "Kumi · render …").
+pub(super) const BEFORE_MAIN: &str = "Kumi · before Main";
 pub(super) struct Rig {
     pub tag: String,
     pub sources: Vec<Source>,
@@ -46,6 +55,8 @@ pub(super) struct Rig {
     pub ears: Option<RigEars>,
     /// Live's own recordings of the record pass, in the project: Kumi reads copies, and these go with the render tracks.
     pub recorded: Vec<PathBuf>,
+    /// Whether the mix is heard as it comes into Main's chain too (Kumi Ears only): a second tap, first on Main.
+    pub before_main: bool,
 }
 impl Rig {
     pub fn window(&self) -> Window {
@@ -68,6 +79,17 @@ impl Rendering {
         beats: Option<f64>,
         signal: Signal,
     ) -> Result<Rig, RuntimeError> {
+        self.open_rig_with(candidates, from, beats, false, signal).await
+    }
+    /// A rig that, with `before_main` and Kumi Ears, also hears the mix as it comes into Main's chain.
+    pub(super) async fn open_rig_with(
+        self: &Rc<Self>,
+        candidates: &[AuditionCandidate],
+        from: Option<f64>,
+        beats: Option<f64>,
+        before_main: bool,
+        signal: Signal,
+    ) -> Result<Rig, RuntimeError> {
         let mut rig = Rig {
             tag: uuid::Uuid::new_v4().to_string()[..4].into(),
             sources: vec![],
@@ -81,6 +103,7 @@ impl Rendering {
             window: None,
             ears: None,
             recorded: vec![],
+            before_main,
         };
         let link = self.ears_ready(signal.clone()).await?;
         let tracks = self.rows("track", json!({"fields":["name"]}), signal.clone()).await?;
@@ -144,7 +167,7 @@ impl Rendering {
                 rig.beats=beats.unwrap_or_else(||32_f64.min(if longest==0. || longest.is_nan() {8.} else {longest}));
             }
             if let Some(link)=link {
-                rig.ears=Some(RigEars{link,taps:IndexMap::new()});
+                rig.ears=Some(RigEars{link,taps:IndexMap::new(),before_main:None});
                 if let Err(error)=self.place_taps(&mut rig,signal.clone()).await {
                     signal.check()?;
                     if std::env::var("KUMI_TIMING").is_ok_and(|s| !s.is_empty()) {
@@ -332,6 +355,8 @@ impl Rendering {
             }
         }
         let mut scratch_left = false;
+        // The tap first on Main goes by its identity, not by undoing its move and its load.
+        self.remove_before_main(rig, cleanup.clone()).await;
         self.history
             .quietly(None, async {
                 for id in rig.steps.iter().rev() {

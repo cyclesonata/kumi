@@ -1,7 +1,7 @@
 //! The listening loop's ears and judge on synthetic sound: what they measure, what they find and where, and how a
 //! checklist decides whether a change stays.
 use kumi_runtime::listening::{
-    checklist::{main_chain, masking_unfair, Change, Checklist, Goal, MainDevice, MainState, Profile, Quantity, Target},
+    checklist::{main_chain, masking_unfair, Change, Checklist, Goal, Item, MainDevice, MainState, Profile, Quantity, Role, Target},
     detect::{self, ProblemKind},
     measure::{measure_samples, Heard},
 };
@@ -192,6 +192,57 @@ fn masking_is_a_target_to_mask_ratio_against_the_rest() {
     assert!(down > up, "{down}% buried 6 dB down, {up}% 6 dB up");
 }
 
+#[test]
+fn masking_reads_against_the_mix_as_it_comes_into_mains_chain() {
+    // The vocal over noise around it, quiet (truly clear) or loud (truly buried), through Main's chain: 8 dB of gain,
+    // or 12 dB into a hard ceiling. The vocal is heard before Main's chain; the mix after it reads its level and its
+    // limiting as the vocal's. Read against the mix as it comes into Main's chain, both read as they are.
+    let vocal = sine(6., 2000., 0.05);
+    let around = |level: f64, seed: u64| -> Vec<f64> {
+        let (mut noise, mut state) = (Noise(seed), [0f64; 2]);
+        (0..vocal.len())
+            .map(|_| {
+                let out = noise.next() + 1.94 * state[0] - 0.985 * state[1];
+                state = [out, state[0]];
+                out * level
+            })
+            .collect()
+    };
+    let masking = Item {
+        id: "masking".into(),
+        label: "The vocal masked".into(),
+        role: Role::Target,
+        unit: "%".into(),
+        quantity: Quantity::Problem {
+            problem: ProblemKind::Masking,
+            low: 1000.,
+            high: 4000.,
+            steady: true,
+            focus: Some("the vocal".into()),
+        },
+        target: Target::AtMost { value: 10. },
+        jnd: 5.,
+        fix: None,
+    };
+    let checklist = Checklist { items: vec![masking] };
+    let focus = heard(&vocal, &vocal);
+    let gain = |db: f64| move |sample: f64| sample * 10f64.powf(db / 20.);
+    for (rest, main) in [
+        (around(0.0015, 9), Box::new(gain(8.)) as Box<dyn Fn(f64) -> f64>),
+        (around(0.015, 10), Box::new(move |sample| gain(12.)(sample).clamp(-0.1, 0.1))),
+    ] {
+        let premix = mixed(&[&vocal, &rest]);
+        let after: Vec<f64> = premix.iter().map(|sample| main(*sample)).collect();
+        let (before, after) = (heard(&premix, &premix), heard(&after, &after));
+        let truth = detect::masking_share(&focus, &before).unwrap();
+        let through = checklist.read(&after, Some(&focus))[0].unwrap();
+        let read = checklist.read_with(&after, Some(&focus), Some(&before))[0].unwrap();
+        // 0 % reads 100 % through Main's gain, and 100 % reads 0 % through its ceiling; before it, as they are.
+        assert!((through - truth).abs() >= 50., "{truth}% masked reads {through}% through Main's chain");
+        assert_eq!(read, truth);
+    }
+}
+
 /// Live 12.4's Utility as Live showed it (the change eval's fixture): each parameter's name and its text now.
 fn live_utility() -> Vec<(String, String)> {
     let devices: serde_json::Value =
@@ -224,7 +275,7 @@ fn masking_is_read_only_while_mains_chain_is_transparent() {
     let limited = main_chain(&[device("Limiter", "Limiter", true, vec![])]);
     assert_eq!(limited.unfair, ["Limiter"]);
     let note = masking_unfair("Vocal", &limited.unfair).expect("masking left off");
-    assert!(note.contains("(Limiter)") && note.contains("Main's devices switched off") && note.contains("#289"), "{note}");
+    assert!(note.contains("(Limiter)") && note.contains("Main's devices switched off") && note.contains("Max for Live"), "{note}");
     // Spectrum, Tuner, Kumi's Ears and a Limiter switched off leave it on, at no gain.
     let clear = main_chain(&[
         device("Spectrum", "SpectrumAnalyzer", true, vec![]),
