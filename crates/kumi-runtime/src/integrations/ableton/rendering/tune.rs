@@ -79,6 +79,13 @@ pub(super) const COPIES_BUDGET: f64 = 12.;
 
 impl Rendering {
     pub async fn tune(self: &Rc<Self>, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        let tuned = self.tune_now(request, original).await;
+        // The takes the run no longer stores go, however the call ended.
+        self.prune_kept().await;
+        tuned
+    }
+
+    async fn tune_now(self: &Rc<Self>, request: &TuneRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         if !self.available() {
             return Ok(Err(NO_CURRENT_LIVE.into()));
         }
@@ -732,7 +739,7 @@ impl Rendering {
         let candidates: Vec<AuditionCandidate> =
             names.iter().map(|name| AuditionCandidate { track: name.clone(), mix: None, label: None, clip: None }).collect();
         self.tell(format!("Hearing {} takes side by side", names.len()), Some(true));
-        self.begin_rendering();
+        let rendering = self.rendering_now();
         let mut rig = None;
         let rendered: Result<IndexMap<String, Render>, RuntimeError> = async {
             rig = Some(self.open_rig(&candidates, Some(window.from), Some(window.beats), signal.clone()).await?);
@@ -743,7 +750,7 @@ impl Rendering {
         if let Some(rig) = rig.as_mut() {
             self.close_rig(rig).await;
         }
-        self.end_rendering();
+        drop(rendering);
         self.tell("Listened", Some(false));
         let files = rendered?;
         let mut heard = IndexMap::new();

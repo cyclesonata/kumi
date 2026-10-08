@@ -112,8 +112,25 @@ impl JudgeRun {
     }
 }
 
+/// Every file in `folder` but those `stored`.
+pub(super) async fn prune_unstored(folder: &std::path::Path, stored: &[PathBuf]) {
+    let Ok(mut listed) = tokio::fs::read_dir(folder).await else { return };
+    while let Ok(Some(entry)) = listed.next_entry().await {
+        if !stored.contains(&entry.path()) {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
 impl Rendering {
     pub async fn judge(self: &Rc<Self>, request: &JudgeRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
+        let judged = self.judge_now(request, original).await;
+        // The takes the run no longer stores go, however the call ended.
+        self.prune_kept().await;
+        judged
+    }
+
+    async fn judge_now(self: &Rc<Self>, request: &JudgeRequest, original: Signal) -> Result<Result<Round, String>, RuntimeError> {
         if !self.available() {
             return Ok(Err(NO_CURRENT_LIVE.into()));
         }
@@ -164,7 +181,7 @@ impl Rendering {
         *self.style_model.borrow_mut() = None;
         if models_on() {
             let slot = crate::slots::kept().model_file(crate::slots::Job::Embeddings);
-            let style = embed::style_id(slot.as_deref()).await;
+            let style = embed::style_id(slot.as_deref(), &signal).await;
             *self.style_model.borrow_mut() = Some((slot, style));
         }
         let (reference, unguarded) = match &goal.reference {
@@ -190,6 +207,9 @@ impl Rendering {
                 Window { from, beats: beats.unwrap_or(end - from).max(self.observer.beats_per_bar.get()) }
             }
         };
+        if let Some(why) = super::listen::too_long(span.beats, tempo, "judge part of it: give from_beat and beats") {
+            return Ok(Err(why));
+        }
         // Tracks by name, so the log says "Vocal Main", not a ref.
         let mut goal = goal.clone();
         if let Some(named) = goal.focus.clone() {
@@ -205,19 +225,6 @@ impl Rendering {
             Ok(heard) => heard,
         };
         let offset = span.from * 60. / tempo;
-        let mut problems = detect::harshness(&heard.main);
-        problems.extend(detect::low_end(&heard.main));
-        problems.extend(detect::peaks(&heard.main, goal.true_peak));
-        if let (Some(focus), Some(name)) = (&heard.focus, &goal.focus) {
-            problems.extend(detect::masking(focus, &heard.main, name));
-        }
-        // Times as the song's, not the capture's.
-        for problem in &mut problems {
-            for span in &mut problem.at {
-                span[0] += offset;
-                span[1] += offset;
-            }
-        }
         let goal = Goal {
             loudness: goal.loudness,
             true_peak: goal.true_peak,
@@ -227,9 +234,45 @@ impl Rendering {
             targets: goal.targets.clone(),
             sound: goal.sound,
         };
-        let mut checklist = Checklist::new(&goal, &heard.main, &problems);
-        let mut whole = checklist.read(&heard.main, heard.focus.as_ref());
-        let unreadable = checklist.drop_unreadable(&mut whole);
+        // A problem's excerpt is where it stands out most (a steady one, too: the loudest bars may bury it).
+        let length = self.excerpt_beats() * 60. / tempo;
+        let bar = self.observer.beats_per_bar.get().max(1.) * 60. / tempo;
+        // What was heard is worked out off the app's thread: detectors, the checklist and where each problem stands
+        // out take a while over a whole song.
+        let (main, focus) = (heard.main, heard.focus);
+        let analysed = tokio::task::spawn_blocking(move || {
+            let mut problems = detect::harshness(&main);
+            problems.extend(detect::low_end(&main));
+            problems.extend(detect::peaks(&main, goal.true_peak));
+            if let (Some(focus), Some(name)) = (&focus, &goal.focus) {
+                problems.extend(detect::masking(focus, &main, name));
+            }
+            // Times as the song's, not the capture's.
+            for problem in &mut problems {
+                for span in &mut problem.at {
+                    span[0] += offset;
+                    span[1] += offset;
+                }
+            }
+            let mut checklist = Checklist::new(&goal, &main, &problems);
+            let mut whole = checklist.read(&main, focus.as_ref());
+            let unreadable = checklist.drop_unreadable(&mut whole);
+            let worst: Vec<Option<f64>> = checklist
+                .items
+                .iter()
+                .map(|item| match item.quantity {
+                    Quantity::Problem { problem: ProblemKind::Resonance | ProblemKind::Harshness, low, high, steady, .. } => {
+                        worst_stretch(&main, low, high, steady, length, bar)
+                    }
+                    Quantity::Problem { problem: ProblemKind::LoudNote, low, high, .. } => note_stretch(&main, low, high, length, bar),
+                    _ => None,
+                })
+                .collect();
+            (main, goal, problems, checklist, whole, unreadable, worst)
+        })
+        .await
+        .map_err(|error| RuntimeError::plain(error.to_string()))?;
+        let (main, goal, problems, checklist, whole, unreadable, worst) = analysed;
         if !checklist.has_targets() {
             return Ok(Err(format!(
                 "Nothing to work toward: {}. Give a target (a loudness, a true-peak ceiling, a reference or numbers), or tell the producer it already sounds right.",
@@ -247,7 +290,7 @@ impl Rendering {
             span,
             span_file: (heard.file.clone(), heard.start),
             span_focus: heard.focus_file.clone(),
-            loudness: heard.main.measures.short_term.clone(),
+            loudness: main.measures.short_term.clone(),
             problems: problems.clone(),
             first: whole.clone(),
             whole: whole.clone(),
@@ -266,21 +309,7 @@ impl Rendering {
             rounds: vec![],
         };
         run.misses = vec![0; run.checklist.items.len()];
-        // A problem's excerpt is where it stands out most (a steady one, too: the loudest bars may bury it).
-        let length = self.excerpt_beats() * 60. / tempo;
-        let bar = self.observer.beats_per_bar.get().max(1.) * 60. / tempo;
-        run.worst = run
-            .checklist
-            .items
-            .iter()
-            .map(|item| match item.quantity {
-                Quantity::Problem { problem: ProblemKind::Resonance | ProblemKind::Harshness, low, high, steady, .. } => {
-                    worst_stretch(&heard.main, low, high, steady, length, bar)
-                }
-                Quantity::Problem { problem: ProblemKind::LoudNote, low, high, .. } => note_stretch(&heard.main, low, high, length, bar),
-                _ => None,
-            })
-            .collect();
+        run.worst = worst;
         run.target = run.checklist.next(&run.whole);
         run.window = self.excerpt_for(&run);
         // Before anything changes, the excerpt's "before" is cut from what was just heard.
@@ -722,13 +751,18 @@ impl Rendering {
             Ok(heard) => heard,
         };
         let ids = self.applied_ids();
+        // The whole span's readings are worked out off the app's thread.
+        let checklist = self.judge.borrow().as_ref().unwrap().checklist.clone();
+        let (main, focus) = (heard.main, heard.focus);
+        let now = tokio::task::spawn_blocking(move || checklist.read(&main, focus.as_ref()))
+            .await
+            .map_err(|error| RuntimeError::plain(error.to_string()))?;
         let mut guard = self.judge.borrow_mut();
         let run = guard.as_mut().unwrap();
         run.listens += 1;
         // Over: what it kept stays, and nothing after is a round's to take back.
         run.ended = Some("it ended with done".into());
         run.checkpoint = ids;
-        let now = run.checklist.read(&heard.main, heard.focus.as_ref());
         let verdict = run.checklist.verdict(None, &run.first, &now);
         run.whole = now;
         let target = run.checklist.next(&run.whole);
@@ -799,11 +833,14 @@ impl Rendering {
             Ok(Err(why)) => return Err(format!("The reference: {why}")),
             Err(error) => return Err(error.to_string()),
         };
-        let heard = measure_file(&file, MeasureOptions { signal: Some(signal.clone()), ..Default::default() })
+        // Its first six minutes, as the reference tool measures a track.
+        let options = MeasureOptions { seconds: Some(MEASURED), signal: Some(signal.clone()), ..Default::default() };
+        let heard = measure_file(&file, options)
             .await
             .map_err(|error| format!("Kumi couldn't hear the reference: {}", head(&error.to_string(), 200)))?;
         let name = file.rsplit(['/', '\\']).next().unwrap_or(&file).to_string();
-        let mut profile = Profile::of(&name, &heard);
+        let (mut profile, heard) =
+            tokio::task::spawn_blocking(move || (Profile::of(&name, &heard), heard)).await.map_err(|error| error.to_string())?;
         // How it sounds to the learned models, when they're on: what a run guards against drifting from.
         let mut unheard = vec![];
         if models_on() {
@@ -919,7 +956,7 @@ impl Rendering {
             candidates.push(AuditionCandidate { track: focus.into(), mix: None, label: None, clip: None });
         }
         self.tell(format!("Listening quietly: {}", super::super::more_changes::bars(window.from)), Some(true));
-        self.begin_rendering();
+        let rendering = self.rendering_now();
         let mut rig = None;
         let rendered: Result<(IndexMap<String, Render>, Vec<(String, bool)>), RuntimeError> = async {
             rig = Some(self.open_rig(&candidates, Some(window.from), Some(window.beats), signal.clone()).await?);
@@ -933,7 +970,7 @@ impl Rendering {
             self.close_rig(rig).await;
             notes.extend(rig.notes.clone());
         }
-        self.end_rendering();
+        drop(rendering);
         self.tell("Listened", Some(false));
         let (files, sources) = rendered?;
         let main_name = sources.iter().find(|(name, mix)| *mix || Some(name.as_str()) == track).map(|(name, _)| name.clone());
@@ -1005,6 +1042,19 @@ impl Rendering {
     }
 
     /// Copies a capture into the judge's own folder, out of the listening folder's pruning.
+    /// What judge/ holds that the run doesn't store goes: its span's takes and its excerpts stay, and a new run's
+    /// takes replace an old run's.
+    pub(super) async fn prune_kept(&self) {
+        let stored: Vec<PathBuf> = match self.judge.borrow().as_ref() {
+            Some(run) => std::iter::once(run.span_file.0.clone())
+                .chain(run.span_focus.iter().map(|(file, _)| file.clone()))
+                .chain(run.excerpts.iter().map(|excerpt| excerpt.file.clone()))
+                .collect(),
+            None => vec![],
+        };
+        prune_unstored(&self.ears_folder.join("judge"), &stored).await;
+    }
+
     pub(super) async fn keep_file(&self, file: &std::path::Path) -> PathBuf {
         let folder = self.ears_folder.join("judge");
         let _ = tokio::fs::create_dir_all(&folder).await;

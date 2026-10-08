@@ -10,6 +10,7 @@ use crate::listening::{
     measure::{measure_file, MeasureOptions},
     notes::Grid,
 };
+use crate::references::tool::MEASURED;
 use kumi_common::js::string::head;
 
 /// What the model asks of the form tool: a stretch (the whole song without one) and a reference to compare with.
@@ -22,6 +23,13 @@ pub struct FormRequest {
 
 impl Rendering {
     pub async fn form(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
+        let formed = self.form_now(request, original).await;
+        // form hears through the judge's listen, which keeps its takes in judge/: they go now, a judged run's own stay.
+        self.prune_kept().await;
+        formed
+    }
+
+    async fn form_now(self: &Rc<Self>, request: &FormRequest, original: Signal) -> Result<Result<Value, String>, RuntimeError> {
         if !self.available() {
             return Ok(Err(NO_CURRENT_LIVE.into()));
         }
@@ -43,6 +51,9 @@ impl Rendering {
             },
         };
         let span = Window { from, beats: (beats / meter).ceil().max(1.) * meter };
+        if let Some(why) = super::listen::too_long(span.beats, tempo, "read its form in parts: give from_beat and beats") {
+            return Ok(Err(why));
+        }
         let bar = meter * 60. / tempo;
         // The reference first: one that can't be heard says so before the song is.
         let reference = match &request.reference {
@@ -51,7 +62,9 @@ impl Rendering {
                     Ok(file) => file,
                     Err(why) => return Ok(Err(format!("The reference: {why}"))),
                 };
-                let heard = match measure_file(&file, MeasureOptions { signal: Some(signal.clone()), ..Default::default() }).await {
+                // Its first six minutes, as the reference tool measures a track.
+                let options = MeasureOptions { seconds: Some(MEASURED), signal: Some(signal.clone()), ..Default::default() };
+                let heard = match measure_file(&file, options).await {
                     Ok(heard) => heard,
                     Err(error) => return Ok(Err(format!("Kumi couldn't hear the reference: {}", head(&error.to_string(), 200)))),
                 };

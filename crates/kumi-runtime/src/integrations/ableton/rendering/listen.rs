@@ -51,7 +51,10 @@ impl Rendering {
             })
             .collect();
         let mut beats = request.beats.unwrap_or(8.);
-        self.begin_rendering();
+        if let Some(why) = too_long(beats, tempo, "audition a part") {
+            return Ok(Err(why));
+        }
+        let rendering = self.rendering_now();
         let mut rig = None;
         let rendered: Result<(), RuntimeError> = async {
             self.tell(
@@ -87,7 +90,7 @@ impl Rendering {
             self.close_rig(rig).await;
             notes.extend(rig.notes.clone());
         }
-        self.end_rendering();
+        drop(rendering);
         let listen: Result<AuditionResult, RuntimeError> = async {
             let reference = match request.reference.as_deref().filter(|s| !s.is_empty()) {
                 Some(named) => Some(self.heard_reference(named, request, signal.clone()).await?),
@@ -257,11 +260,8 @@ impl Rendering {
         let beats = whole.unwrap_or_else(|| {
             request.beats.unwrap_or_else(|| looped.and_then(|v| v["length"].as_f64()).unwrap_or(4. * self.observer.beats_per_bar.get()))
         });
-        if beats * 60. / tempo > LONGEST_LISTEN {
-            return Ok(Err(format!(
-                "That's {} of music; Kumi listens to at most an hour at once, so listen in parts.",
-                clock(beats * 60. / tempo)
-            )));
+        if let Some(why) = too_long(beats, tempo, "listen in parts") {
+            return Ok(Err(why));
         }
         let candidates = if request.mix == Some(true) {
             vec![AuditionCandidate { track: MIX_CANDIDATE.into(), mix: Some(true), label: Some("The whole mix".into()), clip: None }]
@@ -269,7 +269,7 @@ impl Rendering {
             request.tracks.iter().map(|track| AuditionCandidate { track: track.clone(), mix: None, label: None, clip: None }).collect()
         };
         self.tell(format!("Listening quietly from {}", bars(from)), Some(true));
-        self.begin_rendering();
+        let rendering = self.rendering_now();
         let mut rig = None;
         let result: Result<Vec<HeardTake>, RuntimeError> = async {
             rig = Some(self.open_rig(&candidates, Some(from), Some(beats), signal.clone()).await?);
@@ -295,7 +295,7 @@ impl Rendering {
         if let Some(rig) = rig.as_mut() {
             self.close_rig(rig).await;
         }
-        self.end_rendering();
+        drop(rendering);
         self.tell("Listened", Some(false));
         let notes = rig.map(|rig| rig.notes).unwrap_or_default();
         match result {
@@ -345,6 +345,11 @@ impl Rendering {
         signal: Signal,
     ) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
         let seconds = request.seconds.unwrap_or(8.).clamp(2., PASS_SECONDS);
+        // Each tap's capture lands in Kumi's folder: with too little room for them, it's refused before Live plays.
+        let taps = if request.mix == Some(true) { 1 } else { request.tracks.len() };
+        if let Some(why) = self.no_room(seconds, taps, &std::env::temp_dir()).await {
+            return Ok(Err(why));
+        }
         let mut steps = vec![];
         let mut placed = vec![];
         let result: Result<Vec<HeardTake>, RuntimeError> = async {
@@ -456,8 +461,14 @@ fn round_number(value: f64) -> f64 {
 }
 /// The end of the last clip in the Arrangement, in beats.
 const SONG_END_SCRIPT: &str = "end = 0.0\nfor track in list(song.tracks):\n    for clip in list(getattr(track, 'arrangement_clips', None) or []):\n        end = max(end, float(clip.end_time))\nresult = {'end': end}\n";
-/// The longest stretch one listen hears, in seconds.
-const LONGEST_LISTEN: f64 = 3600.;
+/// The longest stretch one listen hears, in seconds (a judged run's span, a form's, a sound's and an audition's too).
+pub(super) const LONGEST_LISTEN: f64 = 3600.;
+/// Why a stretch of `beats` is too long to hear at once, when it is, and what to do instead.
+pub(super) fn too_long(beats: f64, tempo: f64, instead: &str) -> Option<String> {
+    let seconds = beats * 60. / tempo;
+    (seconds > LONGEST_LISTEN || !seconds.is_finite())
+        .then(|| format!("That's {} of music; Kumi listens to at most an hour at once, so {instead}.", clock(seconds)))
+}
 fn clock(seconds: f64) -> String {
     let whole = round(seconds) as i64;
     format!("{}:{:02}", whole / 60, whole % 60)

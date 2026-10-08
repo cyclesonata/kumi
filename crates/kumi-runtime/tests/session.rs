@@ -55,6 +55,12 @@ struct Record {
     audio_resolved: RefCell<Vec<String>>,
     /// The producer's messages the kernel took while it answered.
     steered: RefCell<Vec<String>>,
+    /// A stopped tool call still putting Live back: settling waits for this, when it's set.
+    putting_back: RefCell<Option<Rc<Notify>>>,
+    /// How often the session waited for its integration to settle.
+    settled: Cell<usize>,
+    /// The integration comes wrapped in a fallback, as the app has it.
+    wrapped: Cell<bool>,
 }
 struct TestKernel {
     record: Rc<Record>,
@@ -117,6 +123,13 @@ struct TestIntegration {
 }
 #[async_trait(?Send)]
 impl Integration for TestIntegration {
+    async fn settled(&self) {
+        let putting_back = self.record.putting_back.borrow().clone();
+        if let Some(putting_back) = putting_back {
+            putting_back.notified().await;
+        }
+        self.record.settled.set(self.record.settled.get() + 1);
+    }
     fn has_audio_file(&self) -> bool {
         true
     }
@@ -210,7 +223,12 @@ fn harness(run: Option<Run>, config: impl FnOnce(&mut SessionOptions)) -> Harnes
     let obs = observation.clone();
     let integration: IntegrationFactory = Box::new(move |listener| {
         r.listeners.borrow_mut().push(listener.clone());
-        Rc::new(TestIntegration { record: r.clone(), observation: obs.clone(), listener })
+        let bare = Rc::new(TestIntegration { record: r.clone(), observation: obs.clone(), listener });
+        if r.wrapped.get() {
+            kumi_runtime::with_fallback(bare, Rc::new(|| panic!("no fallback")), Rc::new(|_| {})) as Rc<dyn Integration>
+        } else {
+            bare
+        }
     });
     let mut options = SessionOptions::new(factory, integration, Rc::new(move |e| out.borrow_mut().push(e)));
     options.timeout_ms = Some(5000);
@@ -382,6 +400,42 @@ local_test!(cooperative_cancel_keeps_kernel_usage_and_finished_steps, {
     h.session.close().await.unwrap();
     assert_eq!(h.session.status().connection, ConnectionState::Disconnected);
 });
+local_test!(a_stopped_answer_ends_once_its_tool_calls_have_put_live_back, {
+    for wrapped in [false, true] {
+        a_stopped_answer_waits_for_its_put_back(wrapped).await;
+    }
+});
+/// As the session has its integration bare, and as the app has it, in a fallback.
+async fn a_stopped_answer_waits_for_its_put_back(wrapped: bool) {
+    let h = harness(
+        Some(Rc::new(|_, signal, _| {
+            async move {
+                signal.cancelled().await;
+                Ok(cancelled())
+            }
+            .boxed_local()
+        })),
+        |_| {},
+    );
+    h.record.wrapped.set(wrapped);
+    // A judge call is still taking its round back in Live when Esc comes.
+    let putting_back = Rc::new(Notify::new());
+    *h.record.putting_back.borrow_mut() = Some(putting_back.clone());
+    h.session.start().await.unwrap();
+    let running = spawned(&h.session, "master it");
+    settle().await;
+    let session = h.session.clone();
+    let cancelling = tokio::task::spawn_local(async move { session.cancel().await });
+    // Well past the grace, the answer is still stopping, so the next one can't start beside it.
+    delay(60).await;
+    let ended = |events: &Rc<RefCell<Vec<SessionEvent>>>| events.borrow().iter().any(|e| matches!(e, SessionEvent::TurnComplete { .. }));
+    assert!(!running.is_finished() && !cancelling.is_finished() && !ended(&h.events));
+    putting_back.notify_one();
+    running.await.unwrap().unwrap();
+    cancelling.await.unwrap().unwrap();
+    assert!(ended(&h.events), "wrapped: {wrapped}");
+    assert_eq!(h.record.settled.get(), 1);
+}
 local_test!(uncooperative_timeout_is_bounded_and_quarantines_kernel, {
     let h = harness(Some(hang_once()), |o| o.timeout_ms = Some(15));
     h.session.start().await.unwrap();

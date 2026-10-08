@@ -455,6 +455,9 @@ struct LiveTool {
     description: String,
     schema: JsonObject,
 }
+/// Live tools that only read Kumi's own library: they don't wait for Live.
+const AWAY_FROM_LIVE: &[&str] = &["find_sounds"];
+
 #[async_trait(?Send)]
 impl KernelTool for LiveTool {
     fn name(&self) -> &str {
@@ -467,10 +470,18 @@ impl KernelTool for LiveTool {
         self.schema.clone()
     }
     fn stream(&self, signal: Signal, on_start: Rc<dyn Fn()>) -> Option<Box<dyn StreamingCall>> {
-        (self.name == "make_changes").then(|| self.owner.mutations.stream_changes(signal, on_start))
+        // While a stopped answer's call is still putting Live back, changes wait for it in execute: none stream.
+        (self.name == "make_changes" && !self.owner.rendering.is_busy()).then(|| self.owner.mutations.stream_changes(signal, on_start))
     }
     async fn execute(&self, input: JsonObject, signal: Signal) -> Result<ToolResult, RuntimeError> {
         let owner = &self.owner;
+        // One Live tool call at a time, across answers too: a stopped answer's call still putting Live back (taking a
+        // round back, closing a render) finishes before this one starts. Reading Kumi's library, away from Live, needs
+        // no turn (several such calls run together).
+        let _live = match AWAY_FROM_LIVE.contains(&self.name.as_str()) {
+            true => None,
+            false => Some(owner.rendering.hold(&signal).await?),
+        };
         if let Some(kind) = CHANGES.iter().find(|k| k.tool == self.name) {
             let out = owner.mutations.change(kind, input, signal, false).await;
             return Ok(ToolResult { text: out.text, is_error: out.is_error, ..Default::default() });
@@ -730,6 +741,9 @@ impl Integration for Ableton {
     async fn start(&self, signal: Signal) -> Result<(), RuntimeError> {
         self.connection.start(signal).await
     }
+    async fn settled(&self) {
+        self.rendering.settled().await
+    }
     async fn observe(&self, signal: Signal, hints: Option<ObserveHints>) -> Result<Observation, RuntimeError> {
         self.observer.observe(self, signal, hints).await
     }
@@ -773,6 +787,7 @@ impl Integration for Ableton {
         if !self.connection.started.get() || self.connection.closed.get() {
             return Err(KumiError::new(FailureKind::Request, "Kumi isn't connected to Live, so it can't undo.").into());
         }
+        let _live = self.rendering.hold(&signal).await?;
         let outcome = self.history.undo(id.unwrap_or("last"), signal, false).await?;
         outcome.record.ok_or_else(|| KumiError::new(FailureKind::Request, outcome.text).into())
     }
@@ -816,18 +831,21 @@ impl Integration for Ableton {
         true
     }
     async fn audition(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<AuditionResult, String>, RuntimeError> {
+        let _live = self.rendering.hold(&signal).await?;
         self.rendering.audition(request, signal).await
     }
     fn has_goal(&self) -> bool {
         true
     }
     async fn goal(&self, request: &AuditionRequest, signal: Signal) -> Result<Result<Rc<dyn GoalRig>, String>, RuntimeError> {
+        let _live = self.rendering.hold(&signal).await?;
         self.rendering.open_goal(request, signal).await
     }
     fn has_hear(&self) -> bool {
         true
     }
     async fn hear(&self, request: &HearRequest, signal: Signal) -> Result<Result<Vec<HeardTake>, String>, RuntimeError> {
+        let _live = self.rendering.hold(&signal).await?;
         self.rendering.hear_in_set(request, signal).await
     }
 }

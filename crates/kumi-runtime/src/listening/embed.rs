@@ -270,9 +270,9 @@ static GONE: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::
 /// Which style model a slot's choice runs, as recorded with every vector it makes: the model file's SHA-256, Kumi's own
 /// known from its pin (when the slot holds no file, or its file is gone) and a slot's file hashed once. Vectors compare
 /// only with ones the same model made: two models' numbers don't mean the same thing, however alike their length.
-pub async fn style_id(slot: Option<&Path>) -> String {
+pub async fn style_id(slot: Option<&Path>, signal: &Signal) -> String {
     match slot.filter(|file| file.is_file()) {
-        Some(file) => file_id(file).await,
+        Some(file) => file_id(file, signal).await,
         None => own_style_id(),
     }
 }
@@ -282,8 +282,9 @@ pub fn own_style_id() -> String {
     format!("sha256:{}", pinned::CLAP.sha256)
 }
 
-/// A model file's identity, its SHA-256, hashed once for its size and time changed.
-async fn file_id(file: &Path) -> String {
+/// A model file's identity, its SHA-256, hashed once for its size and time changed. A slot's model can be gigabytes:
+/// Esc stops the wait (the file stands for itself then), and the hash goes on to be kept for the next ask.
+async fn file_id(file: &Path, signal: &Signal) -> String {
     type Hashed = std::collections::BTreeMap<(PathBuf, u64, Option<std::time::SystemTime>), String>;
     static HASHED: std::sync::Mutex<Hashed> = std::sync::Mutex::new(std::collections::BTreeMap::new());
     let meta = std::fs::metadata(file).ok();
@@ -292,20 +293,26 @@ async fn file_id(file: &Path) -> String {
         return known;
     }
     let path = file.to_path_buf();
-    let hashed = tokio::task::spawn_blocking(move || -> Option<String> {
-        use sha2::{Digest, Sha256};
-        let mut hash = Sha256::new();
-        std::io::copy(&mut std::io::BufReader::new(std::fs::File::open(&path).ok()?), &mut hash).ok()?;
-        Some(format!("sha256:{}", hex::encode(hash.finalize())))
-    })
-    .await
-    .ok()
-    .flatten();
-    let id = hashed.unwrap_or_else(|| format!("file:{}", file.display()));
-    if let Ok(mut known) = HASHED.lock() {
-        known.insert(key, id.clone());
+    let itself = format!("file:{}", file.display());
+    let fallback = itself.clone();
+    let hashing = tokio::task::spawn_blocking(move || {
+        let hashed = || -> Option<String> {
+            use sha2::{Digest, Sha256};
+            let mut hash = Sha256::new();
+            std::io::copy(&mut std::io::BufReader::new(std::fs::File::open(&path).ok()?), &mut hash).ok()?;
+            Some(format!("sha256:{}", hex::encode(hash.finalize())))
+        };
+        let id = hashed().unwrap_or(fallback);
+        if let Ok(mut known) = HASHED.lock() {
+            known.insert(key, id.clone());
+        }
+        id
+    });
+    tokio::select! {
+        biased;
+        _ = signal.cancelled() => itself,
+        hashed = hashing => hashed.unwrap_or(itself),
     }
-    id
 }
 
 /// What a stretch of a file sounds like to CLAP, by style and vibe: up to six 10 s windows, averaged, unit length, and
@@ -323,7 +330,7 @@ pub async fn vibe(
 ) -> Result<(Vec<f32>, String), String> {
     models::runtime(say, signal).await?;
     let model = clap_model(slot.clone(), say, signal).await?;
-    let id = if slot.as_deref() == Some(model.as_path()) { file_id(&model).await } else { own_style_id() };
+    let id = if slot.as_deref() == Some(model.as_path()) { file_id(&model, signal).await } else { own_style_id() };
     let heard = read_windows(file, (start, seconds), (CLAP_SAMPLES as f64 / CLAP_RATE, MOST_WINDOWS), CLAP_RATE, signal).await?;
     let gain = loudness.filter(|loudness| loudness.is_finite()).map_or(1., |loudness| 10f64.powf((STYLE_LOUDNESS - loudness) / 20.)) as f32;
     // Each window as one channel, its log-mel made off the app's thread.
@@ -420,18 +427,24 @@ pub fn link_path(url: &str) -> PathBuf {
 /// `audio_embeds`.
 pub async fn tells_tones_apart(model: &Path, say: Say<'_>, signal: &Signal) -> Result<String, String> {
     models::runtime(say, signal).await?;
-    let tone = |bright: bool| -> Vec<f32> {
-        let partials = if bright { 40 } else { 1 };
-        (0..(2. * CLAP_RATE) as usize)
-            .map(|n| {
-                let t = n as f64 / CLAP_RATE;
-                (1..=partials).map(|k| (2. * std::f64::consts::PI * 220. * k as f64 * t).sin() / k as f64).sum::<f64>() as f32 * 0.2
-            })
-            .collect()
-    };
+    // Both tones' log-mels, made off the app's thread.
+    let features = tokio::task::spawn_blocking(|| {
+        let tone = |bright: bool| -> Vec<f32> {
+            let partials = if bright { 40 } else { 1 };
+            (0..(2. * CLAP_RATE) as usize)
+                .map(|n| {
+                    let t = n as f64 / CLAP_RATE;
+                    (1..=partials).map(|k| (2. * std::f64::consts::PI * 220. * k as f64 * t).sin() / k as f64).sum::<f64>() as f32 * 0.2
+                })
+                .collect()
+        };
+        [false, true].map(|bright| clap_features(&tone(bright)))
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     let mut heard = vec![];
-    for bright in [false, true] {
-        let input = Tensor { shape: vec![1, 1, CLAP_FRAMES, CLAP_MELS], data: clap_features(&tone(bright)) };
+    for data in features {
+        let input = Tensor { shape: vec![1, 1, CLAP_FRAMES, CLAP_MELS], data };
         let out = models::run(model, vec![("input_features".into(), input)], vec!["audio_embeds".into()])
             .await
             .map_err(|why| format!("it doesn't run as a style model in this slot does (input_features in, audio_embeds out): {why}"))?;

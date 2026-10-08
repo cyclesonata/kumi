@@ -134,7 +134,10 @@ pub async fn fetch(pinned: &Pinned, to: &Path, what: &str, say: Say<'_>, signal:
         return Ok(());
     }
     // One fetch at a time in this Kumi: two that want the same file wait for the first, then find it there.
-    let _turn = FETCHING.lock().await;
+    let _turn = tokio::select! {
+        turn = FETCHING.lock() => turn,
+        _ = signal.cancelled() => return Err("stopped".into()),
+    };
     if to.exists() {
         return Ok(());
     }
@@ -291,7 +294,10 @@ async fn download_at_most(url: &str, path: &Path, most: Option<u64>, signal: &Si
         .read_timeout(std::time::Duration::from_secs(60))
         .build()
         .map_err(|error| error.to_string())?;
-    let mut response = client.get(url).send().await.map_err(|error| error.to_string())?;
+    let mut response = tokio::select! {
+        sent = client.get(url).send() => sent.map_err(|error| error.to_string())?,
+        _ = signal.cancelled() => return Err("stopped".into()),
+    };
     if !response.status().is_success() {
         return Err(format!("{} answered {}", url, response.status()));
     }
@@ -329,7 +335,10 @@ pub async fn runtime(say: Say<'_>, signal: &Signal) -> Result<(), String> {
     let path = folder.join(library);
     if !path.exists() {
         // One setup at a time in this Kumi: a second waits, then finds the library there.
-        let _turn = PREPARING.lock().await;
+        let _turn = tokio::select! {
+            turn = PREPARING.lock() => turn,
+            _ = signal.cancelled() => return Err("stopped".into()),
+        };
         if !path.exists() {
             let download = dir().join(archive.name);
             fetch(&archive, &download, "its model runtime, ONNX Runtime", say, signal).await?;
@@ -338,28 +347,40 @@ pub async fn runtime(say: Say<'_>, signal: &Signal) -> Result<(), String> {
             unpacked?;
         }
     }
-    LOADED
-        .get_or_init(|| match ort::init_from(&path) {
-            Ok(environment) => {
-                // The runtime's own log stays out of the terminal (and the app on it), unless KUMI_TIMING asks for it.
-                let log: ort::logging::LoggerFunction = std::sync::Arc::new(|level, category, _, _, message| {
-                    if std::env::var("KUMI_TIMING").is_ok_and(|set| !set.is_empty()) {
-                        eprintln!("[onnxruntime {level:?}] {category}: {message}");
+    // Loading the library is done off the app's thread.
+    tokio::task::spawn_blocking(move || {
+        LOADED
+            .get_or_init(|| match ort::init_from(&path) {
+                Ok(environment) => {
+                    // The runtime's own log stays out of the terminal (and the app on it), unless KUMI_TIMING asks for it.
+                    let log: ort::logging::LoggerFunction = std::sync::Arc::new(|level, category, _, _, message| {
+                        if std::env::var("KUMI_TIMING").is_ok_and(|set| !set.is_empty()) {
+                            eprintln!("[onnxruntime {level:?}] {category}: {message}");
+                        }
+                    });
+                    // Nothing about Kumi's model runs leaves the computer: ONNX Runtime's own telemetry is off.
+                    environment.with_logger(log).with_telemetry(false).commit();
+                    if let Ok(environment) = ort::environment::Environment::current() {
+                        environment.set_log_level(ort::logging::LogLevel::Warning);
                     }
-                });
-                // Nothing about Kumi's model runs leaves the computer: ONNX Runtime's own telemetry is off.
-                environment.with_logger(log).with_telemetry(false).commit();
-                if let Ok(environment) = ort::environment::Environment::current() {
-                    environment.set_log_level(ort::logging::LogLevel::Warning);
+                    Ok(())
                 }
-                Ok(())
-            }
-            Err(error) => Err(format!("Kumi couldn't load its model runtime: {error}")),
-        })
-        .clone()
+                Err(error) => Err(format!("Kumi couldn't load its model runtime: {error}")),
+            })
+            .clone()
+    })
+    .await
+    .map_err(|error| format!("Kumi couldn't load its model runtime: {error}"))?
 }
 
 static PREPARING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// tar run with a time limit, and stopped if it's dropped: a stuck one doesn't hold the setup forever.
+async fn tar(command: &mut tokio::process::Command) -> std::io::Result<std::process::Output> {
+    tokio::time::timeout(std::time::Duration::from_secs(120), command.kill_on_drop(true).output())
+        .await
+        .map_err(|_| std::io::Error::other("it took over two minutes"))?
+}
 
 /// The library out of the runtime's archive, into `folder` (tar reads the zips too; Windows has had it since 2018).
 /// Only the library is unpacked: Windows' archive also holds a 380 MB debug file.
@@ -369,10 +390,7 @@ async fn unpack(archive: &Path, folder: &Path, library: &str) -> Result<(), Stri
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).map_err(|error| error.to_string())?;
     let result = async {
-        let listed = tokio::process::Command::new("tar")
-            .arg("-tf")
-            .arg(archive)
-            .output()
+        let listed = tar(tokio::process::Command::new("tar").arg("-tf").arg(archive))
             .await
             .map_err(|error| format!("Kumi couldn't read its model runtime's archive: {error}"))?;
         let member = String::from_utf8_lossy(&listed.stdout)
@@ -381,13 +399,7 @@ async fn unpack(archive: &Path, folder: &Path, library: &str) -> Result<(), Stri
             .find(|member| member.rsplit(['/', '\\']).next() == Some(library))
             .map(str::to_string)
             .ok_or("Kumi's model runtime wasn't where its archive should have it.")?;
-        let output = tokio::process::Command::new("tar")
-            .arg("-xf")
-            .arg(archive)
-            .arg("-C")
-            .arg(&scratch)
-            .arg(&member)
-            .output()
+        let output = tar(tokio::process::Command::new("tar").arg("-xf").arg(archive).arg("-C").arg(&scratch).arg(&member))
             .await
             .map_err(|error| format!("Kumi couldn't unpack its model runtime: {error}"))?;
         if !output.status.success() {
