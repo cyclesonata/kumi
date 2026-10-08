@@ -1,7 +1,7 @@
 //! The listening loop's ears and judge on synthetic sound: what they measure, what they find and where, and how a
 //! checklist decides whether a change stays.
 use kumi_runtime::listening::{
-    checklist::{Change, Checklist, Goal, Profile, Quantity, Target},
+    checklist::{main_chain, masking_unfair, Change, Checklist, Goal, MainDevice, MainState, Profile, Quantity, Target},
     detect::{self, ProblemKind},
     measure::{measure_samples, Heard},
 };
@@ -192,6 +192,105 @@ fn masking_is_a_target_to_mask_ratio_against_the_rest() {
     assert!(down > up, "{down}% buried 6 dB down, {up}% 6 dB up");
 }
 
+/// Live 12.4's Utility as Live showed it (the change eval's fixture): each parameter's name and its text now.
+fn live_utility() -> Vec<(String, String)> {
+    let devices: serde_json::Value =
+        serde_json::from_str(include_str!("../../kumi/examples/fixtures/eval_changes/live-devices.json")).unwrap();
+    // [name, min, max, stepped, steps, Live's text at 0, 25, 50, 75 and 100% of the range, a value]
+    devices["Utility"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| {
+            let (min, max, value) = (row[1].as_f64().unwrap(), row[2].as_f64().unwrap(), row[6].as_f64().unwrap());
+            let shown = match row[4].as_array() {
+                Some(steps) => &steps[(value - min).round() as usize],
+                None => &row[5][((value - min) / (max - min) * 4.).round() as usize],
+            };
+            (row[0].as_str().unwrap().to_string(), shown.as_str().unwrap().to_string())
+        })
+        .collect()
+}
+
+#[test]
+fn masking_is_read_only_while_mains_chain_is_transparent() {
+    let device = |name: &str, class: &str, on: bool, parameters: Vec<(String, String)>| MainDevice {
+        name: name.into(),
+        class: class.into(),
+        on,
+        parameters,
+    };
+    // A Limiter on Main from the start: masking is left off, and the note says what to do instead.
+    let limited = main_chain(&[device("Limiter", "Limiter", true, vec![])]);
+    assert_eq!(limited.unfair, ["Limiter"]);
+    let note = masking_unfair("Vocal", &limited.unfair).expect("masking left off");
+    assert!(note.contains("(Limiter)") && note.contains("Main's devices switched off") && note.contains("#289"), "{note}");
+    // Spectrum, Tuner, Kumi's Ears and a Limiter switched off leave it on, at no gain.
+    let clear = main_chain(&[
+        device("Spectrum", "SpectrumAnalyzer", true, vec![]),
+        device("Tuner", "Tuner", true, vec![]),
+        device("Kumi Ears", "MxDeviceAudioEffect", true, vec![]),
+        device("Limiter", "Limiter", false, vec![]),
+    ]);
+    assert_eq!(clear, MainState::default());
+    assert_eq!(masking_unfair("Vocal", &clear.unfair), None);
+    // Live 12.4's Utility, one knob set: a Utility that only turns the level is a gain the focus is heard with too.
+    let utility = |set: &[(&str, &str)]| {
+        let mut parameters = live_utility();
+        for (name, shown) in set {
+            match parameters.iter_mut().find(|(named, _)| named == name) {
+                Some(parameter) => parameter.1 = shown.to_string(),
+                None => parameters.push((name.to_string(), shown.to_string())),
+            }
+        }
+        device("Utility", "StereoGain", true, parameters)
+    };
+    assert_eq!(main_chain(&[utility(&[])]), MainState::default());
+    // Read as Live has it at each listen: a kept +4 dB rebalance, then the producer's undo back to 0 dB.
+    assert_eq!(main_chain(&[utility(&[("Output", "4.00 dB")])]), MainState { unfair: vec![], gain: 4. });
+    assert_eq!(main_chain(&[utility(&[("Output", "0.00 dB")])]).gain, 0.);
+    assert_eq!(main_chain(&[utility(&[("Output", "4.00 dB")]), utility(&[("Output", "-1.50 dB")])]).gain, 2.5);
+    // Anything else a Utility does moves the mix and not the focus, and so does anything Kumi can't read: a knob it
+    // doesn't know, text it can't read, or no gain.
+    for set in [
+        ("Mono", "On"),
+        ("Mid/Side Balance", "50M"),
+        ("Channel Mode", "Left"),
+        ("Balance", "25L"),
+        ("Output", "-inf dB"),
+        ("Left Inv", "On"),
+        ("Mute", "On"),
+        ("Device On", "Off"),
+        ("Width Mode", "Stereo"),
+        ("Output", "loud"),
+    ] {
+        assert_eq!(main_chain(&[utility(&[set])]).unfair, ["Utility"], "{set:?}");
+    }
+    let mut gainless = utility(&[]);
+    gainless.parameters.retain(|(name, _)| name != "Output");
+    assert_eq!(main_chain(&[gainless]).unfair, ["Utility"]);
+    // An older Utility's Gain and Stereo Width.
+    let older =
+        |width: &str| device("Utility", "StereoGain", true, vec![("Gain".into(), "-3.0 dB".into()), ("Stereo Width".into(), width.into())]);
+    assert_eq!(main_chain(&[older("100.0 %")]).gain, -3.);
+    assert_eq!(main_chain(&[older("50.0 %")]).unfair, ["Utility"]);
+}
+
+#[test]
+fn masking_heard_through_mains_gain_reads_true_once_the_focus_gets_that_gain_too() {
+    // The vocal plays over quiet noise: it isn't buried.
+    let vocal = sine(6., 2000., 0.05);
+    let rest = pink(6., -50., 12);
+    let mix = mixed(&[&vocal, &rest]);
+    let truth = detect::masking_share(&heard(&vocal, &vocal), &heard(&mix, &mix)).unwrap();
+    // 8 dB on Main: the mix comes out 8 dB up, and the vocal is heard before Main.
+    let up: Vec<f64> = mix.iter().map(|sample| sample * 10f64.powf(8. / 20.)).collect();
+    let skewed = detect::masking_share(&heard(&vocal, &vocal), &heard(&up, &up)).unwrap();
+    let fair = detect::masking_share(&heard(&vocal, &vocal).gained(8.), &heard(&up, &up)).unwrap();
+    assert!(skewed - truth > 50., "{truth}% buried read {skewed}% through 8 dB on Main");
+    assert!((fair - truth).abs() <= 2., "{truth}% buried read {fair}% with the focus given Main's 8 dB");
+}
+
 #[test]
 fn a_change_stays_only_when_its_target_improves_and_nothing_else_gets_audibly_worse() {
     let noise = pink(6., -18., 8);
@@ -229,6 +328,13 @@ fn a_change_stays_only_when_its_target_improves_and_nothing_else_gets_audibly_wo
     assert!(!checklist.verdict(Some(loudness), &before, &before).kept);
     // After a kept change that left loudness off target, rebalancing brings it back.
     assert_eq!(checklist.rebalance(&before, &louder), Some(round1(-10. - louder[loudness].unwrap())));
+    // With no loudness asked for (peaks only), it's held where the first listen heard it: quieter isn't a fix.
+    let peaks = Checklist::new(&Goal { true_peak: Some(-1.), problems: false, ..Default::default() }, &first, &[]);
+    let held = peaks.items.iter().position(|item| item.quantity == Quantity::Integrated).expect("loudness held");
+    assert!(matches!(peaks.items[held].target, Target::Kept { .. }), "{:?}", peaks.items[held]);
+    let mut quieter = peaks.read(&first, None);
+    quieter[held] = quieter[held].map(|v| v - 2.);
+    assert_eq!(peaks.rebalance(&peaks.read(&first, None), &quieter), Some(2.));
 }
 
 fn round1(value: f64) -> f64 {

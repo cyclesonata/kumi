@@ -77,8 +77,8 @@ pub struct Applied {
     /// removed in its place if Live won't undo it. Not kept past this Live connection: identities aren't either.
     #[serde(skip)]
     pub created: Option<String>,
-    /// The tool that made the change: whether it can change what's heard (a rename, a scale, the transport or an empty
-    /// track can't). Not kept past this Kumi: a change read back from disk goes by its family.
+    /// The tool that made the change: whether it can change what's heard (a rename, the transport or an empty track
+    /// can't). Not kept past this Kumi: a change read back from disk goes by its family.
     #[serde(skip)]
     pub tool: Option<String>,
     /// The clip a note edit changed, by its long ref: a groove round takes back its own clip's edits only. Not kept
@@ -107,18 +107,10 @@ impl Applied {
         }
     }
     /// Whether the change can change what's heard: not one that only names, colours or marks things, sets the
-    /// scale or the transport, or adds empty tracks and scenes (or captures one).
+    /// transport, or adds empty tracks and scenes (or captures one). The scale can: tunings and devices follow it.
     pub fn audible(&self) -> bool {
-        const SILENT: [&str; 8] = [
-            "rename",
-            "set_track_color",
-            "set_locators",
-            "delete_locator",
-            "set_scale",
-            "set_transport",
-            "add_tracks_and_scenes",
-            "capture_scene",
-        ];
+        const SILENT: [&str; 7] =
+            ["rename", "set_track_color", "set_locators", "delete_locator", "set_transport", "add_tracks_and_scenes", "capture_scene"];
         match &self.tool {
             Some(tool) => !SILENT.contains(&tool.as_str()),
             None => !matches!(self.record.family, ChangeFamily::Rename | ChangeFamily::Color | ChangeFamily::Locators),
@@ -174,6 +166,9 @@ pub struct History {
     on_change: Option<Rc<dyn Fn(ChangeRecord)>>,
     /// What else follows a restructure Kumi's undo takes back (what the turns showed of the Set's devices).
     pub on_shift: RefCell<Option<OnShift>>,
+    /// What changed Live outside HISTORY, oldest first (Python run in Live, a command, Live's own undo): nothing a
+    /// judged round can take back.
+    pub outside: RefCell<Vec<&'static str>>,
 }
 /// Told where a restructure Kumi's undo took back moved the Set's tracks and scenes, or None when it can't be known.
 pub type OnShift = Rc<dyn Fn(Option<&Shift>)>;
@@ -203,7 +198,18 @@ impl History {
             changes_this_turn: Cell::new(0),
             quiet: RefCell::new(None),
             on_shift: RefCell::new(None),
+            outside: RefCell::new(vec![]),
         }
+    }
+    /// What changed Live outside HISTORY since `mark` (a count of `outside`), each said once.
+    pub fn outside_since(&self, mark: usize) -> Vec<&'static str> {
+        let mut said = vec![];
+        for what in self.outside.borrow().iter().skip(mark) {
+            if !said.contains(what) {
+                said.push(*what);
+            }
+        }
+        said
     }
     /// A restructure this change made, which its undo moves the refs that followed it back from.
     pub fn restructured(&self, id: &str, shift: &Shift) {

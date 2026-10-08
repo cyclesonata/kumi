@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use kumi_runtime::listening::{
     checklist::{Change, Checklist, Goal, Item, Quantity, Role, Target},
     detect,
-    judging::{decide, matched, predict, processing, rebalance, removable, take_back, Listen, Placed, RoundHost, Unheard},
+    judging::{decide, matched, predict, processing, rebalance, removable, renamed, take_back, Listen, Placed, RoundHost, Unheard},
     listener::{Choice, Opinion},
     measure::{measure_samples, Heard},
 };
@@ -214,6 +214,8 @@ struct Entry {
     turned: f64,
     /// Live's identity for the device it made.
     created: Option<String>,
+    /// It can change what's heard (a rename can't).
+    audible: bool,
 }
 
 /// Live as far as a round can tell: a gain stage, HISTORY, a chain, and what the excerpt reads at each gain.
@@ -228,6 +230,8 @@ struct Pretend {
     stuck_gain: Option<String>,
     /// Kumi's undo of a rebalance step fails.
     stuck_rebalance: bool,
+    /// What changed Live outside HISTORY since the round began (Python run in Live, say).
+    outside: Option<String>,
     sound: Box<dyn Fn(f64) -> Vec<Option<f64>>>,
 }
 
@@ -241,6 +245,7 @@ impl Pretend {
             unheard: Cell::new(0),
             stuck_gain: None,
             stuck_rebalance: false,
+            outside: None,
             sound: Box::new(sound),
         }
     }
@@ -251,7 +256,20 @@ impl Pretend {
     fn made_one(&self, title: &str, undoable: bool, created: Option<&str>) {
         let id = format!("c{}", self.history.borrow().len() + 1);
         let created = created.map(str::to_owned);
-        self.history.borrow_mut().push(Entry { id, title: title.into(), applied: true, undoable, turned: 0., created });
+        self.history.borrow_mut().push(Entry { id, title: title.into(), applied: true, undoable, turned: 0., created, audible: true });
+    }
+    /// A change that can't change what's heard (a rename).
+    fn silent(&self, title: &str) {
+        let id = format!("c{}", self.history.borrow().len() + 1);
+        self.history.borrow_mut().push(Entry {
+            id,
+            title: title.into(),
+            applied: true,
+            undoable: true,
+            turned: 0.,
+            created: None,
+            audible: false,
+        });
     }
     fn listen(&self) -> Listen {
         let values = (self.sound)(self.gain.get());
@@ -278,6 +296,7 @@ impl RoundHost for Pretend {
             undoable,
             turned: gain,
             created: None,
+            audible: true,
         });
         self.gain.set(self.gain.get() + gain);
         Ok("Utility gain".into())
@@ -299,6 +318,12 @@ impl RoundHost for Pretend {
             .filter(|entry| entry.applied && !mark.contains(&entry.id))
             .map(|entry| (entry.id.clone(), entry.title.clone()))
             .collect()
+    }
+    fn audible(&self, id: &str) -> bool {
+        self.history.borrow().iter().find(|entry| entry.id == id).is_none_or(|entry| entry.audible)
+    }
+    fn outside(&self) -> Option<String> {
+        self.outside.clone()
     }
     async fn undo(&self, id: &str) -> Result<(), String> {
         let mut history = self.history.borrow_mut();
@@ -328,6 +353,21 @@ impl RoundHost for Pretend {
         self.deleted.borrow_mut().push(reference.into());
         true
     }
+}
+
+#[test]
+fn a_round_on_another_item_brings_loudness_back_where_it_was_not_to_its_target() {
+    let checklist = checklist();
+    // 3 dB under the loudness wanted; a brightness change takes 1 dB more.
+    let before = vec![Some(-17.), Some(-3.), Some(-1.), Some(0.)];
+    let after = vec![Some(-18.), Some(-4.), Some(-0.2), Some(0.)];
+    // Back where it was, not up to −14: a louder rebalance would squeeze punch for a change that didn't ask for it.
+    assert_eq!(checklist.rebalance_round(&before, &after, Some(BRIGHTNESS)), Some(1.));
+    assert_eq!(checklist.rebalance_round(&before, &after, None), Some(1.));
+    // A round on loudness itself goes to its target.
+    assert_eq!(checklist.rebalance_round(&before, &after, Some(LOUDNESS)), Some(4.));
+    // Within half a dB of where it was: left alone.
+    assert_eq!(checklist.rebalance_round(&before, &[Some(-17.3), Some(-3.), Some(-0.5), Some(0.)], Some(BRIGHTNESS)), None);
 }
 
 #[tokio::test]
@@ -431,10 +471,39 @@ async fn a_device_live_wont_undo_goes_only_when_its_one_the_round_made() {
     assert!(taken.said.ends_with("undo it yourself") && taken.stayed && live.deleted.borrow().is_empty(), "{taken:?}");
     // A device Live doesn't say the identity of is never one.
     assert!(removable(&[device("", "Compressor")], &["".to_string()]).is_empty());
-    // Nothing applied: nothing to take back.
+    // A round takes back only what could change what's heard: a rename (the producer's, asked mid-loop) stays.
+    let live = Pretend::new(|_| vec![]);
+    live.change("EQ Eight · 3 Gain A 0 → −3 dB", true);
+    live.silent("Renamed Guitar → Gtr");
+    let taken = take_back(&live, &[]).await;
+    assert_eq!(taken.said, "taken back: EQ Eight · 3 Gain A 0 → −3 dB");
+    assert!(live.history.borrow().iter().any(|entry| entry.title.starts_with("Renamed") && entry.applied));
+    // Nothing applied: nothing to take back, and whatever changed the sound another way stays, so the run hears its
+    // bars again.
     let live = Pretend::new(|_| vec![]);
     let taken = take_back(&live, &[]).await;
-    assert!(taken.said.starts_with("nothing in HISTORY") && !taken.stayed);
+    assert!(taken.said.starts_with("nothing in HISTORY") && taken.stayed);
+    // Python run in Live beside a change in HISTORY: the change goes, and what Python did is said to stay.
+    let mut live = Pretend::new(|_| vec![]);
+    live.outside = Some("Python run in Live".into());
+    live.change("EQ Eight · 3 Gain A 0 → −3 dB", true);
+    let taken = take_back(&live, &[]).await;
+    assert!(taken.said.starts_with("taken back: EQ Eight") && taken.stayed, "{taken:?}");
+    assert!(
+        taken.said.ends_with("whatever Python run in Live changed isn't in HISTORY, so it stays (change it back yourself if it should go)"),
+        "{taken:?}"
+    );
+    // With nothing in HISTORY, it says which.
+    let mut live = Pretend::new(|_| vec![]);
+    live.outside = Some("a command of Live's menus".into());
+    let taken = take_back(&live, &[]).await;
+    assert_eq!(
+        (taken.said.as_str(), taken.stayed),
+        (
+            "nothing in HISTORY to take back; whatever a command of Live's menus changed isn't in HISTORY, so it stays (change it back yourself if it should go)",
+            true
+        )
+    );
 }
 
 #[tokio::test]
@@ -470,6 +539,21 @@ async fn a_round_whose_loudness_cant_be_matched_isnt_kept() {
     let (excerpt, predicted, gain, verdict) = judged(&live);
     let settled = rebalance(&live, &checklist, Some(PEAK), &whole, predicted, excerpt, gain, verdict).await;
     assert!(!settled.verdict.kept && settled.verdict.why.contains("Live wouldn't take it back"), "{:?}", settled.verdict);
+    // A knob at its end (a maximizer's Threshold near 0 dB): the step asked for 2 dB and loudness moved a tenth of it.
+    let live = Pretend::new(|gain| vec![Some(-12. + 0.1 * gain), Some(-3. + 0.1 * gain), Some(-1.), Some(0.)]);
+    live.change("Loaded Limiter on Main", true);
+    let (excerpt, predicted, gain, verdict) = judged(&live);
+    let settled = rebalance(&live, &checklist, Some(PEAK), &whole, predicted, excerpt, gain, verdict).await;
+    assert_eq!(settled.listens, 1);
+    assert!(
+        !settled.verdict.kept
+            && settled
+                .verdict
+                .why
+                .contains("its loudness couldn't be matched (it's 1.8 dB louder: Utility gain -2 dB moved loudness -0.2 dB)"),
+        "{:?}",
+        settled.verdict
+    );
 }
 
 #[test]
@@ -544,4 +628,68 @@ async fn a_round_is_decided_whole_kept_and_rebalanced_or_taken_back() {
     let edge = vec![Some(-14.), Some(-0.8), Some(-1.), Some(0.)];
     let decided = decide(&live, &checklist, Some(PEAK), &edge, &edge, after, None, 3, &[]).await;
     assert!(!decided.verdict.kept && decided.verdict.why.contains("less than the processing costs"), "{:?}", decided.verdict);
+}
+
+#[test]
+fn a_run_follows_its_own_tracks_renames_not_a_namesakes() {
+    let renames = |rows: &[(&str, &str, &str)]| {
+        rows.iter().map(|(at, from, to)| (at.to_string(), from.to_string(), to.to_string())).collect::<Vec<_>>()
+    };
+    // Two tracks called Vocal; the run's is the second. Kumi renaming the first doesn't move the run onto it.
+    assert_eq!(renamed("Vocal", Some("1:track:5"), &renames(&[("1:track:3", "Vocal", "Vocal 2")])), "Vocal");
+    // Its own, renamed twice: the newest name.
+    let both = renames(&[("1:track:5", "Vocal", "Lead"), ("1:track:3", "Vocal", "Vocal 2"), ("1:track:5", "Lead", "Lead Vox")]);
+    assert_eq!(renamed("Vocal", Some("1:track:5"), &both), "Lead Vox");
+    // Refs are places: another track that came to the run's place since, renamed, isn't followed.
+    assert_eq!(renamed("Vocal", Some("1:track:5"), &renames(&[("1:track:5", "Keys", "Pad")])), "Vocal");
+    // A rename taken back isn't applied, so it isn't listed: the name it had. Without the run's ref, nothing is followed.
+    assert_eq!(renamed("Vocal", Some("1:track:5"), &[]), "Vocal");
+    assert_eq!(renamed("Vocal", None, &renames(&[("1:track:5", "Vocal", "Lead")])), "Vocal");
+}
+
+#[test]
+fn rebalancing_turns_a_limiters_input_and_a_utilitys_output() {
+    use kumi_runtime::integrations::ableton::rendering::gain_parameter;
+    // A Limiter whose parameters list Output before Input Gain: its Output comes after the ceiling, so it isn't the one.
+    let limiter = ["Device On", "Output", "Ceiling", "Release", "Input Gain", "Maximize On", "Threshold"];
+    assert_eq!(gain_parameter(true, false, &limiter), Some("Input Gain"));
+    assert_eq!(gain_parameter(true, true, &limiter), Some("Threshold"));
+    assert_eq!(gain_parameter(true, false, &["Gain", "Ceiling"]), Some("Gain"));
+    // A Utility's level is its Output (an older Live's Gain).
+    assert_eq!(gain_parameter(false, false, &["Device On", "Mid/Side Balance", "Balance", "Output", "Mute"]), Some("Output"));
+    assert_eq!(gain_parameter(false, false, &["Gain", "Stereo Width"]), Some("Gain"));
+    assert_eq!(gain_parameter(false, false, &["Width"]), None);
+}
+
+#[test]
+fn rebalancing_turns_only_a_device_thats_on() {
+    use kumi_runtime::integrations::ableton::rendering::gain_device;
+    let row = |name: &str, on: bool| {
+        serde_json::json!({"ref": name, "name": name, "className": name, "enabled": on}).as_object().unwrap().clone()
+    };
+    let picked =
+        |rows: &[serde_json::Map<String, serde_json::Value>]| gain_device(rows).map(|(row, limited)| (row["ref"].clone(), limited));
+    // A Limiter switched off on Main turns nothing: a Utility goes at the end (none here), and peaks aren't held.
+    assert_eq!(picked(&[row("EQ Eight", true), row("Limiter", false)]), None);
+    // A Utility on before it is the last device on: it's turned.
+    assert_eq!(picked(&[row("Utility", true), row("Limiter", false)]), Some((serde_json::json!("Utility"), false)));
+    // A Limiter that's on holds the peaks, whatever's off after it.
+    assert_eq!(picked(&[row("Limiter", true), row("Utility", false)]), Some((serde_json::json!("Limiter"), true)));
+    // A Utility that's off isn't one either.
+    assert_eq!(picked(&[row("Utility", false)]), None);
+}
+
+#[test]
+fn an_explicit_target_that_couldnt_be_met_is_refused_or_read_as_its_point() {
+    use kumi_runtime::integrations::ableton::judge_tool::judge_request;
+    let request = |target: serde_json::Value| {
+        let input = serde_json::json!({ "goal": { "targets": [target] } });
+        judge_request(input.as_object().unwrap())
+    };
+    // A tolerance of nothing: no reading would ever be within it.
+    let refused = request(serde_json::json!({ "measure": "decay_time", "value": 1.8, "within": 0 }));
+    assert!(refused.as_ref().is_err_and(|why| why.contains("above 0")), "{refused:?}");
+    // A range of one point is that value, within a noticeable step.
+    let point = request(serde_json::json!({ "measure": "decay_time", "at_least": 1.8, "at_most": 1.8 })).unwrap();
+    assert_eq!(point.goal.unwrap().targets[0].target, Target::Exactly { value: 1.8, within: 0.1 });
 }
