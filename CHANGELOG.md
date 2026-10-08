@@ -3,6 +3,49 @@
 Kumi's releases. The Ableton bridge (`crates/ableton-mcp-server`) is versioned on its own;
 each Kumi release names the bridge it ships with.
 
+## 1.11.0 — 2026-10-08
+
+Ships with bridge 1.0.90, which Live loads when it restarts. After updating, Kumi offers to quit Live
+(it asks to save first) and opens it again with the new bridge; or run `kumi bridge` with Live closed.
+
+- Quiet listens no longer come back empty at 128 BPM and other round tempos, and Kumi can listen to a
+  whole song in one go (#252).
+- Kumi judges its own mix and master changes: before and after at the same loudness, kept only if
+  nothing else got worse, each round shown with its numbers.
+- With a Gemini or OpenAI API key, a listening model also hears 10 s of each change, before and after;
+  a run's first round says which model, and `/slots listening off` stops it.
+- `/loop` works in judged rounds until a goal is met. The sound-match search `/goal` ran is now
+  `/loop` with a sound to match, and `/loop` alone picks a paused one up.
+- `/goal` is now a goal mode: it keeps at one goal across turns, checked after each, with a budget,
+  pause and resume, kept across restarts.
+- `tune` picks a change's numbers itself (an EQ calculated from what was measured, a knob homed in on,
+  a few of a track's knobs searched side by side), so a mix or master reaches its targets in fewer
+  listens.
+- A reference can be a file, a folder, a YouTube or Spotify link, or an artist, album or genre in
+  words: Kumi measures example tracks once and keeps the profile.
+- `groove` shapes a part's feel toward a reference's on the notes (timing, swing, accents, and fills
+  over 8 bars or more) from a MIDI clip or a record's drums; from a pitched part in an audio file, its
+  timing and swing.
+- `form` lays out a song bar by bar (its energy, sections, turns and what plays where) and compares it
+  with a reference song.
+- `sound` measures sounds side by side: each one, a kit as one, how parts duck and interlock, and a
+  bass line's notes against a key.
+- Kumi reads effects off what it hears (reverb decay, echoes, swings, sweeps, pumping, the tail's
+  share) and works a sound or an effect toward a reference's.
+- `tune` can probe a knob on a track across its range in one pass, and homing a knob starts from what
+  it was heard to do there before.
+- A reference's style is heard by a learned model (LAION-CLAP), and a sound goal's effects by another
+  (AFx-Rep): they're fetched the first time they're needed, and a change that drifts from them is
+  taken back.
+- `tune` turns knobs by role (a limiter's gain, a ceiling, an EQ band…) on Live's own devices and on
+  mapped plug-ins, checked against the names Live lists, and falls back to another device on the track
+  when one can't.
+- `/slots` shows which model does each listening job, swaps the listening or embeddings model in plain
+  words after a quick test, and takes it back.
+
+Tested with Live 12.4 on macOS. On Windows, installing and updating are tested; using Kumi with Live
+there is still new.
+
 ## 1.10.1 — 2026-10-07
 
 Ships with bridge 1.0.89, as 1.10.0 did.
