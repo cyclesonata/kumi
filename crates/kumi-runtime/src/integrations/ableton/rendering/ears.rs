@@ -179,14 +179,20 @@ impl Rendering {
         })
     }
     pub(super) async fn place_tap(&self, link: Rc<dyn EarsLink>, track: &str, signal: Signal) -> Result<Tap, TapError> {
+        self.place_tap_besides(link, track, &[], signal).await
+    }
+    /// `place_tap`, never taking one of `placed` (the rig's own taps on the same track, loaded moments before) for it.
+    async fn place_tap_besides(&self, link: Rc<dyn EarsLink>, track: &str, placed: &[f64], signal: Signal) -> Result<Tap, TapError> {
         let location = self.lom_track_path(track, signal.clone()).await?;
         let before: Vec<_> = link.taps().iter().map(|tap| tap.id).collect();
+        let placed = placed.to_vec();
         let loading = now_ms();
         self.step("load_device", json!({"itemId":EARS_ITEM,"trackRef":track}), signal.clone()).await?;
         let tap = link
             .wait_for(
                 Rc::new(move |candidate| {
                     candidate.loaded_at.map_or_else(|| !before.contains(&candidate.id), |loaded| loaded >= loading as f64 - 1000.)
+                        && !placed.contains(&candidate.id)
                         && candidate.path.starts_with(&format!("{location} devices "))
                 }),
                 6000,
@@ -219,14 +225,19 @@ impl Rendering {
         let mut identity = None;
         let placed: Result<Tap, RuntimeError> = async {
             let (main, _) = self.main_volume(signal.clone()).await?;
-            let link = rig.ears.as_ref().unwrap().link.clone();
-            let tap = self.place_tap(link, &main, signal.clone()).await.map_err(|error| error.error)?;
-            // Its device, where the tap says it is (Live puts a loaded device last).
-            let rows = self.rows("device", json!({"parent":main,"fields":["objectIdentity"]}), signal.clone()).await?;
-            let at = tap.path.rsplit(' ').next().and_then(|index| index.parse::<usize>().ok()).filter(|at| *at < rows.len());
-            let device =
-                at.map(|at| &rows[at]).or(rows.last()).ok_or_else(|| observation("Kumi's listening device didn't appear on Main."))?;
-            identity = Some(object_identity(device)).filter(|identity| !identity.is_empty());
+            let read = |signal: Signal| self.rows("device", json!({"parent":main,"fields":["objectIdentity"]}), signal);
+            let had: Vec<String> = read(signal.clone()).await?.iter().map(object_identity).collect();
+            let ears = rig.ears.as_ref().unwrap();
+            let placed: Vec<f64> = ears.taps.values().map(|tap| tap.id).collect();
+            let tap = self.place_tap_besides(ears.link.clone(), &main, &placed, signal.clone()).await.map_err(|error| error.error)?;
+            // Its device: the one on Main that wasn't there before (Live puts a loaded device last).
+            let rows = read(signal.clone()).await?;
+            let new: Vec<&JsonObject> =
+                rows.iter().filter(|row| !object_identity(row).is_empty() && !had.contains(&object_identity(row))).collect();
+            let [device] = new.as_slice() else {
+                return Err(observation("Kumi couldn't tell which device on Main is its listening device."));
+            };
+            identity = Some(object_identity(device));
             let reference = device.get("ref").and_then(Value::as_str).ok_or_else(|| observation("A device without a ref."))?;
             self.step("move_device", json!({"deviceRef":reference,"index":0}), signal.clone()).await?;
             Ok(tap)
