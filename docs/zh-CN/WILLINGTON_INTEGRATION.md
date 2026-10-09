@@ -152,7 +152,7 @@ Willington 有用于以下操作的原生方法，但在能够安全撤销之前
 
 安装并验证适用于 **Live 12.4.15b5 或 b6 macOS ARM64** 的 `WillingtonEditing` 后，Kumi 提供分组创建、编曲自动化、场景/全局 Follow Actions 和逐音符 MPE。其他构建、Intel macOS 和 Windows 不支持此组件。仅当仅所有者可访问的 `self-test.json` 与已安装库匹配时，`/willington` 才请求编辑；提供器还会核对 Live 实际选择的库。凭据缺失或过期时编辑保持关闭。更新会保留凭据，但库发生变化后需要重新测试。
 
-Live 12.4.15b6 ARM64 需要 Willington 提交 `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a`，或保留该配置的后续捆绑包。仍携带旧包的 Kumi 版本需要更新捆绑包才能支持 b6；请检查 `willington/release.json`。[CI 捆绑包验证记录](../evidence/willington-b6-import.json)涵盖自动加载、禁用写入时的拒绝以及 Kumi 原生编辑测试。本地自测凭据仍须匹配所选库的哈希。
+Live 12.4.15b6 ARM64 需要 Willington 提交 `03b6efccd1c72ef816ae5be6f28ad33115ef3e9a`，或保留该配置的后续捆绑包。仍携带旧包的 Kumi 版本需要更新捆绑包才能支持 b6；请检查 `willington/WillingtonRuntime/matrix.json` 中是否有 `live-12.4.15b6-arm64` 条目，且包含 `status: "validated"` 和所需组件。`willington/release.json` 标明捆绑包的提交。[CI 捆绑包验证记录](../evidence/willington-b6-import.json)涵盖自动加载、禁用写入时的拒绝以及 Kumi 原生编辑测试。本地自测凭据仍须匹配所选库的哈希。
 
 `group_tracks`, `set_scene_follow_actions`, `set_global_follow_actions`, `set_note_expression`, `edit_arrangement_automation` → `live_native_editing_preview/apply`.
 
